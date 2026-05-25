@@ -196,12 +196,13 @@ world.vxw/
 偏移   类型         字段                       说明
 0      char[4]      magic = "CHNK"             文件魔数
 4      uint16       format_version             目前固定 = 0x0100
-6      uint16       compression                0=raw, 1=lz4, 2=zstd
+6      uint16       compression                0=raw, 1=lz4, 2=zstd, 3=gzip
 8      int32        chunk_x                    chunk 坐标
 12     int32        chunk_y
 16     int32        chunk_z
 20     uint8        encoding                   0=dense, 1=rle, 2=svo
-21     uint8[3]     reserved (must be 0)
+21     uint8        extent_log2                chunk 边长 = 1 << extent_log2 (e.g. 5 → 32³)
+22     uint8[2]     reserved (must be 0)
 24     uint32       payload_bytes              下方 payload 长度
 28     uint8[N]     payload                    见下方
 28+N   uint32       crc32                      payload 的 CRC32

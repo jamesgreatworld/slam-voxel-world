@@ -72,14 +72,19 @@ def load_pcd_xyz(path: Path) -> np.ndarray:
 
 
 def ros_zup_to_vxw_yup(xyz: np.ndarray) -> np.ndarray:
-    """Convert ROS frame (X-forward, Y-left, Z-up) to vxw frame (X-right, Y-up, Z-forward).
+    """Convert ROS frame (X-forward, Y-left, Z-up) to vxw frame (Godot convention).
 
-    Both right-handed. See Spec §4.2.
+    Both right-handed. vxw uses Godot/OpenGL convention: X-right, Y-up, Z-back
+    (camera looks down -Z, so "forward" is -Z). To make ROS-forward map to
+    Godot-forward (the natural user expectation), ROS.X → -vxw.Z.
+
+    Verified: this transform has determinant +1 (rotation, not reflection).
+    See tests/test_adapter.py::test_coord_swap_preserves_handedness.
     """
     out = np.empty_like(xyz)
-    out[:, 0] = -xyz[:, 1]  # vxw.X = -ROS.Y (right = -left)
-    out[:, 1] = xyz[:, 2]   # vxw.Y =  ROS.Z (up = up)
-    out[:, 2] = xyz[:, 0]   # vxw.Z =  ROS.X (forward = forward)
+    out[:, 0] = -xyz[:, 1]  # vxw.X (right)   = -ROS.Y (left)
+    out[:, 1] = xyz[:, 2]   # vxw.Y (up)      =  ROS.Z (up)
+    out[:, 2] = -xyz[:, 0]  # vxw.Z (back)    = -ROS.X (forward)
     return out
 
 
