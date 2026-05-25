@@ -1,0 +1,152 @@
+[gd_scene load_steps=8 format=3 uid="uid://b2x5vxwview1"]
+
+[ext_resource type="Script" path="res://main.gd" id="1"]
+
+[sub_resource type="ProceduralSkyMaterial" id="Sky_a"]
+sky_top_color = Color(0.4, 0.5, 0.65, 1)
+sky_horizon_color = Color(0.65, 0.7, 0.75, 1)
+ground_bottom_color = Color(0.1, 0.1, 0.1, 1)
+ground_horizon_color = Color(0.45, 0.4, 0.35, 1)
+
+[sub_resource type="Sky" id="Sky_b"]
+sky_material = SubResource("Sky_a")
+
+[sub_resource type="Environment" id="Env_a"]
+background_mode = 2
+sky = SubResource("Sky_b")
+ambient_light_source = 2
+ambient_light_color = Color(0.4, 0.45, 0.55, 1)
+ambient_light_energy = 0.25
+ssao_enabled = true
+ssao_intensity = 1.0
+
+[sub_resource type="StandardMaterial3D" id="RigMat"]
+albedo_color = Color(1, 0.15, 0.15, 1)
+emission_enabled = true
+emission = Color(0.6, 0.05, 0.05, 1)
+emission_energy_multiplier = 1.5
+roughness = 0.4
+
+[sub_resource type="BoxMesh" id="RigBox"]
+size = Vector3(1.0, 0.3, 0.3)
+material = SubResource("RigMat")
+
+[sub_resource type="SphereMesh" id="EyeBall"]
+radius = 0.04
+height = 0.08
+
+[node name="Main" type="Node3D"]
+script = ExtResource("1")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 10, 30)
+far = 2000.0
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 0, 50, 0)
+light_energy = 1.6
+shadow_enabled = true
+directional_shadow_max_distance = 300.0
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Env_a")
+
+[node name="Voxels" type="MultiMeshInstance3D" parent="."]
+
+[node name="StereoRig" type="Node3D" parent="."]
+
+[node name="RedBox" type="MeshInstance3D" parent="StereoRig"]
+layers = 2
+mesh = SubResource("RigBox")
+
+[node name="LeftEyeMarker" type="MeshInstance3D" parent="StereoRig"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.05, 0, -0.15)
+layers = 2
+mesh = SubResource("EyeBall")
+
+[node name="RightEyeMarker" type="MeshInstance3D" parent="StereoRig"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.05, 0, -0.15)
+layers = 2
+mesh = SubResource("EyeBall")
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="StatusLabel" type="Label" parent="HUD"]
+offset_left = 8.0
+offset_top = 8.0
+offset_right = 1272.0
+offset_bottom = 28.0
+text = "loading..."
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4
+
+[node name="ModeLabel" type="Label" parent="HUD"]
+offset_left = 8.0
+offset_top = 28.0
+offset_right = 760.0
+offset_bottom = 50.0
+text = ""
+theme_override_colors/font_color = Color(1, 0.9, 0.4, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4
+
+[node name="PoseLabel" type="Label" parent="HUD"]
+offset_left = 8.0
+offset_top = 50.0
+offset_right = 760.0
+offset_bottom = 72.0
+text = ""
+theme_override_colors/font_color = Color(0.9, 1, 0.9, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4
+
+[node name="LeftStereoContainer" type="SubViewportContainer" parent="HUD"]
+offset_left = 768.0
+offset_top = 32.0
+offset_right = 1018.0
+offset_bottom = 220.0
+stretch = true
+
+[node name="LeftStereoViewport" type="SubViewport" parent="HUD/LeftStereoContainer"]
+handle_input_locally = false
+size = Vector2i(250, 188)
+render_target_update_mode = 4
+
+[node name="LeftStereoCamera" type="Camera3D" parent="HUD/LeftStereoContainer/LeftStereoViewport"]
+current = true
+far = 2000.0
+cull_mask = 1
+
+[node name="LeftStereoLabel" type="Label" parent="HUD"]
+offset_left = 776.0
+offset_top = 36.0
+text = "L"
+theme_override_colors/font_color = Color(1, 0.6, 0.6, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4
+
+[node name="RightStereoContainer" type="SubViewportContainer" parent="HUD"]
+offset_left = 1022.0
+offset_top = 32.0
+offset_right = 1272.0
+offset_bottom = 220.0
+stretch = true
+
+[node name="RightStereoViewport" type="SubViewport" parent="HUD/RightStereoContainer"]
+handle_input_locally = false
+size = Vector2i(250, 188)
+render_target_update_mode = 4
+
+[node name="RightStereoCamera" type="Camera3D" parent="HUD/RightStereoContainer/RightStereoViewport"]
+current = true
+far = 2000.0
+cull_mask = 1
+
+[node name="RightStereoLabel" type="Label" parent="HUD"]
+offset_left = 1030.0
+offset_top = 36.0
+text = "R"
+theme_override_colors/font_color = Color(0.6, 0.6, 1, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4

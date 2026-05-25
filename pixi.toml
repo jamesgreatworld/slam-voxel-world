@@ -1,0 +1,17 @@
+[workspace]
+authors = ["jamesgreat <cheyuxiang666@126.com>"]
+channels = ["conda-forge"]
+name = "slam-voxel-world"
+platforms = ["win-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+python = "3.11.*"
+numpy = ">=2.4.6,<3"
+zstandard = ">=0.25.0,<0.26"
+pytest = ">=9.0.3,<10"
+
+[pypi-dependencies]
+pypcd4 = ">=1.4.3, <2"

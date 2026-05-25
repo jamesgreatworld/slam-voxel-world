@@ -1,0 +1,25 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Generated artifacts (regenerable from inputs)
+out/
+samples/*.vxw/
+
+# Godot import / cache (regenerated on first open)
+godot_viewer/.godot/
+*.uid
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
