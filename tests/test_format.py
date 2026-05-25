@@ -390,6 +390,58 @@ def test_world_palette_must_have_air(tmp_path: Path) -> None:
     assert loaded.palette.materials[0].name == "air"
 
 
+def test_world_overwrite_clears_stale_chunks(tmp_path: Path) -> None:
+    """Writing world A then world B to the same path must produce only B's chunks.
+
+    Regression: previously orphan chunk files from A were re-read as part of B,
+    inflating the voxel count by a real-world factor of 1.5×.
+    """
+    out = tmp_path / "world.vxw"
+
+    # World A: chunks at (0,0,0) and (5,0,0)
+    voxels_a1 = _empty_chunk_voxels()
+    voxels_a1[0, 0, 0] = (1, 1, 0, 0)
+    voxels_a2 = _empty_chunk_voxels()
+    voxels_a2[1, 2, 3] = (1, 1, 0, 0)
+    world_a = vxw.World(
+        manifest=vxw.Manifest(
+            world_id="A", voxel_size_meters=0.05, chunk_extent=32,
+            bounds_chunks_min=(0, 0, 0), bounds_chunks_max=(6, 1, 1),
+        ),
+        palette=vxw.Palette(
+            materials=[
+                vxw.Material(id=0, name="air", color_rgb=(0, 0, 0), flags=("empty",)),
+                vxw.Material(id=1, name="x", color_rgb=(1, 1, 1), flags=("solid",)),
+            ],
+            semantic_classes=[vxw.SemanticClass(id=1, name="x", default_material=1)],
+            color_lut=[],
+        ),
+        chunks={
+            (0, 0, 0): vxw.Chunk(coord=(0, 0, 0), voxels=voxels_a1),
+            (5, 0, 0): vxw.Chunk(coord=(5, 0, 0), voxels=voxels_a2),
+        },
+    )
+    vxw.write_world(out, world_a)
+    assert {p.name for p in (out / "chunks").iterdir()} == {
+        "0_0_0.chunk", "5_0_0.chunk",
+    }
+
+    # World B: only chunk at (10,0,0) — completely different geometry
+    voxels_b = _empty_chunk_voxels()
+    voxels_b[2, 2, 2] = (1, 1, 0, 0)
+    world_b = vxw.World(
+        manifest=world_a.manifest,
+        palette=world_a.palette,
+        chunks={(10, 0, 0): vxw.Chunk(coord=(10, 0, 0), voxels=voxels_b)},
+    )
+    vxw.write_world(out, world_b)
+    # Only world_b's chunk should remain on disk
+    assert {p.name for p in (out / "chunks").iterdir()} == {"10_0_0.chunk"}
+
+    loaded = vxw.read_world(out)
+    assert set(loaded.chunks.keys()) == {(10, 0, 0)}
+
+
 def test_missing_chunk_means_all_air(tmp_path: Path) -> None:
     """Contract C9: a chunk that isn't on disk == that region is all-air (Spec §4.7)."""
     world = _make_minimal_world()

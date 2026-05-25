@@ -593,14 +593,22 @@ def read_chunks_index(path: Path) -> list:
 def write_world(path: Path, world: World) -> None:
     out = Path(path)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "chunks").mkdir(exist_ok=True)
+    chunks_dir = out / "chunks"
+    # Clear any stale chunk files from a prior write of a different world.
+    # Without this, orphan chunks at coords not present in `world` get picked up
+    # by read_world() and inflate the voxel count.
+    if chunks_dir.is_dir():
+        for old in chunks_dir.glob("*.chunk"):
+            old.unlink()
+    else:
+        chunks_dir.mkdir()
     write_manifest(out / "manifest.json", world.manifest)
     write_palette(out / "palette.json", world.palette)
 
     entries = []
     for coord, chunk in world.chunks.items():
         x, y, z = coord
-        cpath = out / "chunks" / f"{x}_{y}_{z}.chunk"
+        cpath = chunks_dir / f"{x}_{y}_{z}.chunk"
         write_chunk(cpath, chunk)
         entries.append(
             ChunkIndexEntry(coord=coord, file_offset=0, size_bytes=cpath.stat().st_size)
