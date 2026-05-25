@@ -452,3 +452,144 @@ def test_missing_chunk_means_all_air(tmp_path: Path) -> None:
     air_voxels = loaded.get_chunk_or_air((1, 0, 0))
     assert air_voxels.shape == (32, 32, 32)
     assert (air_voxels["material_id"] == 0).all()
+
+
+# ---------------------------------------------------------------------------
+# Incremental edits: set_voxel + save_dirty
+# ---------------------------------------------------------------------------
+
+
+def test_set_voxel_in_existing_chunk() -> None:
+    """set_voxel writes into the owning chunk and the value reads back."""
+    world = _make_minimal_world()
+    cell = np.array((1, 1, 2, 7), dtype=vxw.VOXEL_DTYPE)
+    # World voxel (3, 4, 5) → chunk (0, 0, 0) local (3, 4, 5) at extent=32.
+    world.set_voxel((3, 4, 5), cell)
+    voxels = world.get_chunk_or_air((0, 0, 0))
+    assert int(voxels[3, 4, 5]["material_id"]) == 1
+    assert int(voxels[3, 4, 5]["semantic_id"]) == 1
+    assert int(voxels[3, 4, 5]["state"]) == 2
+    assert int(voxels[3, 4, 5]["color_palette_idx"]) == 7
+
+
+def test_set_voxel_creates_missing_chunk() -> None:
+    """Writing into a non-existent chunk creates an air-filled chunk first."""
+    world = _make_minimal_world()
+    assert (2, 0, 0) not in world.chunks
+    # Extent=32 → world voxel (70, 1, 1) lives in chunk (2, 0, 0) local (6, 1, 1)
+    world.set_voxel((70, 1, 1), (1, 1, 0, 0))
+    assert (2, 0, 0) in world.chunks
+    new_chunk = world.chunks[(2, 0, 0)]
+    assert int(new_chunk.voxels[6, 1, 1]["material_id"]) == 1
+    # All other voxels remain air.
+    assert int(new_chunk.voxels[0, 0, 0]["material_id"]) == 0
+
+
+def test_set_voxel_extends_bounds() -> None:
+    """Creating a chunk outside the current bounds grows bounds_chunks_max/min."""
+    world = _make_minimal_world()
+    assert world.manifest.bounds_chunks_max == (1, 1, 1)
+    # Voxel (320, -1, 0) → chunk (10, -1, 0) at extent=32.
+    world.set_voxel((320, -1, 0), (1, 0, 0, 0))
+    assert world.manifest.bounds_chunks_max[0] >= 10
+    assert world.manifest.bounds_chunks_min[1] <= -1
+
+
+def test_set_voxel_accepts_tuple_form() -> None:
+    """Caller can pass a 4-tuple without constructing a structured array."""
+    world = _make_minimal_world()
+    world.set_voxel((10, 0, 0), (1, 1, 0, 0))
+    voxels = world.get_chunk_or_air((0, 0, 0))
+    assert int(voxels[10, 0, 0]["material_id"]) == 1
+    assert int(voxels[10, 0, 0]["semantic_id"]) == 1
+
+
+def test_save_dirty_writes_only_dirty_chunks(tmp_path: Path) -> None:
+    """Non-dirty chunk files must be untouched by save_dirty (byte-identical)."""
+    # Two chunks in the world.
+    voxels_a = _empty_chunk_voxels()
+    voxels_a[0, 0, 0] = (1, 1, 0, 0)
+    voxels_b = _empty_chunk_voxels()
+    voxels_b[1, 1, 1] = (1, 1, 0, 0)
+    world = vxw.World(
+        manifest=vxw.Manifest(
+            world_id="dirty-test", voxel_size_meters=0.05, chunk_extent=32,
+            bounds_chunks_min=(0, 0, 0), bounds_chunks_max=(1, 0, 0),
+        ),
+        palette=vxw.Palette(
+            materials=[
+                vxw.Material(id=0, name="air", color_rgb=(0, 0, 0), flags=("empty",)),
+                vxw.Material(id=1, name="x", color_rgb=(1, 1, 1), flags=("solid",)),
+            ],
+            semantic_classes=[vxw.SemanticClass(id=1, name="x", default_material=1)],
+            color_lut=[],
+        ),
+        chunks={
+            (0, 0, 0): vxw.Chunk(coord=(0, 0, 0), voxels=voxels_a),
+            (1, 0, 0): vxw.Chunk(coord=(1, 0, 0), voxels=voxels_b),
+        },
+    )
+    out = tmp_path / "world.vxw"
+    vxw.write_world(out, world)
+
+    loaded = vxw.read_world(out)
+    untouched_bytes = (out / "chunks" / "1_0_0.chunk").read_bytes()
+
+    # Mutate only chunk (0,0,0) and save.
+    loaded.set_voxel((2, 2, 2), (1, 1, 0, 0))
+    written = loaded.save_dirty(out)
+
+    assert written == {(0, 0, 0)}
+    # The non-dirty chunk's bytes are unchanged.
+    assert (out / "chunks" / "1_0_0.chunk").read_bytes() == untouched_bytes
+
+
+def test_save_dirty_updates_index(tmp_path: Path) -> None:
+    """A new chunk created via set_voxel must round-trip via chunks.idx + disk."""
+    world = _make_minimal_world()
+    out = tmp_path / "world.vxw"
+    vxw.write_world(out, world)
+
+    loaded = vxw.read_world(out)
+    # Force creation of a new chunk at (3, 0, 0): voxel (96, 0, 0) at extent 32.
+    loaded.set_voxel((96, 0, 0), (1, 1, 0, 0))
+    written = loaded.save_dirty(out)
+    assert (3, 0, 0) in written
+
+    # Index should now mention the new chunk coord.
+    idx_entries = vxw.read_chunks_index(out / "chunks.idx")
+    assert (3, 0, 0) in {e.coord for e in idx_entries}
+
+    # And re-reading the world picks up the new chunk with the right value.
+    reloaded = vxw.read_world(out)
+    assert (3, 0, 0) in reloaded.chunks
+    assert int(reloaded.chunks[(3, 0, 0)].voxels[0, 0, 0]["material_id"]) == 1
+
+
+def test_save_dirty_rejects_uninitialized_path(tmp_path: Path) -> None:
+    """Calling save_dirty on a directory without manifest.json must raise."""
+    world = _make_minimal_world()
+    world.set_voxel((0, 0, 0), (1, 1, 0, 0))
+    empty_dir = tmp_path / "no_manifest_here"
+    empty_dir.mkdir()
+    with pytest.raises(vxw.VxwFormatError, match="manifest"):
+        world.save_dirty(empty_dir)
+
+
+def test_save_dirty_returns_written_set(tmp_path: Path) -> None:
+    """The return value must equal the set of coords actually flushed."""
+    world = _make_minimal_world()
+    out = tmp_path / "world.vxw"
+    vxw.write_world(out, world)
+
+    loaded = vxw.read_world(out)
+    # Touch three distinct chunks: (0,0,0) existing, (2,0,0) new, (0,3,0) new.
+    loaded.set_voxel((1, 1, 1), (1, 1, 0, 0))
+    loaded.set_voxel((64, 0, 0), (1, 1, 0, 0))
+    loaded.set_voxel((0, 96, 0), (1, 1, 0, 0))
+
+    written = loaded.save_dirty(out)
+    assert written == {(0, 0, 0), (2, 0, 0), (0, 3, 0)}
+    # Dirty set is cleared after save.
+    second = loaded.save_dirty(out)
+    assert second == set()

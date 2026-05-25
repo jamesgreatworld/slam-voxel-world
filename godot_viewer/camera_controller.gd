@@ -1,0 +1,136 @@
+# camera_controller.gd — Layer 5 (control).
+# Owns the MAIN camera (the user's viewport), independent of the rig.
+#
+# Two view modes:
+#   THIRD_PERSON  main_cam orbits around rig position; mouse drag = rotate orbit,
+#                 wheel = zoom in/out. The rig is visible (red box + eyes).
+#   FIRST_PERSON  main_cam = rig.global_transform (you ride the rig). The rig's
+#                 visuals are hidden so you're not looking at the inside of the box.
+#
+# Tab toggles. The rig is always controlled by keyboard via stereo_rig_controller;
+# this controller never touches the rig's transform, only the main camera's.
+
+extends Node
+
+enum ViewMode { THIRD_PERSON, FIRST_PERSON }
+
+@export var orbit_distance_init: float = 8.0
+@export var orbit_yaw_init: float = 0.0          # rad
+@export var orbit_pitch_init: float = 0.35       # rad (~20°)
+@export var mouse_sensitivity: float = 0.005
+@export var zoom_step: float = 1.0
+
+var view_mode: int = ViewMode.THIRD_PERSON
+var orbit_distance: float
+var orbit_yaw: float
+var orbit_pitch: float
+
+var _cam: Camera3D = null
+var _rig_ctl: Node3D = null   # stereo_rig_controller (Node3D w/ that script)
+var _logger = null
+var _right_held: bool = false
+var _orbit_anchor_pos: Vector2 = Vector2.ZERO  # cursor pos when right-drag began
+
+
+func init_controller(cam: Camera3D, rig_ctl: Node3D, logger = null) -> void:
+    _cam = cam
+    _rig_ctl = rig_ctl
+    _logger = logger
+    orbit_distance = orbit_distance_init
+    orbit_yaw = orbit_yaw_init
+    orbit_pitch = orbit_pitch_init
+    apply_mouse_mode()
+
+
+func get_view_mode() -> int:
+    return view_mode
+
+
+func get_orbit_state() -> Dictionary:
+    return {
+        "distance": orbit_distance,
+        "yaw": orbit_yaw,
+        "pitch": orbit_pitch,
+    }
+
+
+func toggle_view_mode() -> void:
+    if view_mode == ViewMode.THIRD_PERSON:
+        view_mode = ViewMode.FIRST_PERSON
+    else:
+        view_mode = ViewMode.THIRD_PERSON
+    apply_mouse_mode()
+    if _logger:
+        _logger.info("view_mode", {"now": "1P" if view_mode == ViewMode.FIRST_PERSON else "3P"})
+
+
+func set_view_mode(m: int) -> void:
+    view_mode = m
+    apply_mouse_mode()
+
+
+# Convenience for cmdline / cross-module use without accessing the enum directly.
+func set_view_mode_str(s: String) -> void:
+    if s == "1p" or s == "first_person":
+        set_view_mode(ViewMode.FIRST_PERSON)
+    elif s == "3p" or s == "third_person":
+        set_view_mode(ViewMode.THIRD_PERSON)
+    else:
+        push_warning("[camera_controller] unknown view mode string: %s" % s)
+
+
+func apply_mouse_mode() -> void:
+    # 3P: free cursor for hover-picking; right-drag will temporarily capture for orbit.
+    # 1P: hide (no mouse interaction).
+    if view_mode == ViewMode.THIRD_PERSON:
+        Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+    else:
+        Input.mouse_mode = Input.MOUSE_MODE_HIDDEN
+    _right_held = false
+
+
+func _input(event: InputEvent) -> void:
+    if event is InputEventKey and event.pressed and event.keycode == KEY_TAB:
+        toggle_view_mode()
+        return
+    if view_mode != ViewMode.THIRD_PERSON:
+        return
+
+    if event is InputEventMouseButton:
+        if event.button_index == MOUSE_BUTTON_RIGHT:
+            # Right-drag orbit: capture cursor on press, release on let-go.
+            if event.pressed:
+                _orbit_anchor_pos = get_viewport().get_mouse_position()
+                Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+                _right_held = true
+            else:
+                Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+                Input.warp_mouse(_orbit_anchor_pos)
+                _right_held = false
+        elif event.pressed:
+            if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+                orbit_distance = max(0.5, orbit_distance - zoom_step)
+            elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+                orbit_distance += zoom_step
+    elif event is InputEventMouseMotion and _right_held:
+        orbit_yaw -= event.relative.x * mouse_sensitivity
+        orbit_pitch -= event.relative.y * mouse_sensitivity
+        orbit_pitch = clamp(orbit_pitch, -PI / 2 + 0.1, PI / 2 - 0.1)
+
+
+func _process(_delta: float) -> void:
+    if _cam == null or _rig_ctl == null:
+        return
+    var rig_xf: Transform3D = _rig_ctl.global_transform
+    if view_mode == ViewMode.FIRST_PERSON:
+        _cam.global_transform = rig_xf
+        _rig_ctl.set_visuals_visible(false)
+    else:
+        var offset := Vector3(
+            cos(orbit_pitch) * sin(orbit_yaw),
+            sin(orbit_pitch),
+            cos(orbit_pitch) * cos(orbit_yaw)
+        ) * orbit_distance
+        _cam.global_position = rig_xf.origin + offset
+        _cam.look_at(rig_xf.origin, Vector3.UP)
+        _rig_ctl.set_visuals_visible(true)

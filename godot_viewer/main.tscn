@@ -1,6 +1,14 @@
 [gd_scene load_steps=8 format=3 uid="uid://b2x5vxwview1"]
 
 [ext_resource type="Script" path="res://main.gd" id="1"]
+[ext_resource type="Script" path="res://voxel_renderer.gd" id="VoxelRendererScript"]
+[ext_resource type="Script" path="res://stereo_rig_controller.gd" id="StereoRigCtlScript"]
+[ext_resource type="Script" path="res://camera_controller.gd" id="CameraCtlScript"]
+[ext_resource type="Script" path="res://hud_controller.gd" id="HudCtlScript"]
+[ext_resource type="Script" path="res://snapshot_controller.gd" id="SnapshotCtlScript"]
+[ext_resource type="Script" path="res://pause_menu.gd" id="PauseMenuScript"]
+[ext_resource type="Script" path="res://voxel_editor.gd" id="VoxelEditorScript"]
+[ext_resource type="Script" path="res://vxw_writer.gd" id="VxwWriterScript"]
 
 [sub_resource type="ProceduralSkyMaterial" id="Sky_a"]
 sky_top_color = Color(0.4, 0.5, 0.65, 1)
@@ -51,9 +59,11 @@ directional_shadow_max_distance = 300.0
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("Env_a")
 
-[node name="Voxels" type="MultiMeshInstance3D" parent="."]
+[node name="VoxelRenderer" type="Node3D" parent="."]
+script = ExtResource("VoxelRendererScript")
 
 [node name="StereoRig" type="Node3D" parent="."]
+script = ExtResource("StereoRigCtlScript")
 
 [node name="RedBox" type="MeshInstance3D" parent="StereoRig"]
 layers = 2
@@ -68,6 +78,18 @@ mesh = SubResource("EyeBall")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.05, 0, -0.15)
 layers = 2
 mesh = SubResource("EyeBall")
+
+[node name="CameraController" type="Node" parent="."]
+script = ExtResource("CameraCtlScript")
+
+[node name="HudController" type="Node" parent="."]
+script = ExtResource("HudCtlScript")
+
+[node name="SnapshotController" type="Node" parent="."]
+script = ExtResource("SnapshotCtlScript")
+
+[node name="VoxelEditor" type="Node3D" parent="."]
+script = ExtResource("VoxelEditorScript")
 
 [node name="HUD" type="CanvasLayer" parent="."]
 
@@ -150,3 +172,72 @@ text = "R"
 theme_override_colors/font_color = Color(0.6, 0.6, 1, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 4
+
+[node name="ActionBar" type="Label" parent="HUD"]
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 8.0
+offset_top = -28.0
+offset_right = 1272.0
+offset_bottom = -8.0
+text = "Esc=Menu  |  WASD=move rig  Q/E=roll  Space/Ctrl=up/down  Shift=boost  |  RMB drag=orbit  Wheel=zoom  LMB=destroy hovered voxel  |  Tab=1P/3P  R=reset rig"
+horizontal_alignment = 1
+theme_override_colors/font_color = Color(0.9, 0.9, 1, 0.9)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4
+
+[node name="PauseMenu" type="CanvasLayer" parent="."]
+script = ExtResource("PauseMenuScript")
+layer = 10
+
+[node name="Backdrop" type="ColorRect" parent="PauseMenu"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+color = Color(0, 0, 0, 0.55)
+mouse_filter = 0
+
+[node name="Panel" type="PanelContainer" parent="PauseMenu/Backdrop"]
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -160.0
+offset_top = -180.0
+offset_right = 160.0
+offset_bottom = 180.0
+
+[node name="VBox" type="VBoxContainer" parent="PauseMenu/Backdrop/Panel"]
+custom_minimum_size = Vector2(280, 320)
+theme_override_constants/separation = 12
+
+[node name="Title" type="Label" parent="PauseMenu/Backdrop/Panel/VBox"]
+text = "PAUSED"
+horizontal_alignment = 1
+theme_override_font_sizes/font_size = 28
+theme_override_colors/font_color = Color(1, 0.95, 0.7, 1)
+
+[node name="ResumeButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
+text = "Resume  (Esc)"
+custom_minimum_size = Vector2(0, 40)
+
+[node name="ViewButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
+text = "Toggle View  (Tab)"
+custom_minimum_size = Vector2(0, 40)
+
+[node name="ResetButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
+text = "Reset Rig  (R)"
+custom_minimum_size = Vector2(0, 40)
+
+[node name="SaveButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
+text = "Save World  (R3)"
+custom_minimum_size = Vector2(0, 40)
+disabled = true
+
+[node name="ReloadButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
+text = "Reload World  (R3)"
+custom_minimum_size = Vector2(0, 40)
+disabled = true
+
+[node name="QuitButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
+text = "Quit"
+custom_minimum_size = Vector2(0, 40)

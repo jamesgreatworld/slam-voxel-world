@@ -237,6 +237,7 @@ class World:
     manifest: Manifest
     palette: Palette
     chunks: dict
+    _dirty: set = field(default_factory=set)
 
     def get_chunk_or_air(self, coord: tuple) -> np.ndarray:
         """Return voxel array for a coord; if absent, return all-air (Contract C9)."""
@@ -245,6 +246,123 @@ class World:
             return self.chunks[coord].voxels
         e = self.manifest.chunk_extent
         return np.zeros((e, e, e), dtype=VOXEL_DTYPE)
+
+    def mark_dirty(self, chunk_coord: tuple) -> None:
+        """Mark a chunk as needing to be flushed to disk on next save_dirty.
+
+        Args:
+            chunk_coord: (cx, cy, cz) integer chunk coordinate. Adds the coord
+                to an internal dirty set; safe to call repeatedly.
+        """
+        self._dirty.add(tuple(chunk_coord))
+
+    def set_voxel(self, world_voxel: tuple, cell) -> None:
+        """Set a voxel at world voxel-index coordinates (vx, vy, vz).
+
+        Args:
+            world_voxel: (vx, vy, vz) integer voxel indices in the world frame.
+            cell: a structured numpy scalar matching VOXEL_DTYPE, OR a 4-tuple
+                  (material_id, semantic_id, state, color_palette_idx).
+
+        Behavior:
+            - Finds the owning chunk via floor division by chunk_extent.
+            - If the chunk doesn't exist, creates an all-air chunk and inserts it.
+            - Writes the voxel.
+            - Marks the chunk as dirty (see mark_dirty).
+            - Updates manifest.bounds_chunks_{min,max} if this creates a chunk
+              outside the existing bounds.
+        """
+        vx, vy, vz = (int(c) for c in world_voxel)
+        e = self.manifest.chunk_extent
+        cx, cy, cz = vx // e, vy // e, vz // e
+        lx, ly, lz = vx % e, vy % e, vz % e
+        chunk_coord = (cx, cy, cz)
+
+        if chunk_coord not in self.chunks:
+            air = np.zeros((e, e, e), dtype=VOXEL_DTYPE)
+            self.chunks[chunk_coord] = Chunk(coord=chunk_coord, voxels=air)
+            # Extend manifest bounds to include the new chunk.
+            mn = self.manifest.bounds_chunks_min
+            mx = self.manifest.bounds_chunks_max
+            self.manifest.bounds_chunks_min = (
+                min(mn[0], cx), min(mn[1], cy), min(mn[2], cz)
+            )
+            self.manifest.bounds_chunks_max = (
+                max(mx[0], cx), max(mx[1], cy), max(mx[2], cz)
+            )
+
+        # Normalize cell into a VOXEL_DTYPE scalar.
+        if isinstance(cell, tuple):
+            cell_value = np.array(cell, dtype=VOXEL_DTYPE)
+        else:
+            cell_value = cell
+
+        self.chunks[chunk_coord].voxels[lx, ly, lz] = cell_value
+        self.mark_dirty(chunk_coord)
+
+    def save_dirty(self, path) -> set:
+        """Write only dirty chunks (and the index) back to disk at ``path``.
+
+        Args:
+            path: directory of an existing .vxw world (must already contain
+                  manifest.json and palette.json — these are NOT overwritten).
+
+        Behavior:
+            - For each dirty chunk: writes chunks/{x}_{y}_{z}.chunk using the
+              chunk's existing encoding/compression.
+            - Rebuilds chunks.idx from the current self.chunks dict so that
+              removed chunks vanish from the index and added chunks appear.
+            - Clears the dirty set.
+            - Does NOT touch non-dirty chunk files (incremental save).
+
+        Returns:
+            The set of (cx, cy, cz) tuples that were actually written.
+
+        Raises:
+            VxwFormatError: if ``path`` doesn't exist or doesn't contain a
+                valid manifest.
+        """
+        root = Path(path)
+        if not root.is_dir():
+            raise VxwFormatError(f"save_dirty: path is not a directory: {root}")
+        manifest_path = root / "manifest.json"
+        if not manifest_path.is_file():
+            raise VxwFormatError(
+                f"save_dirty: missing manifest.json in {root}; "
+                "use write_world() to initialize a world directory first"
+            )
+        # Validate that the manifest is actually parseable; this also fulfills
+        # the "valid manifest" contract.
+        read_manifest(manifest_path)
+
+        chunks_dir = root / "chunks"
+        chunks_dir.mkdir(exist_ok=True)
+
+        written: set = set()
+        for coord in list(self._dirty):
+            if coord not in self.chunks:
+                # The chunk was deleted after being marked dirty; the index
+                # rebuild below will drop it. Skip writing.
+                continue
+            x, y, z = coord
+            cpath = chunks_dir / f"{x}_{y}_{z}.chunk"
+            write_chunk(cpath, self.chunks[coord])
+            written.add(coord)
+
+        # Rebuild chunks.idx from the current self.chunks dict so that the
+        # on-disk index reflects additions / removals.
+        entries = []
+        for coord, chunk in self.chunks.items():
+            x, y, z = coord
+            cpath = chunks_dir / f"{x}_{y}_{z}.chunk"
+            size = cpath.stat().st_size if cpath.is_file() else 0
+            entries.append(
+                ChunkIndexEntry(coord=coord, file_offset=0, size_bytes=size)
+            )
+        write_chunks_index(root / "chunks.idx", entries)
+
+        self._dirty.clear()
+        return written
 
 
 # ---------------------------------------------------------------------------
