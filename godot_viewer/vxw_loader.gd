@@ -1,8 +1,8 @@
 # vxw_loader.gd
 # GDScript port of vxw_format.py — read-only.
-# Mirrors §4 of docs/superpowers/plans/2026-05-22-slam-voxel-world.md.
-# Supports: manifest.json, palette.json, chunks/*.chunk (DENSE + RLE, RAW + ZSTD).
-# Not implemented: SVO encoding, LZ4 compression, CRC32 verification.
+# Mirrors §4 of docs/spec.md.
+# Supports: manifest.json, palette.json, chunks/*.chunk (DENSE + RLE, RAW + GZIP).
+# Not implemented in this loader: SVO encoding, LZ4/ZSTD compression, CRC32 verification.
 
 class_name VxwLoader extends RefCounted
 
@@ -16,10 +16,15 @@ enum Compression { RAW = 0, LZ4 = 1, ZSTD = 2, GZIP = 3 }
 class VxwWorld extends RefCounted:
     var voxel_size_meters: float = 0.10
     var chunk_extent: int = 32
-    var palette_rgb: PackedColorArray  # indexed by material_id
-    # Parallel arrays: positions[i] is voxel world-pos in meters, colors[i] is its RGB.
+    # palette_rgb[material_id] = Color (legacy convenience accessor)
+    var palette_rgb: PackedColorArray
+    # palette_materials[material_id] = Dictionary with full Material data
+    # (color_rgb, flags, transparent, emission_rgb, emission_energy, metallic, roughness)
+    var palette_materials: Dictionary
+    # Parallel arrays — index i is the same voxel across positions / colors / material_ids.
     var positions: PackedVector3Array
     var colors: PackedColorArray
+    var material_ids: PackedByteArray   # 1 byte per voxel (parallel to positions)
 
     func voxel_count() -> int:
         return positions.size()
@@ -41,15 +46,31 @@ static func load_world(world_path: String) -> VxwWorld:
     var ptxt := FileAccess.get_file_as_string(world_path + "/palette.json")
     var palette = JSON.parse_string(ptxt)
     world.palette_rgb = PackedColorArray()
-    # Build a 256-slot lookup so material_id index is direct.
     world.palette_rgb.resize(256)
+    world.palette_materials = {}
     for m in palette.materials:
         var rgb = m.color_rgb
-        world.palette_rgb[int(m.id)] = Color(rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
+        var col := Color(rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
+        var mid: int = int(m.id)
+        world.palette_rgb[mid] = col
+        # Full material data with sensible defaults for old palette.json files
+        var em_rgb = m.emission_rgb if m.has("emission_rgb") else [0, 0, 0]
+        world.palette_materials[mid] = {
+            "id": mid,
+            "name": String(m.name) if m.has("name") else "",
+            "color_rgb": [int(rgb[0]), int(rgb[1]), int(rgb[2])],
+            "flags": m.flags if m.has("flags") else [],
+            "transparent": bool(m.transparent) if m.has("transparent") else false,
+            "emission_rgb": [int(em_rgb[0]), int(em_rgb[1]), int(em_rgb[2])],
+            "emission_energy": float(m.emission_energy) if m.has("emission_energy") else 0.0,
+            "metallic": float(m.metallic) if m.has("metallic") else 0.0,
+            "roughness": float(m.roughness) if m.has("roughness") else 0.75,
+        }
 
     # ---- chunks/ ----
     world.positions = PackedVector3Array()
     world.colors = PackedColorArray()
+    world.material_ids = PackedByteArray()
     var dir := DirAccess.open(world_path + "/chunks")
     if dir == null:
         push_error("Cannot open chunks/ dir in " + world_path)
@@ -108,9 +129,7 @@ static func _load_chunk(path: String, world: VxwWorld) -> void:
             push_error("GZIP decompression failed in " + path)
             return
     elif compression == Compression.ZSTD:
-        # Godot 4.6's decompress_dynamic does NOT support ZSTD. Use --compression gzip
-        # when generating the .vxw if you need to load it in Godot.
-        push_error("ZSTD compression not supported in Godot loader (regenerate with --compression gzip)")
+        push_error("ZSTD not supported in Godot loader; regenerate with --compression gzip")
         return
     else:
         push_error("Unsupported compression %d in %s" % [compression, path])
@@ -130,7 +149,6 @@ static func _load_chunk(path: String, world: VxwWorld) -> void:
 static func _decode_dense(
     data: PackedByteArray, extent: int, origin: Vector3, vs: float, world: VxwWorld
 ) -> void:
-    # C-order: x slowest, z fastest. Matches numpy.tobytes(order='C') on shape (E,E,E).
     var idx := 0
     for x in extent:
         for y in extent:
@@ -139,6 +157,7 @@ static func _decode_dense(
                 if mid != 0:
                     world.positions.append(origin + Vector3(x, y, z) * vs)
                     world.colors.append(world.palette_rgb[mid])
+                    world.material_ids.append(mid)
                 idx += 4
 
 
@@ -159,10 +178,10 @@ static func _decode_rle(
             var color := world.palette_rgb[mid]
             for i in run_len:
                 var li := lin_idx + i
-                # Inverse of C-order flattening for shape (E,E,E) → x slow, z fast
                 var z := li % extent
                 var y := (li / extent) % extent
                 var x := li / ee
                 world.positions.append(origin + Vector3(x, y, z) * vs)
                 world.colors.append(color)
+                world.material_ids.append(mid)
         lin_idx += run_len

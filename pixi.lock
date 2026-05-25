@@ -52,6 +52,8 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/win-64/zstandard-0.25.0-py311hf893f09_1.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/zstd-1.5.7-h534d264_6.conda
       - pypi: https://files.pythonhosted.org/packages/78/b6/6307fbef88d9b5ee7421e68d78a9f162e0da4900bc5f5793f6d3d0e34fb8/annotated_types-0.7.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/76/f9/54e3e36d1906e272505305fdc40fc3050ba67f3c7ffad3552ec673ab400b/litemapy-0.11.0b0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/7f/10/5669f4e5fa24706fa44b2e28e4362429665a8d26f3c18eda7233f1a01772/nbtlib-2.0.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/fd/7b/122376b1fd3c62c1ed9dc80c931ace4844b3c55407b6fb2d199377c9736f/pydantic-2.13.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/aa/e6/c505f83dfeda9a2e5c995cfd872949e4d05e12f7feb3dca72f633daefa94/pydantic_core-2.46.4-cp311-cp311-win_amd64.whl
       - pypi: https://files.pythonhosted.org/packages/7b/88/4ab71c769b64e3bf692254debb8476ebbaa0f9a847cdb8efe652960b0c2c/pypcd4-1.4.3-py3-none-any.whl
@@ -319,6 +321,14 @@ packages:
   purls: []
   size: 58347
   timestamp: 1774072851498
+- pypi: https://files.pythonhosted.org/packages/76/f9/54e3e36d1906e272505305fdc40fc3050ba67f3c7ffad3552ec673ab400b/litemapy-0.11.0b0-py3-none-any.whl
+  name: litemapy
+  version: 0.11.0b0
+  sha256: 18af0f847037413b9300b01c8a3179583bab25ca5a17853552abebc665545eb2
+  requires_dist:
+  - nbtlib>=2.0.3
+  - typing-extensions
+  requires_python: '>=3.9'
 - conda: https://conda.anaconda.org/conda-forge/win-64/llvm-openmp-22.1.6-h4fa8253_0.conda
   sha256: b12aa9c957fadf488888aa4cad6d424d499ffcceefe5d8e9077c4da46308f26b
   md5: 1966432ddb4d5e13890dae3758a112d3
@@ -349,6 +359,13 @@ packages:
   purls: []
   size: 114354729
   timestamp: 1779293121860
+- pypi: https://files.pythonhosted.org/packages/7f/10/5669f4e5fa24706fa44b2e28e4362429665a8d26f3c18eda7233f1a01772/nbtlib-2.0.4-py3-none-any.whl
+  name: nbtlib
+  version: 2.0.4
+  sha256: 38d571fbf2f7ebd640639461b47fc79919a8ea8e74633ffcc8aa6b2acfc9c889
+  requires_dist:
+  - numpy
+  requires_python: '>=3.8,<4.0'
 - conda: https://conda.anaconda.org/conda-forge/win-64/numpy-2.4.6-py311h65cb7f3_0.conda
   sha256: cd26f615140d0ed557f8927947ca62c181d55ddbe418eebd24bd06cd32fb3938
   md5: ef5c1dedd943abfb0b80112ba46d4ab8

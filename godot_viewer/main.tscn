@@ -180,7 +180,7 @@ offset_left = 8.0
 offset_top = -28.0
 offset_right = 1272.0
 offset_bottom = -8.0
-text = "Esc=Menu  |  WASD=move rig  Q/E=roll  Space/Ctrl=up/down  Shift=boost  |  RMB drag=orbit  Wheel=zoom  LMB=destroy hovered voxel  |  Tab=1P/3P  R=reset rig"
+text = "Esc=Menu  |  WASD=move rig  Q/E=roll  Space/Ctrl=up/down  Shift=boost  |  RMB drag=orbit  Wheel=zoom  |  Tab=1P/3P  R=reset rig  |  Edit mode in menu"
 horizontal_alignment = 1
 theme_override_colors/font_color = Color(0.9, 0.9, 1, 0.9)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
@@ -224,20 +224,35 @@ custom_minimum_size = Vector2(0, 40)
 text = "Toggle View  (Tab)"
 custom_minimum_size = Vector2(0, 40)
 
+[node name="EditButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
+text = "Edit Mode: OFF  (clicks ignored)"
+custom_minimum_size = Vector2(0, 40)
+
 [node name="ResetButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
 text = "Reset Rig  (R)"
 custom_minimum_size = Vector2(0, 40)
 
-[node name="SaveButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
-text = "Save World  (R3)"
+[node name="LoadButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
+text = "Load World..."
 custom_minimum_size = Vector2(0, 40)
-disabled = true
+
+[node name="SaveButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
+text = "Save World"
+custom_minimum_size = Vector2(0, 40)
 
 [node name="ReloadButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
-text = "Reload World  (R3)"
+text = "Reload World"
 custom_minimum_size = Vector2(0, 40)
-disabled = true
 
 [node name="QuitButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
 text = "Quit"
 custom_minimum_size = Vector2(0, 40)
+
+[node name="LoadDialog" type="FileDialog" parent="PauseMenu"]
+process_mode = 3
+title = "Select a .vxw world directory"
+size = Vector2i(900, 600)
+ok_button_text = "Load"
+file_mode = 2
+access = 2
+show_hidden_files = false

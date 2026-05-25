@@ -80,10 +80,12 @@ func _ready() -> void:
     hud_ctl.init_controller(status_label, mode_label, pose_label, _world, stereo_rig, cam_ctl, logger)
     snap_ctl.init_controller(stereo_rig, cam_ctl, logger)
     snap_ctl.configure_from_cli(args)
-    voxel_editor.init_editor(_world, renderer.get_mmi(), main_cam)
+    voxel_editor.init_editor(renderer, main_cam)
     voxel_editor.voxel_destroyed.connect(_on_voxel_destroyed)
+    voxel_editor.set_edit_enabled(false)  # default OFF — opt-in via pause menu
     _wire_pause_menu()
     pause_menu.set_persistence_available(true)
+    pause_menu.set_edit_mode_label(false)
 
     # CLI-driven overrides (must happen after init_controller)
     if view_override != "":
@@ -134,6 +136,8 @@ func _wire_pause_menu() -> void:
     )
     pause_menu.save_world_requested.connect(_on_save_world_backup)
     pause_menu.reload_world_requested.connect(_on_reload_world)
+    pause_menu.load_world_requested.connect(_on_load_world_requested)
+    pause_menu.toggle_edit_mode_requested.connect(_on_toggle_edit_mode)
     pause_menu.quit_requested.connect(func():
         logger.info("session_end", {"reason": "menu_quit"})
         get_tree().quit()
@@ -163,6 +167,13 @@ func _close_pause() -> void:
 
 
 # ---- R3: voxel editing + persistence ----
+
+func _on_toggle_edit_mode() -> void:
+    var new_state: bool = not bool(voxel_editor.is_edit_enabled())
+    voxel_editor.set_edit_enabled(new_state)
+    pause_menu.set_edit_mode_label(new_state)
+    logger.info("edit_mode", {"enabled": new_state})
+
 
 func _on_voxel_destroyed(world_voxel_index: Vector3i, _world_position_m: Vector3) -> void:
     # Map world voxel index → (chunk_coord, local_voxel) using FLOOR (works for negatives).
@@ -209,7 +220,46 @@ func _on_save_world_backup() -> void:
 func _on_reload_world() -> void:
     logger.info("world_reload", {"path": _world_path_absolute})
     _close_pause()
-    get_tree().reload_current_scene()
+    _load_world_in_place(_world_path_absolute)
+
+
+func _on_load_world_requested(new_path: String) -> void:
+    logger.info("world_load_requested", {"new_path": new_path, "old_path": _world_path_absolute})
+    _close_pause()
+    if not DirAccess.dir_exists_absolute(new_path):
+        logger.error("world_load_requested", {"reason": "dir missing", "path": new_path})
+        return
+    if not FileAccess.file_exists(new_path + "/manifest.json"):
+        logger.error("world_load_requested", {"reason": "manifest.json missing in selected dir", "path": new_path})
+        return
+    _load_world_in_place(new_path)
+
+
+func _load_world_in_place(world_path: String) -> void:
+    # In-place world swap: tear down renderer children + re-init controllers.
+    # No scene reload needed — keeps CanvasLayer / menu state intact.
+    var new_world = VxwLoader.load_world(world_path)
+    if new_world.voxel_count() == 0:
+        logger.error("world_load_in_place", {"reason": "empty world", "path": world_path})
+        return
+    _world = new_world
+    _world_path_absolute = world_path
+    # Tear down old renderer children (MMIs, plane, axes)
+    for child in renderer.get_children():
+        child.queue_free()
+    renderer.build(_world)
+    # Re-init editor with new world
+    voxel_editor.init_editor(renderer, main_cam)
+    # Reset rig + reset stereo cams sync
+    stereo_rig.reset_pose()
+    # Refresh HUD with new world voxel count / size
+    hud_ctl.init_controller(status_label, mode_label, pose_label, _world, stereo_rig, cam_ctl, logger)
+    logger.info("world_loaded", {
+        "voxels": _world.voxel_count(),
+        "voxel_size_m": _world.voxel_size_meters,
+        "chunk_extent": _world.chunk_extent,
+        "path": _world_path_absolute,
+    })
 
 
 func _copy_dir_recursive(src: String, dst: String) -> bool:

@@ -127,6 +127,61 @@ def test_palette_id_zero_must_be_air(tmp_path: Path) -> None:
         vxw.write_palette(path, bad)
 
 
+def test_material_visual_defaults() -> None:
+    """New visual fields must default to non-renderering values."""
+    m = vxw.Material(id=1, name="concrete", color_rgb=(180, 180, 180), flags=("solid",))
+    assert m.transparent is False
+    assert m.emission_rgb == (0, 0, 0)
+    assert m.emission_energy == 0.0
+    assert m.metallic == 0.0
+    assert m.roughness == 0.75
+
+
+def test_material_visual_roundtrip(tmp_path: Path) -> None:
+    """Glass + lamp + metal materials with full visual properties round-trip via JSON."""
+    p = vxw.Palette(
+        materials=[
+            vxw.Material(id=0, name="air", color_rgb=(0, 0, 0), flags=("empty",)),
+            vxw.Material(
+                id=1, name="glass", color_rgb=(200, 230, 255), flags=("solid", "transparent"),
+                transparent=True, roughness=0.1,
+            ),
+            vxw.Material(
+                id=2, name="lamp", color_rgb=(255, 230, 150), flags=("solid", "emissive"),
+                emission_rgb=(255, 220, 140), emission_energy=4.0, roughness=0.4,
+            ),
+            vxw.Material(
+                id=3, name="steel", color_rgb=(140, 140, 150), flags=("solid", "metallic"),
+                metallic=0.9, roughness=0.3,
+            ),
+        ],
+        semantic_classes=[vxw.SemanticClass(id=0, name="unknown", default_material=1)],
+        color_lut=[],
+    )
+    path = tmp_path / "palette.json"
+    vxw.write_palette(path, p)
+    loaded = vxw.read_palette(path)
+    assert loaded == p
+    assert loaded.materials[1].transparent is True
+    assert loaded.materials[2].emission_energy == 4.0
+    assert loaded.materials[3].metallic == 0.9
+
+
+def test_material_legacy_palette_loads(tmp_path: Path) -> None:
+    """A palette.json written without the new visual fields must load with defaults."""
+    path = tmp_path / "palette.json"
+    path.write_text(
+        '{"materials":['
+        '{"id":0,"name":"air","color_rgb":[0,0,0],"flags":["empty"]},'
+        '{"id":1,"name":"concrete","color_rgb":[180,180,180],"flags":["solid"]}'
+        '],"semantic_classes":[],"color_lut":[]}'
+    )
+    p = vxw.read_palette(path)
+    assert p.materials[1].transparent is False
+    assert p.materials[1].emission_energy == 0.0
+    assert p.materials[1].roughness == 0.75
+
+
 def test_palette_max_256_materials() -> None:
     too_many = [
         vxw.Material(id=i, name=f"m{i}", color_rgb=(0, 0, 0), flags=[])

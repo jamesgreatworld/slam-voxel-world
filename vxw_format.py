@@ -95,12 +95,25 @@ VOXEL_DTYPE = np.dtype(
 
 @dataclass(frozen=True)
 class Material:
+    """A material is the renderable + physical description of a voxel type.
+
+    Visual fields (transparent / emission_rgb / emission_energy / metallic /
+    roughness) drive per-material rendering in the engine (Spec §4.3). All have
+    sensible defaults so old palette.json files without these keys still load.
+    """
+
     id: int
     name: str
     color_rgb: tuple[int, int, int]
     flags: tuple[str, ...]
     density: Optional[float] = None
     hardness: Optional[float] = None
+    # --- Visual properties (per-material rendering, R4 onward) ---
+    transparent: bool = False
+    emission_rgb: tuple[int, int, int] = (0, 0, 0)
+    emission_energy: float = 0.0
+    metallic: float = 0.0
+    roughness: float = 0.75
 
     def to_dict(self) -> dict:
         d: dict = {
@@ -113,6 +126,17 @@ class Material:
             d["density"] = self.density
         if self.hardness is not None:
             d["hardness"] = self.hardness
+        # Visual properties: only serialise non-default values to keep JSON terse
+        if self.transparent:
+            d["transparent"] = True
+        if self.emission_rgb != (0, 0, 0):
+            d["emission_rgb"] = list(self.emission_rgb)
+        if self.emission_energy != 0.0:
+            d["emission_energy"] = self.emission_energy
+        if self.metallic != 0.0:
+            d["metallic"] = self.metallic
+        if self.roughness != 0.75:
+            d["roughness"] = self.roughness
         return d
 
     @classmethod
@@ -124,6 +148,11 @@ class Material:
             flags=tuple(d["flags"]),
             density=d.get("density"),
             hardness=d.get("hardness"),
+            transparent=bool(d.get("transparent", False)),
+            emission_rgb=tuple(d["emission_rgb"]) if "emission_rgb" in d else (0, 0, 0),
+            emission_energy=float(d.get("emission_energy", 0.0)),
+            metallic=float(d.get("metallic", 0.0)),
+            roughness=float(d.get("roughness", 0.75)),
         )
 
 
@@ -154,6 +183,11 @@ def _normalize_material(m: Material) -> Material:
         flags=tuple(m.flags),
         density=m.density,
         hardness=m.hardness,
+        transparent=m.transparent,
+        emission_rgb=tuple(m.emission_rgb),
+        emission_energy=m.emission_energy,
+        metallic=m.metallic,
+        roughness=m.roughness,
     )
 
 

@@ -1,31 +1,22 @@
 # voxel_editor.gd
 # Click-to-destroy voxel editor with mouse-cursor picking + hover highlight.
-#
-# Picking modes:
-#   - try_destroy_at_mouse_position(): use the current mouse cursor pos
-#     (PC editor style, primary entry point — used by _input on left-click)
-#   - try_destroy_at_viewport_center(): screen-centre crosshair pick
-#     (legacy; kept for selftest)
-#   - try_destroy_along_ray(): explicit ray (kept for selftest)
-#
-# Hover highlight: each frame raycasts from the current mouse position and
-# positions a translucent yellow box around the targeted voxel. Click destroys it.
-#
-# Removal: MultiMesh.instance_count is fixed; hidden instances get a zero-basis
-# transform. The internal spatial hash entry is erased so subsequent picks skip
-# the removed voxel.
+# Decoupled from the renderer's internal MMI layout: talks only to the renderer's
+# public API (has_voxel / hide_voxel / get_voxel_size / get_world_voxel_indices),
+# so per-material rendering (R4.2) doesn't require any editor changes.
 
 extends Node3D
 
 signal voxel_destroyed(world_voxel_index: Vector3i, world_position_m: Vector3)
 
-var _world = null                   # VxwLoader.VxwWorld (untyped)
-var _mmi: MultiMeshInstance3D = null
+var _renderer: Node3D = null
 var _cam: Camera3D = null
 var _voxel_size: float = 0.10
-var _index_to_instance: Dictionary = {}   # Vector3i → int
+var _edit_enabled: bool = false  # Editor is OFF by default; user opts in via menu
 
-# Highlight selection box
+# Local mirror of which voxels still exist (for fast iteration during march).
+var _occupied: Dictionary = {}   # Vector3i → true
+
+# Highlight box
 var _highlight: MeshInstance3D = null
 var _hovered_vi: Vector3i = Vector3i.ZERO
 var _has_hover: bool = false
@@ -34,16 +25,29 @@ const _ZERO_BASIS := Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO)
 const _SENTINEL_FAR := 99999
 
 
-func init_editor(world, mmi: MultiMeshInstance3D, cam: Camera3D) -> void:
-    _world = world
-    _mmi = mmi
-    _cam = cam
-    _voxel_size = float(world.voxel_size_meters)
-    _index_to_instance.clear()
-    var n: int = world.positions.size()
-    for i in n:
-        var vi := _world_to_voxel_index(world.positions[i])
-        _index_to_instance[vi] = i
+# New canonical signature: take the renderer (not the raw MMI).
+func init_editor(renderer_or_world, mmi_or_cam, cam_arg = null) -> void:
+    # Backward compatibility:
+    #   init_editor(world, mmi, cam) — pre-R4.2 callers
+    #   init_editor(renderer, cam)   — new callers
+    if cam_arg != null:
+        # 3-arg legacy form
+        _renderer = null
+        var world = renderer_or_world
+        _cam = cam_arg
+        _voxel_size = float(world.voxel_size_meters)
+        _occupied.clear()
+        for i in world.positions.size():
+            var p: Vector3 = world.positions[i]
+            _occupied[_world_to_voxel_index(p)] = true
+    else:
+        # 2-arg new form
+        _renderer = renderer_or_world
+        _cam = mmi_or_cam
+        _voxel_size = _renderer.get_voxel_size()
+        _occupied.clear()
+        for vi in _renderer.get_world_voxel_indices():
+            _occupied[vi] = true
     _build_highlight()
 
 
@@ -57,7 +61,6 @@ func _build_highlight() -> void:
     mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
     mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
     mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-    mat.no_depth_test = false
     box.material = mat
     _highlight = MeshInstance3D.new()
     _highlight.name = "HoverHighlight"
@@ -66,7 +69,20 @@ func _build_highlight() -> void:
     add_child(_highlight)
 
 
+func set_edit_enabled(enabled: bool) -> void:
+    _edit_enabled = enabled
+    if not enabled and _highlight != null and _has_hover:
+        _highlight.visible = false
+        _has_hover = false
+
+
+func is_edit_enabled() -> bool:
+    return _edit_enabled
+
+
 func _process(_delta: float) -> void:
+    if not _edit_enabled:
+        return
     _update_hover()
 
 
@@ -91,9 +107,8 @@ func _update_hover() -> void:
         _highlight.visible = true
 
 
-# Crosshair-style pick (legacy / selftest)
 func try_destroy_at_viewport_center(max_distance_m: float = 50.0) -> bool:
-    if _cam == null or _mmi == null:
+    if _cam == null:
         return false
     var vp := _cam.get_viewport()
     if vp == null:
@@ -105,7 +120,7 @@ func try_destroy_at_viewport_center(max_distance_m: float = 50.0) -> bool:
 
 
 func try_destroy_at_mouse_position() -> bool:
-    if _cam == null or _mmi == null:
+    if _cam == null:
         return false
     var vp := _cam.get_viewport()
     if vp == null:
@@ -133,7 +148,7 @@ func _march_find(ro: Vector3, rd: Vector3, max_distance_m: float) -> Vector3i:
         if vi == last_vi:
             continue
         last_vi = vi
-        if _index_to_instance.has(vi):
+        if _occupied.has(vi):
             return vi
     return Vector3i(_SENTINEL_FAR, _SENTINEL_FAR, _SENTINEL_FAR)
 
@@ -142,19 +157,23 @@ func _march_and_destroy(ro: Vector3, rd: Vector3, max_distance_m: float) -> bool
     var hit: Vector3i = _march_find(ro, rd, max_distance_m)
     if hit.x == _SENTINEL_FAR:
         return false
-    if not _index_to_instance.has(hit):
+    return _destroy_voxel(hit)
+
+
+func _destroy_voxel(vi: Vector3i) -> bool:
+    if not _occupied.has(vi):
         return false
-    var inst_idx: int = _index_to_instance[hit]
-    _mmi.multimesh.set_instance_transform(
-        inst_idx,
-        Transform3D(_ZERO_BASIS, Vector3.ZERO)
-    )
-    _index_to_instance.erase(hit)
-    if _has_hover and _hovered_vi == hit:
+    var ok := true
+    if _renderer != null:
+        ok = _renderer.hide_voxel(vi)
+    if not ok:
+        return false
+    _occupied.erase(vi)
+    if _has_hover and _hovered_vi == vi:
         _highlight.visible = false
         _has_hover = false
-    var world_pos := Vector3(hit) * _voxel_size
-    emit_signal("voxel_destroyed", hit, world_pos)
+    var world_pos := Vector3(vi) * _voxel_size
+    emit_signal("voxel_destroyed", vi, world_pos)
     return true
 
 
@@ -168,6 +187,8 @@ func _world_to_voxel_index(p: Vector3) -> Vector3i:
 
 
 func _input(event: InputEvent) -> void:
+    if not _edit_enabled:
+        return
     if event is InputEventMouseButton and event.pressed:
         if event.button_index == MOUSE_BUTTON_LEFT:
             try_destroy_at_mouse_position()
