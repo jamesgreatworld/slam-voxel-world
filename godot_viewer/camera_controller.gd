@@ -30,6 +30,7 @@ var _rig_ctl: Node3D = null   # stereo_rig_controller (Node3D w/ that script)
 var _logger = null
 var _right_held: bool = false
 var _orbit_anchor_pos: Vector2 = Vector2.ZERO  # cursor pos when right-drag began
+var _orbit_enabled: bool = true  # turned off in edit mode so RMB goes to editor
 
 
 func init_controller(cam: Camera3D, rig_ctl: Node3D, logger = null) -> void:
@@ -40,6 +41,7 @@ func init_controller(cam: Camera3D, rig_ctl: Node3D, logger = null) -> void:
     orbit_yaw = orbit_yaw_init
     orbit_pitch = orbit_pitch_init
     apply_mouse_mode()
+    _notify_rig_physics_mode()  # establish initial mode
 
 
 func get_view_mode() -> int:
@@ -60,6 +62,7 @@ func toggle_view_mode() -> void:
     else:
         view_mode = ViewMode.THIRD_PERSON
     apply_mouse_mode()
+    _notify_rig_physics_mode()
     if _logger:
         _logger.info("view_mode", {"now": "1P" if view_mode == ViewMode.FIRST_PERSON else "3P"})
 
@@ -67,6 +70,25 @@ func toggle_view_mode() -> void:
 func set_view_mode(m: int) -> void:
     view_mode = m
     apply_mouse_mode()
+    _notify_rig_physics_mode()
+
+
+# Forward the view mode to the rig so it can switch between free-fly and
+# physics-based walking. Safe to call repeatedly.
+func _notify_rig_physics_mode() -> void:
+    if _rig_ctl != null and _rig_ctl.has_method("set_physics_mode"):
+        _rig_ctl.set_physics_mode(view_mode == ViewMode.FIRST_PERSON)
+
+
+# Edit mode owns RMB for placement; disable orbit while it's on. Called by
+# main.gd when the user toggles edit mode in the pause menu.
+func set_orbit_enabled(enabled: bool) -> void:
+    _orbit_enabled = enabled
+    if not enabled and _right_held:
+        # Release any in-progress drag so we don't leave the mouse captured.
+        Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+        Input.warp_mouse(_orbit_anchor_pos)
+        _right_held = false
 
 
 # Convenience for cmdline / cross-module use without accessing the enum directly.
@@ -98,6 +120,8 @@ func _input(event: InputEvent) -> void:
 
     if event is InputEventMouseButton:
         if event.button_index == MOUSE_BUTTON_RIGHT:
+            if not _orbit_enabled:
+                return   # editor owns RMB while edit mode is on
             # Right-drag orbit: capture cursor on press, release on let-go.
             if event.pressed:
                 _orbit_anchor_pos = get_viewport().get_mouse_position()

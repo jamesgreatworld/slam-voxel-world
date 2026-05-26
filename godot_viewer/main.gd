@@ -82,6 +82,7 @@ func _ready() -> void:
     snap_ctl.configure_from_cli(args)
     voxel_editor.init_editor(renderer, main_cam)
     voxel_editor.voxel_destroyed.connect(_on_voxel_destroyed)
+    voxel_editor.voxel_placed.connect(_on_voxel_placed)
     voxel_editor.set_edit_enabled(false)  # default OFF — opt-in via pause menu
     _wire_pause_menu()
     pause_menu.set_persistence_available(true)
@@ -171,38 +172,46 @@ func _close_pause() -> void:
 func _on_toggle_edit_mode() -> void:
     var new_state: bool = not bool(voxel_editor.is_edit_enabled())
     voxel_editor.set_edit_enabled(new_state)
+    cam_ctl.set_orbit_enabled(not new_state)
     pause_menu.set_edit_mode_label(new_state)
     logger.info("edit_mode", {"enabled": new_state})
 
 
 func _on_voxel_destroyed(world_voxel_index: Vector3i, _world_position_m: Vector3) -> void:
-    # Map world voxel index → (chunk_coord, local_voxel) using FLOOR (works for negatives).
+    _patch_voxel_on_disk(world_voxel_index, 0, 0)  # material=0=air, semantic=0
+    logger.info("voxel_destroyed", {
+        "world_voxel": [world_voxel_index.x, world_voxel_index.y, world_voxel_index.z],
+    })
+
+
+func _on_voxel_placed(world_voxel_index: Vector3i, _world_position_m: Vector3, material_id: int) -> void:
+    _patch_voxel_on_disk(world_voxel_index, material_id, 0)
+    logger.info("voxel_placed", {
+        "world_voxel": [world_voxel_index.x, world_voxel_index.y, world_voxel_index.z],
+        "material_id": material_id,
+    })
+
+
+# Map a world voxel index to its (chunk_coord, local_voxel) and patch the chunk
+# file with a single voxel cell. material_id=0 means clear to air.
+func _patch_voxel_on_disk(world_voxel_index: Vector3i, material_id: int, semantic_id: int) -> void:
     var ce: int = _world.chunk_extent
     var fdiv := Vector3(world_voxel_index) / float(ce)
     var chunk_coord := Vector3i(int(floor(fdiv.x)), int(floor(fdiv.y)), int(floor(fdiv.z)))
     var local := world_voxel_index - chunk_coord * ce
-
     var chunk_path: String = _world_path_absolute + "/chunks/%d_%d_%d.chunk" % [
         chunk_coord.x, chunk_coord.y, chunk_coord.z,
     ]
-    # Air cell = (material=0, semantic=0, state=0, color_idx=0)
-    var air_cell := PackedByteArray([0, 0, 0, 0])
-    var result := VxwWriter.patch_voxel(
+    var cell := PackedByteArray([material_id, semantic_id, 0, 0])
+    VxwWriter.patch_voxel(
         chunk_path,
         chunk_coord,
         local,
-        air_cell,
+        cell,
         ce,
         VxwWriter.Encoding.RLE,
         VxwWriter.Compression.GZIP,
     )
-    logger.info("voxel_destroyed", {
-        "world_voxel": [world_voxel_index.x, world_voxel_index.y, world_voxel_index.z],
-        "chunk_coord": [chunk_coord.x, chunk_coord.y, chunk_coord.z],
-        "local": [local.x, local.y, local.z],
-        "chunk_path": chunk_path,
-        "patch_result": result,  # OK=0 on success
-    })
 
 
 func _on_save_world_backup() -> void:

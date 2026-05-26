@@ -18,6 +18,14 @@ var _world = null
 var _voxel_to_instance: Dictionary = {}
 # material_id → MultiMeshInstance3D (for diagnostics)
 var _mmi_by_material: Dictionary = {}
+# StaticBody3D for collision (R7)
+var _collision_body: StaticBody3D = null
+var _collision_shape: CollisionShape3D = null
+# Placed-voxel scratch bucket (R8): a separate MMI with pre-allocated slots so we
+# can append new voxels at runtime without reallocating the per-material MMIs.
+var _placed_mmi: MultiMeshInstance3D = null
+var _placed_count: int = 0
+const _PLACED_CAPACITY: int = 2000
 
 const _ZERO_BASIS := Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO)
 
@@ -43,6 +51,8 @@ func build(world) -> void:
         _build_material_bucket(mid, indices, world, mat_def)
 
     _add_reference_helpers(_compute_min_y(world))
+    _build_collision_mesh(world)
+    _build_placed_voxel_bucket(world)
 
 
 func hide_voxel(vi: Vector3i) -> bool:
@@ -53,7 +63,33 @@ func hide_voxel(vi: Vector3i) -> bool:
     var idx: int = entry[1]
     mmi.multimesh.set_instance_transform(idx, Transform3D(_ZERO_BASIS, Vector3.ZERO))
     _voxel_to_instance.erase(vi)
+    _rebuild_collision_mesh()
     return true
+
+
+# Place a new voxel at vi with the given material. Returns true on success.
+# Visual goes into the pre-allocated PlacedVoxels MMI; collision mesh is
+# rebuilt so 1P walking sees the new block.
+func add_voxel(vi: Vector3i, material_id: int) -> bool:
+    if _voxel_to_instance.has(vi):
+        return false   # already occupied
+    if _placed_mmi == null or _placed_count >= _PLACED_CAPACITY:
+        push_warning("[renderer] placed voxel bucket full (cap=%d)" % _PLACED_CAPACITY)
+        return false
+    var world_pos := Vector3(vi) * get_voxel_size()
+    var t := Transform3D(Basis.IDENTITY, world_pos)
+    _placed_mmi.multimesh.set_instance_transform(_placed_count, t)
+    _placed_mmi.multimesh.set_instance_color(_placed_count, _color_for_material(material_id))
+    _voxel_to_instance[vi] = [_placed_mmi, _placed_count, material_id]
+    _placed_count += 1
+    _rebuild_collision_mesh()
+    return true
+
+
+func _color_for_material(material_id: int) -> Color:
+    if _world != null and material_id >= 0 and material_id < _world.palette_rgb.size():
+        return _world.palette_rgb[material_id]
+    return Color(1, 1, 1, 1)
 
 
 func has_voxel(vi: Vector3i) -> bool:
@@ -139,6 +175,99 @@ func _compute_min_y(world) -> float:
     for i in world.voxel_count():
         y_min = min(y_min, world.positions[i].y)
     return y_min
+
+
+# Rebuild collision mesh from the current _voxel_to_instance set. Called on
+# add_voxel / hide_voxel so 1P walking always matches the visible geometry.
+# For 1K voxels: ~3K triangles, ~3ms. For 40K SLAM voxels: ~120K triangles,
+# ~50ms — acceptable per-event but would need incremental update if rapid.
+func _rebuild_collision_mesh() -> void:
+    if _world == null or _collision_shape == null:
+        return
+    _build_collision_mesh(_world)
+
+
+# Builds a single StaticBody3D + ConcavePolygonShape3D from triangle soup of
+# all externally-facing voxel faces. Internal faces (shared by 2 occupied
+# neighbors) are skipped to reduce triangle count. This gives 1P walking
+# the geometry it needs to collide with.
+func _build_collision_mesh(world) -> void:
+    var vs: float = world.voxel_size_meters
+    var occupied: Dictionary = {}
+    for vi in _voxel_to_instance.keys():
+        occupied[vi] = true
+
+    # face definitions: (neighbor_offset, 4 corner offsets in CCW order facing outward)
+    var faces := [
+        # +X (right)
+        [Vector3i(1, 0, 0), [Vector3(0.5,-0.5,-0.5), Vector3(0.5,-0.5,0.5), Vector3(0.5,0.5,0.5), Vector3(0.5,0.5,-0.5)]],
+        # -X (left)
+        [Vector3i(-1, 0, 0), [Vector3(-0.5,-0.5,0.5), Vector3(-0.5,-0.5,-0.5), Vector3(-0.5,0.5,-0.5), Vector3(-0.5,0.5,0.5)]],
+        # +Y (top)
+        [Vector3i(0, 1, 0), [Vector3(-0.5,0.5,-0.5), Vector3(0.5,0.5,-0.5), Vector3(0.5,0.5,0.5), Vector3(-0.5,0.5,0.5)]],
+        # -Y (bottom)
+        [Vector3i(0, -1, 0), [Vector3(-0.5,-0.5,0.5), Vector3(0.5,-0.5,0.5), Vector3(0.5,-0.5,-0.5), Vector3(-0.5,-0.5,-0.5)]],
+        # +Z (forward) — in Godot Z+ is back; either way, just an external face
+        [Vector3i(0, 0, 1), [Vector3(0.5,-0.5,0.5), Vector3(-0.5,-0.5,0.5), Vector3(-0.5,0.5,0.5), Vector3(0.5,0.5,0.5)]],
+        # -Z (back)
+        [Vector3i(0, 0, -1), [Vector3(-0.5,-0.5,-0.5), Vector3(0.5,-0.5,-0.5), Vector3(0.5,0.5,-0.5), Vector3(-0.5,0.5,-0.5)]],
+    ]
+
+    var triangles := PackedVector3Array()
+    for vi in occupied.keys():
+        var centre := Vector3(vi) * vs
+        for face in faces:
+            var neighbor: Vector3i = vi + face[0]
+            if occupied.has(neighbor):
+                continue
+            var corners: Array = face[1]
+            var v0: Vector3 = centre + corners[0] * vs
+            var v1: Vector3 = centre + corners[1] * vs
+            var v2: Vector3 = centre + corners[2] * vs
+            var v3: Vector3 = centre + corners[3] * vs
+            # 2 triangles per quad (CCW)
+            triangles.append(v0); triangles.append(v1); triangles.append(v2)
+            triangles.append(v0); triangles.append(v2); triangles.append(v3)
+
+    print("[renderer] built collision mesh: %d voxels → %d triangles" %
+        [occupied.size(), triangles.size() / 3])
+
+    # On rebuild, reuse the existing CollisionShape3D so PhysicsServer reslices
+    # incrementally rather than tearing down the StaticBody3D.
+    if _collision_shape == null:
+        _collision_shape = CollisionShape3D.new()
+        _collision_shape.name = "VoxelCollisionShape"
+        _collision_body = StaticBody3D.new()
+        _collision_body.name = "VoxelCollisionBody"
+        _collision_body.add_child(_collision_shape)
+        add_child(_collision_body)
+    var shape := ConcavePolygonShape3D.new()
+    shape.set_faces(triangles)
+    _collision_shape.shape = shape
+
+
+# Pre-allocate a MultiMesh with PLACED_CAPACITY hidden instance slots; add_voxel
+# fills them in order. All slots start invisible (zero-basis transform).
+func _build_placed_voxel_bucket(world) -> void:
+    var box := BoxMesh.new()
+    box.size = Vector3.ONE * world.voxel_size_meters
+    var mm := MultiMesh.new()
+    mm.transform_format = MultiMesh.TRANSFORM_3D
+    mm.use_colors = true
+    mm.mesh = box
+    mm.instance_count = _PLACED_CAPACITY
+    for i in _PLACED_CAPACITY:
+        mm.set_instance_transform(i, Transform3D(_ZERO_BASIS, Vector3.ZERO))
+        mm.set_instance_color(i, Color(1, 1, 1, 1))
+    _placed_mmi = MultiMeshInstance3D.new()
+    _placed_mmi.name = "PlacedVoxels"
+    var mat := StandardMaterial3D.new()
+    mat.vertex_color_use_as_albedo = true
+    mat.roughness = 0.75
+    _placed_mmi.material_override = mat
+    _placed_mmi.multimesh = mm
+    _placed_count = 0
+    add_child(_placed_mmi)
 
 
 func _add_reference_helpers(plane_y: float) -> void:
