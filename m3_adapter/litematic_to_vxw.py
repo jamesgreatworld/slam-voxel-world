@@ -27,6 +27,10 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import vxw_format as vxw  # noqa: E402
+from m3_adapter.mc_blockmap import (  # noqa: E402
+    block_id_to_material as _shared_block_id_to_material,
+    load_minecraft_palette as _shared_load_minecraft_palette,
+)
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -53,101 +57,8 @@ def _setup_logging() -> Path:
     return log_path
 
 
-def load_minecraft_palette(path: Path) -> tuple[vxw.Palette, dict[str, int]]:
-    """Load palette_minecraft.json and return (Palette, name → material_id map)."""
-    data = json.loads(path.read_text(encoding="utf-8"))
-    materials = [vxw.Material.from_dict(m) for m in data["materials"]]
-    semantic_classes = [vxw.SemanticClass.from_dict(c) for c in data["semantic_classes"]]
-    palette = vxw.Palette(
-        materials=materials,
-        semantic_classes=semantic_classes,
-        color_lut=[tuple(c) for c in data.get("color_lut", [])],
-    )
-    name_to_id = {m.name: m.id for m in materials}
-    return palette, name_to_id
-
-
-# Minecraft block id (without minecraft: prefix) → our material name
-# Anything not in this table falls back to "stone".
-MC_TO_MATERIAL_NAME: dict[str, str] = {
-    "stone": "stone",
-    "smooth_stone": "stone",
-    "andesite": "stone",
-    "diorite": "stone",
-    "granite": "stone",
-    "cobblestone": "cobblestone",
-    "mossy_cobblestone": "cobblestone",
-    "dirt": "dirt",
-    "coarse_dirt": "dirt",
-    "podzol": "dirt",
-    "grass_block": "grass_block",
-    "sand": "sand",
-    "sandstone": "sand",
-    "oak_planks": "oak_planks",
-    "oak_log": "oak_log",
-    "oak_wood": "oak_log",
-    "oak_leaves": "leaves",
-    "spruce_planks": "spruce_planks",
-    "spruce_log": "oak_log",
-    "spruce_leaves": "leaves",
-    "birch_planks": "birch_planks",
-    "birch_log": "oak_log",
-    "birch_leaves": "leaves",
-    "dark_oak_planks": "oak_planks",
-    "jungle_planks": "oak_planks",
-    "acacia_planks": "oak_planks",
-    "glass": "glass",
-    "white_stained_glass": "glass",
-    "glass_pane": "glass",
-    "glowstone": "glowstone",
-    "sea_lantern": "glowstone",
-    "redstone_lamp": "redstone_lamp",
-    "iron_block": "iron_block",
-    "iron_ore": "iron_block",
-    "gold_block": "gold_block",
-    "gold_ore": "gold_block",
-    "diamond_block": "diamond_block",
-    "diamond_ore": "diamond_block",
-    "white_wool": "wool_white",
-    "red_wool": "wool_red",
-    "blue_wool": "wool_blue",
-    "white_concrete": "concrete_white",
-    "gray_concrete": "concrete_gray",
-    "light_gray_concrete": "concrete_white",
-    "red_concrete": "concrete_red",
-    "blue_concrete": "concrete_blue",
-    "bricks": "brick",
-    "brick_block": "brick",
-    "stone_bricks": "stone_bricks",
-    "polished_stone_bricks": "stone_bricks",
-    "mossy_stone_bricks": "stone_bricks",
-    "obsidian": "obsidian",
-    "water": "water",
-    "lava": "lava",
-    "ice": "ice",
-    "packed_ice": "ice",
-    "snow_block": "snow_block",
-    "snow": "snow_block",
-}
-
-
-def block_id_to_material(block_id: str, name_to_id: dict[str, int]) -> int:
-    """Map a Minecraft block id (e.g. 'minecraft:stone') to our material_id.
-
-    Strips `minecraft:` prefix. Unknown blocks → "stone" (id=1).
-    Air-like blocks (air, cave_air, void_air) → 0.
-    """
-    name = block_id
-    if name.startswith("minecraft:"):
-        name = name[len("minecraft:"):]
-    # Strip any state suffix like "[powered=true]"
-    bracket = name.find("[")
-    if bracket >= 0:
-        name = name[:bracket]
-    if name in ("air", "cave_air", "void_air", "structure_void"):
-        return 0
-    mapped_name = MC_TO_MATERIAL_NAME.get(name, "stone")
-    return name_to_id.get(mapped_name, 1)
+load_minecraft_palette = _shared_load_minecraft_palette
+block_id_to_material = _shared_block_id_to_material
 
 
 def litematic_to_vxw(

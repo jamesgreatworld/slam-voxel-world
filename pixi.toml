@@ -16,3 +16,4 @@ pytest = ">=9.0.3,<10"
 [pypi-dependencies]
 pypcd4 = ">=1.4.3, <2"
 litemapy = ">=0.11.0b0, <0.12"
+anvil-parser = ">=0.9.0, <0.10"
