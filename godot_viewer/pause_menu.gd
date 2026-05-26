@@ -10,22 +10,29 @@ extends CanvasLayer
 signal resume_requested
 signal toggle_view_requested
 signal toggle_edit_mode_requested
+signal undo_requested
+signal material_picker_requested
 signal reset_rig_requested
 signal save_world_requested
 signal reload_world_requested
 signal load_world_requested(path: String)
+signal import_litematic_requested(path: String)
 signal quit_requested
 
 @onready var _panel: PanelContainer = $Backdrop/Panel
 @onready var _resume_btn: Button = $Backdrop/Panel/VBox/ResumeButton
 @onready var _view_btn: Button = $Backdrop/Panel/VBox/ViewButton
 @onready var _edit_btn: Button = $Backdrop/Panel/VBox/EditButton
+@onready var _undo_btn: Button = $Backdrop/Panel/VBox/UndoButton
+@onready var _mat_btn: Button = $Backdrop/Panel/VBox/MaterialButton
 @onready var _reset_btn: Button = $Backdrop/Panel/VBox/ResetButton
 @onready var _load_btn: Button = $Backdrop/Panel/VBox/LoadButton
+@onready var _import_litematic_btn: Button = $Backdrop/Panel/VBox/ImportLitematicButton
 @onready var _save_btn: Button = $Backdrop/Panel/VBox/SaveButton
 @onready var _reload_btn: Button = $Backdrop/Panel/VBox/ReloadButton
 @onready var _quit_btn: Button = $Backdrop/Panel/VBox/QuitButton
 @onready var _file_dialog: FileDialog = $LoadDialog
+@onready var _litematic_dialog: FileDialog = $LitematicImportDialog
 
 
 func _ready() -> void:
@@ -35,17 +42,22 @@ func _ready() -> void:
     _resume_btn.pressed.connect(func(): emit_signal("resume_requested"))
     _view_btn.pressed.connect(func(): emit_signal("toggle_view_requested"))
     _edit_btn.pressed.connect(func(): emit_signal("toggle_edit_mode_requested"))
+    _undo_btn.pressed.connect(func(): emit_signal("undo_requested"))
+    _mat_btn.pressed.connect(func(): emit_signal("material_picker_requested"))
     _reset_btn.pressed.connect(func(): emit_signal("reset_rig_requested"))
     _load_btn.pressed.connect(_on_load_clicked)
+    _import_litematic_btn.pressed.connect(_on_import_litematic_clicked)
     _save_btn.pressed.connect(func(): emit_signal("save_world_requested"))
     _reload_btn.pressed.connect(func(): emit_signal("reload_world_requested"))
     _quit_btn.pressed.connect(func(): emit_signal("quit_requested"))
-    # FileDialog signals — dir_selected for OPEN_DIR mode
+    # FileDialog signals
     _file_dialog.dir_selected.connect(_on_dir_selected)
+    _litematic_dialog.file_selected.connect(_on_litematic_selected)
     # Initial dir = project's out/ folder (where .vxw files live)
     var default_dir := ProjectSettings.globalize_path("res://../out")
     if DirAccess.dir_exists_absolute(default_dir):
         _file_dialog.current_dir = default_dir
+        _litematic_dialog.current_dir = default_dir
 
 
 func _on_load_clicked() -> void:
@@ -54,6 +66,23 @@ func _on_load_clicked() -> void:
 
 func _on_dir_selected(path: String) -> void:
     emit_signal("load_world_requested", path)
+
+
+func _on_import_litematic_clicked() -> void:
+    _litematic_dialog.popup_centered(Vector2i(800, 500))
+
+
+func _on_litematic_selected(path: String) -> void:
+    emit_signal("import_litematic_requested", path)
+
+
+func set_undo_count(n: int) -> void:
+    if n == 0:
+        _undo_btn.text = "Undo  (Ctrl+Z)"
+        _undo_btn.disabled = true
+    else:
+        _undo_btn.text = "Undo  (Ctrl+Z)  [%d]" % n
+        _undo_btn.disabled = false
 
 
 func is_open() -> bool:

@@ -9,6 +9,7 @@
 [ext_resource type="Script" path="res://pause_menu.gd" id="PauseMenuScript"]
 [ext_resource type="Script" path="res://voxel_editor.gd" id="VoxelEditorScript"]
 [ext_resource type="Script" path="res://vxw_writer.gd" id="VxwWriterScript"]
+[ext_resource type="Script" path="res://material_picker.gd" id="MaterialPickerScript"]
 
 [sub_resource type="ProceduralSkyMaterial" id="Sky_a"]
 sky_top_color = Color(0.4, 0.5, 0.65, 1)
@@ -173,6 +174,23 @@ theme_override_colors/font_color = Color(0.6, 0.6, 1, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 4
 
+[node name="EditWarning" type="Label" parent="HUD"]
+visible = false
+anchor_left = 0.5
+anchor_top = 0.0
+anchor_right = 0.5
+anchor_bottom = 0.0
+offset_left = -240.0
+offset_top = 76.0
+offset_right = 240.0
+offset_bottom = 104.0
+text = "⚠ EDIT MODE ON — LMB destroys, RMB places, Ctrl+Z undo, Esc → menu"
+horizontal_alignment = 1
+theme_override_font_sizes/font_size = 16
+theme_override_colors/font_color = Color(1, 0.5, 0.3, 1)
+theme_override_colors/font_outline_color = Color(0.2, 0, 0, 1)
+theme_override_constants/outline_size = 4
+
 [node name="ActionBar" type="Label" parent="HUD"]
 anchor_top = 1.0
 anchor_bottom = 1.0
@@ -201,14 +219,14 @@ anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -160.0
-offset_top = -180.0
-offset_right = 160.0
-offset_bottom = 180.0
+offset_left = -180.0
+offset_top = -260.0
+offset_right = 180.0
+offset_bottom = 260.0
 
 [node name="VBox" type="VBoxContainer" parent="PauseMenu/Backdrop/Panel"]
-custom_minimum_size = Vector2(280, 320)
-theme_override_constants/separation = 12
+custom_minimum_size = Vector2(320, 500)
+theme_override_constants/separation = 8
 
 [node name="Title" type="Label" parent="PauseMenu/Backdrop/Panel/VBox"]
 text = "PAUSED"
@@ -228,12 +246,25 @@ custom_minimum_size = Vector2(0, 40)
 text = "Edit Mode: OFF  (clicks ignored)"
 custom_minimum_size = Vector2(0, 40)
 
+[node name="UndoButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
+text = "Undo  (Ctrl+Z)"
+custom_minimum_size = Vector2(0, 40)
+disabled = true
+
+[node name="MaterialButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
+text = "Choose Material..."
+custom_minimum_size = Vector2(0, 40)
+
 [node name="ResetButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
 text = "Reset Rig  (R)"
 custom_minimum_size = Vector2(0, 40)
 
 [node name="LoadButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
 text = "Load World..."
+custom_minimum_size = Vector2(0, 40)
+
+[node name="ImportLitematicButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
+text = "Import .litematic..."
 custom_minimum_size = Vector2(0, 40)
 
 [node name="SaveButton" type="Button" parent="PauseMenu/Backdrop/Panel/VBox"]
@@ -256,3 +287,52 @@ ok_button_text = "Load"
 file_mode = 2
 access = 2
 show_hidden_files = false
+
+[node name="LitematicImportDialog" type="FileDialog" parent="PauseMenu"]
+process_mode = 3
+title = "Select a .litematic to import"
+size = Vector2i(900, 600)
+ok_button_text = "Import"
+file_mode = 0
+access = 2
+filters = PackedStringArray("*.litematic ; Litematica schematic")
+show_hidden_files = false
+
+[node name="MaterialPicker" type="CanvasLayer" parent="."]
+script = ExtResource("MaterialPickerScript")
+layer = 11
+
+[node name="Backdrop" type="ColorRect" parent="MaterialPicker"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+color = Color(0, 0, 0, 0.5)
+mouse_filter = 0
+
+[node name="Panel" type="PanelContainer" parent="MaterialPicker/Backdrop"]
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -300.0
+offset_top = -240.0
+offset_right = 300.0
+offset_bottom = 240.0
+
+[node name="VBox" type="VBoxContainer" parent="MaterialPicker/Backdrop/Panel"]
+custom_minimum_size = Vector2(560, 440)
+theme_override_constants/separation = 10
+
+[node name="Title" type="Label" parent="MaterialPicker/Backdrop/Panel/VBox"]
+text = "Choose placement material"
+horizontal_alignment = 1
+theme_override_font_sizes/font_size = 22
+theme_override_colors/font_color = Color(1, 0.95, 0.7, 1)
+
+[node name="Grid" type="GridContainer" parent="MaterialPicker/Backdrop/Panel/VBox"]
+columns = 3
+theme_override_constants/h_separation = 6
+theme_override_constants/v_separation = 6
+
+[node name="CloseButton" type="Button" parent="MaterialPicker/Backdrop/Panel/VBox"]
+text = "Close  (Esc)"
+custom_minimum_size = Vector2(0, 36)

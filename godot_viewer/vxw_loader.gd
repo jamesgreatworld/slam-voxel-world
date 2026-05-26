@@ -12,6 +12,33 @@ const HEADER_SIZE := 28
 enum Encoding { DENSE = 0, RLE = 1, SVO = 2 }
 enum Compression { RAW = 0, LZ4 = 1, ZSTD = 2, GZIP = 3 }
 
+# CRC32 (zlib polynomial 0xEDB88320). Lazy-built 256-entry table.
+static var _crc_table: PackedInt64Array
+
+static func _ensure_crc_table() -> void:
+    if _crc_table.size() == 256:
+        return
+    var t := PackedInt64Array()
+    t.resize(256)
+    for n in 256:
+        var c: int = n
+        for _k in 8:
+            if (c & 1) != 0:
+                c = (c >> 1) ^ 0xEDB88320
+            else:
+                c = c >> 1
+        t[n] = c & 0xFFFFFFFF
+    _crc_table = t
+
+static func crc32(data: PackedByteArray) -> int:
+    _ensure_crc_table()
+    var crc: int = 0xFFFFFFFF
+    var n := data.size()
+    for i in n:
+        var idx: int = (crc ^ data[i]) & 0xFF
+        crc = (crc >> 8) ^ int(_crc_table[idx])
+    return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF
+
 
 class VxwWorld extends RefCounted:
     var voxel_size_meters: float = 0.10
@@ -118,6 +145,15 @@ static func _load_chunk(path: String, world: VxwWorld) -> void:
     var extent := 1 << extent_log2
 
     var payload := raw.slice(HEADER_SIZE, HEADER_SIZE + payload_bytes)
+    var crc_offset := HEADER_SIZE + payload_bytes
+    if raw.size() < crc_offset + 4:
+        push_error("Truncated chunk (no CRC tail): " + path)
+        return
+    var crc_stored := raw.decode_u32(crc_offset)
+    var crc_computed := crc32(payload)
+    if crc_stored != crc_computed:
+        push_error("CRC mismatch in %s: stored=%08x computed=%08x — skipping chunk" % [path, crc_stored, crc_computed])
+        return
 
     var data: PackedByteArray
     var max_size := extent * extent * extent * 8 + 1024

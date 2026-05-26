@@ -14,6 +14,12 @@ var logger  # VxwLog instance, untyped to avoid class_name registration issues
 var _world  # loaded VxwLoader.VxwWorld
 var _world_path_absolute: String = ""
 
+# Undo stack: each entry = {op: "destroy"|"place", vi: Vector3i, material_id: int}
+# - "destroy" entry: the voxel was destroyed; undo re-places it with material_id
+# - "place" entry: a new voxel was placed; undo destroys it
+const _UNDO_CAP: int = 50
+var _undo_stack: Array = []
+
 @onready var renderer: Node3D = $VoxelRenderer
 @onready var stereo_rig: Node3D = $StereoRig  # has stereo_rig_controller.gd
 @onready var cam_ctl: Node = $CameraController
@@ -21,10 +27,12 @@ var _world_path_absolute: String = ""
 @onready var snap_ctl: Node = $SnapshotController
 @onready var pause_menu: CanvasLayer = $PauseMenu
 @onready var voxel_editor: Node3D = $VoxelEditor
+@onready var material_picker: CanvasLayer = $MaterialPicker
 @onready var main_cam: Camera3D = $Camera3D
 @onready var status_label: Label = $HUD/StatusLabel
 @onready var mode_label: Label = $HUD/ModeLabel
 @onready var pose_label: Label = $HUD/PoseLabel
+@onready var edit_warning: Label = $HUD/EditWarning
 @onready var left_cam: Camera3D = $HUD/LeftStereoContainer/LeftStereoViewport/LeftStereoCamera
 @onready var right_cam: Camera3D = $HUD/RightStereoContainer/RightStereoViewport/RightStereoCamera
 @onready var left_vp: SubViewport = $HUD/LeftStereoContainer/LeftStereoViewport
@@ -121,8 +129,11 @@ func _parse_rig_pose(spec: String) -> Transform3D:
 
 
 func _input(event: InputEvent) -> void:
-    if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
-        _toggle_pause()
+    if event is InputEventKey and event.pressed:
+        if event.keycode == KEY_ESCAPE:
+            _toggle_pause()
+        elif event.keycode == KEY_Z and event.ctrl_pressed:
+            undo_last_edit()
 
 
 func _wire_pause_menu() -> void:
@@ -139,6 +150,10 @@ func _wire_pause_menu() -> void:
     pause_menu.reload_world_requested.connect(_on_reload_world)
     pause_menu.load_world_requested.connect(_on_load_world_requested)
     pause_menu.toggle_edit_mode_requested.connect(_on_toggle_edit_mode)
+    pause_menu.undo_requested.connect(undo_last_edit)
+    pause_menu.material_picker_requested.connect(_on_material_picker_requested)
+    pause_menu.import_litematic_requested.connect(_on_import_litematic_requested)
+    material_picker.material_selected.connect(_on_material_selected)
     pause_menu.quit_requested.connect(func():
         logger.info("session_end", {"reason": "menu_quit"})
         get_tree().quit()
@@ -174,22 +189,97 @@ func _on_toggle_edit_mode() -> void:
     voxel_editor.set_edit_enabled(new_state)
     cam_ctl.set_orbit_enabled(not new_state)
     pause_menu.set_edit_mode_label(new_state)
+    edit_warning.visible = new_state
     logger.info("edit_mode", {"enabled": new_state})
 
 
 func _on_voxel_destroyed(world_voxel_index: Vector3i, _world_position_m: Vector3) -> void:
-    _patch_voxel_on_disk(world_voxel_index, 0, 0)  # material=0=air, semantic=0
+    # We don't know the material_id of the destroyed voxel from the signal,
+    # so for undo we restore as material=1 (stone) — pragmatic fallback.
+    # When voxel_editor tracks original material on hover we can pass it through.
+    _push_undo({"op": "destroy", "vi": world_voxel_index, "material_id": 1})
+    _patch_voxel_on_disk(world_voxel_index, 0, 0)
     logger.info("voxel_destroyed", {
         "world_voxel": [world_voxel_index.x, world_voxel_index.y, world_voxel_index.z],
     })
 
 
 func _on_voxel_placed(world_voxel_index: Vector3i, _world_position_m: Vector3, material_id: int) -> void:
+    _push_undo({"op": "place", "vi": world_voxel_index, "material_id": material_id})
     _patch_voxel_on_disk(world_voxel_index, material_id, 0)
     logger.info("voxel_placed", {
         "world_voxel": [world_voxel_index.x, world_voxel_index.y, world_voxel_index.z],
         "material_id": material_id,
     })
+
+
+func _push_undo(entry: Dictionary) -> void:
+    _undo_stack.append(entry)
+    if _undo_stack.size() > _UNDO_CAP:
+        _undo_stack.pop_front()
+    pause_menu.set_undo_count(_undo_stack.size())
+
+
+func _refresh_undo_label() -> void:
+    pause_menu.set_undo_count(_undo_stack.size())
+
+
+func _on_material_picker_requested() -> void:
+    if _world == null:
+        return
+    material_picker.set_current(voxel_editor.get_current_material())
+    material_picker.open(_world)
+
+
+func _on_material_selected(mid: int) -> void:
+    voxel_editor.set_current_material(mid)
+    logger.info("material_selected", {"material_id": mid})
+
+
+func _on_import_litematic_requested(path: String) -> void:
+    logger.info("import_litematic", {"src": path})
+    _close_pause()
+    var basename: String = path.get_file().get_basename()
+    var out_vxw: String = ProjectSettings.globalize_path("res://../out") + "/" + basename + ".vxw"
+    var proj_root: String = ProjectSettings.globalize_path("res://..")
+    var pixi_cmd := "pixi"
+    var args := [
+        "run", "python",
+        proj_root + "/m3_adapter/litematic_to_vxw.py",
+        path, out_vxw,
+        "--voxel-size", "1.0",
+        "--compression", "gzip",
+    ]
+    var output: Array = []
+    var exit_code: int = OS.execute(pixi_cmd, args, output, true, true)
+    if exit_code != 0:
+        logger.error("import_litematic", {"exit_code": exit_code, "output": output})
+        return
+    logger.info("import_litematic_ok", {"out": out_vxw})
+    _load_world_in_place(out_vxw)
+
+
+func undo_last_edit() -> bool:
+    if _undo_stack.is_empty():
+        logger.info("undo", {"status": "stack empty"})
+        return false
+    var entry: Dictionary = _undo_stack.pop_back()
+    var vi: Vector3i = entry["vi"]
+    var op: String = entry["op"]
+    var mid: int = int(entry["material_id"])
+    if op == "destroy":
+        # Undo a destroy → re-place the voxel
+        if renderer.add_voxel(vi, mid):
+            voxel_editor._occupied[vi] = true
+            _patch_voxel_on_disk(vi, mid, 0)
+    elif op == "place":
+        # Undo a place → destroy the voxel
+        if renderer.hide_voxel(vi):
+            voxel_editor._occupied.erase(vi)
+            _patch_voxel_on_disk(vi, 0, 0)
+    pause_menu.set_undo_count(_undo_stack.size())
+    logger.info("undo", {"op": op, "vi": [vi.x, vi.y, vi.z], "stack_left": _undo_stack.size()})
+    return true
 
 
 # Map a world voxel index to its (chunk_coord, local_voxel) and patch the chunk
