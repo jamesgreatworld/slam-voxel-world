@@ -182,7 +182,14 @@ func _ready() -> void:
             entity_edit.spawn_in_front_of_rig(String(sid))
 
     if _test_delete_first or _test_rotate_first_deg != 0.0 or _test_grab_first_set:
-        var rec_list := _read_entities_json(_world_path_absolute + "/entities.json")
+        var ent_path := _world_path_absolute + "/entities.json"
+        var rec_list: Array = []
+        if FileAccess.file_exists(ent_path):
+            var txt := FileAccess.get_file_as_string(ent_path)
+            if not txt.is_empty():
+                var d = JSON.parse_string(txt)
+                if d != null and d.has("entities"):
+                    rec_list = d.entities
         if rec_list.size() > 0:
             var first_id := String(rec_list[0].get("id", ""))
             if _test_grab_first_set:
