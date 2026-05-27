@@ -25,10 +25,12 @@ const EntityRendererScript = preload("res://entity_renderer.gd")
 const ItemPickerScript = preload("res://item_picker.gd")
 const EntityPlacerScript = preload("res://entity_placer.gd")
 const EntitySelectorScript = preload("res://entity_selector.gd")
+const EntityEditControllerScript = preload("res://entity_edit_controller.gd")
 var entity_renderer: Node3D = null
 var item_picker: CanvasLayer = null
 var entity_placer: Node3D = null
 var entity_selector: Node3D = null
+var entity_edit: Node = null
 @onready var stereo_rig: Node3D = $StereoRig  # has stereo_rig_controller.gd
 @onready var cam_ctl: Node = $CameraController
 @onready var hud_ctl: Node = $HudController
@@ -125,14 +127,12 @@ func _ready() -> void:
     add_child(item_picker)
     item_picker.init_picker(logger)
     item_picker.set_presets(entity_renderer.get_item_presets())
-    item_picker.item_chosen.connect(_on_item_chosen)
 
     entity_placer = Node3D.new()
     entity_placer.set_script(EntityPlacerScript)
     entity_placer.name = "EntityPlacer"
     add_child(entity_placer)
     entity_placer.init_placer(main_cam, voxel_editor, logger)
-    entity_placer.placement_committed.connect(_on_placement_committed)
 
     entity_selector = Node3D.new()
     entity_selector.set_script(EntitySelectorScript)
@@ -142,9 +142,17 @@ func _ready() -> void:
         main_cam, _world_path_absolute, entity_renderer,
         entity_placer, voxel_editor, logger
     )
-    entity_selector.will_delete.connect(_on_entity_will_delete)
-    entity_selector.will_move.connect(_on_entity_will_move)
-    entity_selector.will_rotate.connect(_on_entity_will_rotate)
+
+    entity_edit = Node.new()
+    entity_edit.set_script(EntityEditControllerScript)
+    entity_edit.name = "EntityEditController"
+    add_child(entity_edit)
+    entity_edit.init_controller(
+        _world_path_absolute, _world,
+        entity_renderer, item_picker, entity_placer, entity_selector,
+        stereo_rig, logger
+    )
+    entity_edit.entity_undo_push.connect(_push_undo)
     left_vp.world_3d = get_viewport().world_3d
     right_vp.world_3d = get_viewport().world_3d
     stereo_rig.init_controller(left_cam, right_cam)
@@ -171,9 +179,7 @@ func _ready() -> void:
         item_picker.open()
     for sid in spawn_items:
         if sid != "":
-            var presets: Dictionary = entity_renderer.get_item_presets()
-            if presets.has(sid):
-                _spawn_item_in_front_of_rig(String(sid), presets[sid])
+            entity_edit.spawn_in_front_of_rig(String(sid))
 
     if _test_delete_first or _test_rotate_first_deg != 0.0 or _test_grab_first_set:
         var rec_list := _read_entities_json(_world_path_absolute + "/entities.json")
@@ -224,114 +230,8 @@ func _input(event: InputEvent) -> void:
             item_picker.toggle()
 
 
-func _on_item_chosen(item_id: String) -> void:
-    var presets: Dictionary = entity_renderer.get_item_presets()
-    if not presets.has(item_id):
-        push_error("[main] item_chosen for unknown preset: " + item_id)
-        return
-    # Hand off to the placer: the user moves the ghost with the mouse and
-    # commits with LMB. The placer emits placement_committed → we spawn.
-    if entity_placer != null:
-        entity_placer.start(item_id, presets[item_id])
-        return
-    # Fallback (placer not ready): spawn in front of rig immediately.
-    _spawn_item_in_front_of_rig(item_id, presets[item_id])
-
-
-func _on_placement_committed(item_id: String, world_pos: Vector3, yaw_rad: float) -> void:
-    var presets: Dictionary = entity_renderer.get_item_presets()
-    if not presets.has(item_id):
-        return
-    _spawn_entity(item_id, presets[item_id], world_pos, yaw_rad)
-
-
-func _spawn_item_in_front_of_rig(item_id: String, preset: Dictionary) -> void:
-    var rig_xf: Transform3D = stereo_rig.global_transform
-    var forward: Vector3 = -rig_xf.basis.z.normalized()
-    var pos: Vector3 = rig_xf.origin + forward * 1.5
-    var yaw: float = rig_xf.basis.get_euler().y
-    _spawn_entity(item_id, preset, pos, yaw)
-
-
-func _spawn_entity(item_id: String, preset: Dictionary, pos: Vector3, yaw_rad: float) -> void:
-    var extents = preset.get("overall_extents_m", [0.5, 0.5, 0.5])
-    var label: int = int(preset.get("default_label", 0))
-    var entity_id := _uuid4()
-    var entity: Dictionary = {
-        "id": entity_id,
-        "label": label,
-        "label_name": item_id,
-        "position": [pos.x, pos.y, pos.z],
-        "rotation": _quat_from_yaw(yaw_rad),
-        "bbox_dims": [float(extents[0]), float(extents[1]), float(extents[2])],
-        "voxel_count": 0,
-        "custom_meta": {"mc_item": item_id, "spawned_at": Time.get_unix_time_from_system()},
-    }
-    var ent_path := _world_path_absolute + "/entities.json"
-    var existing := _read_entities_json(ent_path)
-    existing.append(entity)
-    _write_entities_json(ent_path, existing)
-    _push_undo({"op": "entity_spawn", "id": entity_id})
-    logger.info("entity_spawned", {"id": entity_id, "item": item_id,
-                                   "pos": [pos.x, pos.y, pos.z],
-                                   "yaw_deg": rad_to_deg(yaw_rad),
-                                   "total_entities": existing.size()})
-    entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
-
-
-func _on_entity_will_delete(entity_dict: Dictionary) -> void:
-    _push_undo({"op": "entity_delete", "entity": entity_dict.duplicate(true)})
-
-
-func _on_entity_will_move(id: String, from_pos: Array, to_pos: Array) -> void:
-    _push_undo({"op": "entity_move", "id": id, "from": from_pos, "to": to_pos})
-
-
-func _on_entity_will_rotate(id: String, from_quat: Array, to_quat: Array) -> void:
-    _push_undo({"op": "entity_rotate", "id": id, "from": from_quat, "to": to_quat})
-
-
-func _quat_from_yaw(yaw_rad: float) -> Array:
-    var half := yaw_rad * 0.5
-    return [0.0, sin(half), 0.0, cos(half)]   # [qx, qy, qz, qw]
-
-
-func _uuid4() -> String:
-    # RFC 4122 v4 — enough randomness for our purposes; not cryptographic.
-    var rng := RandomNumberGenerator.new()
-    rng.randomize()
-    var b := PackedByteArray()
-    for i in 16:
-        b.append(rng.randi() & 0xff)
-    b[6] = (b[6] & 0x0f) | 0x40
-    b[8] = (b[8] & 0x3f) | 0x80
-    var hex := b.hex_encode()
-    return "%s-%s-%s-%s-%s" % [
-        hex.substr(0, 8), hex.substr(8, 4), hex.substr(12, 4),
-        hex.substr(16, 4), hex.substr(20, 12),
-    ]
-
-
-func _read_entities_json(path: String) -> Array:
-    if not FileAccess.file_exists(path):
-        return []
-    var txt := FileAccess.get_file_as_string(path)
-    if txt.is_empty():
-        return []
-    var d = JSON.parse_string(txt)
-    if d == null or not d.has("entities"):
-        return []
-    return d.entities
-
-
-func _write_entities_json(path: String, entities: Array) -> void:
-    var payload := {"format_version": "1.0", "entities": entities}
-    var f := FileAccess.open(path, FileAccess.WRITE)
-    if f == null:
-        push_error("[main] cannot write entities.json: " + path)
-        return
-    f.store_string(JSON.stringify(payload, "  "))
-    f.close()
+# Entity-layer mutations live on entity_edit (see entity_edit_controller.gd).
+# main.gd only routes undo entries through it.
 
 
 func _wire_pause_menu() -> void:
@@ -474,58 +374,13 @@ func undo_last_edit() -> bool:
         if renderer.hide_voxel(vi2):
             voxel_editor._occupied.erase(vi2)
             _patch_voxel_on_disk(vi2, 0, 0)
-    elif op == "entity_spawn":
-        _undo_entity_spawn(entry["id"])
-    elif op == "entity_delete":
-        _undo_entity_delete(entry["entity"])
-    elif op == "entity_move":
-        _undo_entity_move(entry["id"], entry["from"])
-    elif op == "entity_rotate":
-        _undo_entity_rotate(entry["id"], entry["from"])
+    elif op.begins_with("entity_"):
+        entity_edit.apply_undo(entry)
     pause_menu.set_undo_count(_undo_stack.size())
     logger.info("undo", {"op": op, "stack_left": _undo_stack.size()})
     return true
 
 
-func _undo_entity_spawn(id: String) -> void:
-    var ent_path := _world_path_absolute + "/entities.json"
-    var entities := _read_entities_json(ent_path)
-    var kept: Array = []
-    for e in entities:
-        if String(e.get("id", "")) != id:
-            kept.append(e)
-    _write_entities_json(ent_path, kept)
-    entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
-
-
-func _undo_entity_delete(entity_dict: Dictionary) -> void:
-    var ent_path := _world_path_absolute + "/entities.json"
-    var entities := _read_entities_json(ent_path)
-    entities.append(entity_dict)
-    _write_entities_json(ent_path, entities)
-    entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
-
-
-func _undo_entity_move(id: String, from_pos: Array) -> void:
-    var ent_path := _world_path_absolute + "/entities.json"
-    var entities := _read_entities_json(ent_path)
-    for e in entities:
-        if String(e.get("id", "")) == id:
-            e["position"] = from_pos
-            break
-    _write_entities_json(ent_path, entities)
-    entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
-
-
-func _undo_entity_rotate(id: String, from_quat: Array) -> void:
-    var ent_path := _world_path_absolute + "/entities.json"
-    var entities := _read_entities_json(ent_path)
-    for e in entities:
-        if String(e.get("id", "")) == id:
-            e["rotation"] = from_quat
-            break
-    _write_entities_json(ent_path, entities)
-    entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
 
 
 # Map a world voxel index to its (chunk_coord, local_voxel) and patch the chunk
@@ -596,6 +451,8 @@ func _load_world_in_place(world_path: String) -> void:
     entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
     if entity_selector != null:
         entity_selector.set_world_path(_world_path_absolute)
+    if entity_edit != null:
+        entity_edit.set_world(_world, _world_path_absolute)
     # Re-init editor with new world
     voxel_editor.init_editor(renderer, main_cam)
     # Reset rig + reset stereo cams sync
