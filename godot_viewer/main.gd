@@ -21,6 +21,8 @@ const _UNDO_CAP: int = 50
 var _undo_stack: Array = []
 
 @onready var renderer: Node3D = $VoxelRenderer
+const EntityRendererScript = preload("res://entity_renderer.gd")
+var entity_renderer: Node3D = null
 @onready var stereo_rig: Node3D = $StereoRig  # has stereo_rig_controller.gd
 @onready var cam_ctl: Node = $CameraController
 @onready var hud_ctl: Node = $HudController
@@ -80,6 +82,12 @@ func _ready() -> void:
 
     # Wire everything up
     renderer.build(_world)
+    entity_renderer = Node3D.new()
+    entity_renderer.set_script(EntityRendererScript)
+    entity_renderer.name = "EntityRenderer"
+    add_child(entity_renderer)
+    entity_renderer.init_renderer(logger)
+    entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
     left_vp.world_3d = get_viewport().world_3d
     right_vp.world_3d = get_viewport().world_3d
     stereo_rig.init_controller(left_cam, right_cam)
@@ -347,6 +355,7 @@ func _load_world_in_place(world_path: String) -> void:
     for child in renderer.get_children():
         child.queue_free()
     renderer.build(_world)
+    entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
     # Re-init editor with new world
     voxel_editor.init_editor(renderer, main_cam)
     # Reset rig + reset stereo cams sync

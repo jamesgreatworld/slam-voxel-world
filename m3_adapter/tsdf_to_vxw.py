@@ -1,32 +1,34 @@
 """tsdf_to_vxw — convert a PCL .pcd point cloud into a .vxw world via a
 truncated-signed-distance (TSDF-style) intermediate that smooths the surface.
 
-Strategy chosen: **KDTree-with-truncation surface band**.
+Strategy chosen: **down-sample + narrow-band kernel dilation**.
 
 Rationale: Open3D's `ScalableTSDFVolume.integrate()` requires depth + intrinsics
 which we do not have (we get a raw fused point cloud from SLAM). Poisson
 surface reconstruction is the alternative, but on the sparse SLAM scans in
-this repo (~30k pts) Poisson regularly produces degenerate / over-extended
-hulls that "balloon" into empty space.
+this repo (~70k pts spanning ~90m) Poisson regularly produces degenerate /
+over-extended hulls that "balloon" into empty space.
 
 So we use a robust simpler proxy that delivers the same end goal ("smoother
 surface than naive point-to-voxel"):
 
-  1. Build an Open3D PointCloud from the raw points.
+  1. Build an Open3D PointCloud from the raw points (numpy fallback if
+     Open3D isn't installed).
   2. Voxel-down-sample at `tsdf_voxel_size` so we get a roughly uniform
      surface point density (this is the "implicit isosurface samples"
      analogue of TSDF zero-crossings).
-  3. Estimate normals (useful for any downstream consumer; also keeps the
-     API in line with the documented TSDF pipeline).
-  4. Walk a 3D grid at `--voxel-size` resolution over the bounding box,
-     marking a voxel occupied iff the down-sampled point cloud has a sample
-     within `surface_threshold` of the voxel centre (KDTree query, fully
-     vectorised — no Python loop over voxels).
+  3. Estimate normals (kept for downstream consumers; also matches the
+     documented TSDF pipeline shape).
+  4. For each down-sampled point, mark every voxel whose centre lies within
+     `surface_threshold` of the point — implemented as a vectorised kernel
+     broadcast over a small precomputed offset table (no Python loop over
+     voxels and no scipy dependency).
 
 This is morphologically equivalent to dilating the down-sampled surface by
 `surface_threshold`, which is exactly what a TSDF "narrow band" gives you:
 it fills small holes between samples and produces a thicker, smoother
-surface shell.
+surface shell. Increase `--surface-threshold` past the default of
+0.5 × voxel_size to dilate further and fill larger gaps.
 
 Usage:
     pixi run python m3_adapter/tsdf_to_vxw.py \\
@@ -116,32 +118,124 @@ def build_palette() -> vxw.Palette:
     )
 
 
+def _numpy_voxel_downsample(xyz: np.ndarray, voxel_size: float) -> np.ndarray:
+    """Voxel-grid down-sample that averages all points falling in each cell.
+
+    Numpy-only fallback so the adapter still works in environments without
+    Open3D. Functionally equivalent to o3d.PointCloud.voxel_down_sample for
+    a positions-only point cloud.
+    """
+    # Group points by integer voxel index.
+    vc = np.floor(xyz / voxel_size).astype(np.int64)
+    # Get unique voxel coords and an inverse-mapping to compute means per cell.
+    _uniq, inverse = np.unique(vc, axis=0, return_inverse=True)
+    n_cells = _uniq.shape[0]
+    # Sum positions per cell, divide by counts.
+    sums = np.zeros((n_cells, 3), dtype=np.float64)
+    np.add.at(sums, inverse, xyz)
+    counts = np.bincount(inverse, minlength=n_cells).reshape(-1, 1)
+    return sums / counts
+
+
 def downsample_and_normals(
     xyz: np.ndarray,
     tsdf_voxel_size: float,
-) -> tuple[np.ndarray, int]:
-    """Voxel-down-sample with Open3D and estimate normals.
+) -> tuple[np.ndarray, int, str]:
+    """Voxel-down-sample the point cloud.
+
+    Prefers Open3D's voxel_down_sample + estimate_normals (matches the
+    documented TSDF pipeline). Falls back to a numpy implementation if
+    Open3D is unavailable; the numerical output is equivalent for the
+    KDTree-band voxelisation step below — normals are computed only as a
+    side-effect for downstream consumers.
 
     Returns:
-        (downsampled_xyz_Nx3_float64, n_input_points)
+        (downsampled_xyz_Nx3_float64, n_input_points, backend_name)
     """
-    import open3d as o3d
+    n_in = int(len(xyz))
+    try:
+        import open3d as o3d  # type: ignore
+    except ImportError:
+        log.warning(
+            "open3d not available — using numpy voxel-grid downsample "
+            "(equivalent result, normals not computed)"
+        )
+        ds_xyz = _numpy_voxel_downsample(xyz, tsdf_voxel_size)
+        return ds_xyz, n_in, "numpy"
 
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(xyz)
-    n_in = len(pcd.points)
 
     pcd_ds = pcd.voxel_down_sample(voxel_size=tsdf_voxel_size)
     # Normals: not strictly required by the KDTree path below, but estimating
     # them produces the same "surface-aware" intermediate any TSDF pipeline
     # would emit and lets downstream code consume them later if desired.
     radius = max(tsdf_voxel_size * 2.0, 0.05)
-    pcd_ds.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=30)
-    )
+    try:
+        pcd_ds.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=30)
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("estimate_normals failed (%s) — continuing without", exc)
 
     ds_xyz = np.asarray(pcd_ds.points, dtype=np.float64)
-    return ds_xyz, n_in
+    return ds_xyz, n_in, "open3d"
+
+
+def _surface_band_voxels(
+    ds_xyz: np.ndarray,
+    voxel_size: float,
+    surface_threshold: float,
+) -> np.ndarray:
+    """Return the integer voxel indices within `surface_threshold` of any point.
+
+    Strategy: build a small spherical kernel of voxel-index offsets (all
+    cells whose centre is within `surface_threshold` of the origin), then for
+    each surface point, broadcast the kernel onto the cell that contains the
+    point. Final dedupe via `np.unique`. Fully vectorised — no Python loop
+    over voxels.
+
+    Returns: int64 array of shape (M, 3) of unique occupied voxel indices.
+    """
+    # Build kernel offsets (cells whose centre is within surface_threshold of
+    # the origin point). Centre of cell (i,j,k) sits at (i+0.5)*v in voxel
+    # frame, so when the point sits at (0,0,0) the offset cell containing
+    # it is at index 0 with centre at +0.5*v. Use a slightly bigger half-
+    # width so we never miss a cell whose centre is exactly on the surface.
+    r = surface_threshold
+    half_w = int(np.ceil(r / voxel_size)) + 1
+    ax = np.arange(-half_w, half_w + 1, dtype=np.int64)
+    gx, gy, gz = np.meshgrid(ax, ax, ax, indexing="ij")
+    offs = np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=1)
+    # Distance from origin point at (0,0,0) to the centre of the cell at
+    # offset (i,j,k) when the point sits in cell 0: centre = (offs + 0.5) * v
+    # — but we also need to account for sub-voxel point position within its
+    # owning cell. We use a conservative bound: cell at offset (i,j,k) is
+    # within `r` of the source point iff (max(0, (|i|-0.5)) * v ) etc <= r.
+    # Easier and still tight: keep cells whose centre-to-cell-centre distance
+    # is <= r + sqrt(3)/2 * v (worst-case sub-voxel offset). The over-
+    # estimation is bounded and we still distance-test below.
+    pad = (np.sqrt(3.0) * 0.5) * voxel_size
+    centre_dists = np.linalg.norm(offs.astype(np.float64) * voxel_size, axis=1)
+    kernel = offs[centre_dists <= r + pad]
+    log.info(
+        "      kernel half-width=%d cells, %d offset cells (after radius prune)",
+        half_w, len(kernel),
+    )
+
+    # Owning cell for each surface point.
+    owner = np.floor(ds_xyz / voxel_size).astype(np.int64)  # (N, 3)
+    # Broadcast: (N, 1, 3) + (1, K, 3) → (N, K, 3) candidate cells.
+    cand = (owner[:, None, :] + kernel[None, :, :]).reshape(-1, 3)
+    # Centre of each candidate cell in metres.
+    centres = (cand.astype(np.float64) + 0.5) * voxel_size
+    # Source point for each candidate (each point repeats K times).
+    src = np.repeat(ds_xyz, len(kernel), axis=0)
+    dist = np.linalg.norm(centres - src, axis=1)
+    keep = cand[dist <= r]
+    if keep.size == 0:
+        return keep
+    return np.unique(keep, axis=0)
 
 
 def voxelize_surface_band(
@@ -154,70 +248,21 @@ def voxelize_surface_band(
 ) -> tuple[dict, tuple[int, int, int], tuple[int, int, int], int]:
     """Mark every voxel within `surface_threshold` of any downsampled point.
 
-    Uses scipy's cKDTree for an O((N+M) log N) nearest-neighbour query — no
-    Python loops over voxels.
+    Uses a kernel-broadcast approach — vectorised numpy, no Python loops over
+    voxels and no scipy dependency.
 
     Returns:
         (chunks_dict, bounds_min_chunk, bounds_max_chunk, total_occupied_voxels)
     """
-    from scipy.spatial import cKDTree
+    vc_unique = _surface_band_voxels(ds_xyz, voxel_size, surface_threshold)
 
-    # 1) Compute bounding box of voxels we need to consider. Expand by
-    #    surface_threshold + half-voxel so we catch voxels whose centres
-    #    sit just outside the cloud bbox but whose dilation band reaches in.
-    pad = surface_threshold + 0.5 * voxel_size
-    mn = ds_xyz.min(axis=0) - pad
-    mx = ds_xyz.max(axis=0) + pad
-
-    # Voxel-index ranges (inclusive).
-    vi_min = np.floor(mn / voxel_size).astype(np.int64)
-    vi_max = np.floor(mx / voxel_size).astype(np.int64)
-    nx, ny, nz = (vi_max - vi_min + 1).tolist()
-
-    n_candidate = int(nx) * int(ny) * int(nz)
-    log.info(
-        "      candidate voxel grid %d x %d x %d = %d cells",
-        nx, ny, nz, n_candidate,
-    )
-
-    if n_candidate <= 0:
-        raise RuntimeError("empty candidate voxel grid (degenerate bounding box)")
-
-    # 2) Build KDTree on the down-sampled surface points.
-    tree = cKDTree(ds_xyz)
-
-    # 3) Generate every voxel CENTRE in the candidate grid (vectorised).
-    #    To bound memory on very large worlds, process in z-slabs.
-    occupied_voxels: list[np.ndarray] = []
-    # Approx memory: nx*ny*slab_z * 3 * 8 bytes for centres. Keep < ~256 MB.
-    max_cells_per_slab = max(1, (1 << 24) // max(1, nx * ny))
-    slab_z = min(nz, max(1, max_cells_per_slab))
-
-    ax = (vi_min[0] + np.arange(nx, dtype=np.int64))
-    ay = (vi_min[1] + np.arange(ny, dtype=np.int64))
-
-    total_occ = 0
-    for z0 in range(0, nz, slab_z):
-        z1 = min(nz, z0 + slab_z)
-        az = (vi_min[2] + np.arange(z0, z1, dtype=np.int64))
-
-        gx, gy, gz = np.meshgrid(ax, ay, az, indexing="ij")
-        idx = np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=1)
-        # Voxel centre in metres.
-        centres = (idx.astype(np.float64) + 0.5) * voxel_size
-        dists, _ = tree.query(centres, k=1, workers=-1)
-        mask = dists <= surface_threshold
-        if mask.any():
-            occupied_voxels.append(idx[mask])
-        total_occ += int(mask.sum())
-
-    if total_occ == 0:
+    if len(vc_unique) == 0:
         raise RuntimeError(
             "no voxels were marked occupied — surface_threshold too small for "
             "this cloud density?"
         )
 
-    vc_unique = np.unique(np.concatenate(occupied_voxels, axis=0), axis=0)
+    log.info("      occupied voxels: %d", len(vc_unique))
 
     # 4) Chunkize (same pattern as pcd_to_vxw.voxelize_and_group).
     cc = np.floor_divide(vc_unique, chunk_extent).astype(np.int64)
@@ -264,7 +309,8 @@ def main() -> None:
     ap.add_argument(
         "--tsdf-trunc", type=float, default=None,
         help="TSDF truncation distance in metres (default: 4 x --voxel-size). "
-             "Currently informational only in the KDTree strategy.",
+             "Informational only in this strategy; use --surface-threshold "
+             "to control the actual surface-band width.",
     )
     ap.add_argument("--chunk-extent", type=int, default=32)
     ap.add_argument(
@@ -334,9 +380,10 @@ def main() -> None:
     log.info("[2/5] TSDF-proxy: voxel_down_sample(%.3fm) + estimate_normals",
              tsdf_voxel_size)
     t0 = time.perf_counter()
-    ds_xyz, n_in = downsample_and_normals(xyz, tsdf_voxel_size)
-    log.info("      %d in -> %d down-sampled points in %.2fs  (ratio %.2fx)",
-             n_in, len(ds_xyz), time.perf_counter() - t0,
+    ds_xyz, n_in, backend = downsample_and_normals(xyz, tsdf_voxel_size)
+    log.info("      backend=%s  %d in -> %d down-sampled points in %.2fs  "
+             "(ratio %.2fx)",
+             backend, n_in, len(ds_xyz), time.perf_counter() - t0,
              n_in / max(1, len(ds_xyz)))
 
     if len(ds_xyz) == 0:

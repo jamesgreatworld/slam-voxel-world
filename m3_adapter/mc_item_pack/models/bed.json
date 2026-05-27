@@ -1,0 +1,15 @@
+{
+  "parent": "minecraft:block/block",
+  "comment": "Single bed: frame + headboard + mattress + pillow.",
+  "textures": {
+    "wood": "block/dark_oak_planks",
+    "mattress": "block/white_wool",
+    "pillow": "block/light_blue_wool"
+  },
+  "elements": [
+    {"from": [0,  0,  0],  "to": [16, 4,  32], "faces": {"north":{"texture":"#wood"},"east":{"texture":"#wood"},"south":{"texture":"#wood"},"west":{"texture":"#wood"},"up":{"texture":"#wood"},"down":{"texture":"#wood"}}},
+    {"from": [0,  4,  0],  "to": [16, 8,  30], "faces": {"north":{"texture":"#mattress"},"east":{"texture":"#mattress"},"south":{"texture":"#mattress"},"west":{"texture":"#mattress"},"up":{"texture":"#mattress"},"down":{"texture":"#mattress"}}},
+    {"from": [2,  8,  2],  "to": [14, 10, 8],  "faces": {"north":{"texture":"#pillow"},"east":{"texture":"#pillow"},"south":{"texture":"#pillow"},"west":{"texture":"#pillow"},"up":{"texture":"#pillow"},"down":{"texture":"#pillow"}}},
+    {"from": [0,  4,  30], "to": [16, 14, 32], "faces": {"north":{"texture":"#wood"},"east":{"texture":"#wood"},"south":{"texture":"#wood"},"west":{"texture":"#wood"},"up":{"texture":"#wood"},"down":{"texture":"#wood"}}}
+  ]
+}

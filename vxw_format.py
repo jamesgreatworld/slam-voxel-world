@@ -266,11 +266,39 @@ class ChunkIndexEntry:
         self.coord = tuple(self.coord)
 
 
+@dataclass(frozen=True)
+class Entity:
+    """A scene object that lives outside the voxel grid: independent transform,
+    independent material, freely movable/editable at runtime.
+
+    Produced by M2b (DBSCAN connected components on object_label voxels).
+    Stored in `entities.json` alongside manifest/palette/chunks. The voxels
+    that gave rise to an entity are removed from the chunk grid by the
+    extractor; the entity itself is the only thing that represents those
+    objects in the world.
+    """
+    id: str                                 # uuid
+    label: int                              # super_id from semantic label space
+    label_name: str                         # e.g. "chair"
+    position: tuple                         # (x, y, z) world metres — OBB centre
+    rotation: tuple                         # (qx, qy, qz, qw) world<-entity
+    bbox_dims: tuple                        # (dx, dy, dz) OBB extents, metres
+    voxel_count: int                        # voxels that produced this entity
+    custom_meta: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # tuples for immutability + JSON round-trip
+        object.__setattr__(self, "position", tuple(float(c) for c in self.position))
+        object.__setattr__(self, "rotation", tuple(float(c) for c in self.rotation))
+        object.__setattr__(self, "bbox_dims", tuple(float(c) for c in self.bbox_dims))
+
+
 @dataclass
 class World:
     manifest: Manifest
     palette: Palette
     chunks: dict
+    entities: list = field(default_factory=list)
     _dirty: set = field(default_factory=set)
 
     def get_chunk_or_air(self, coord: tuple) -> np.ndarray:
@@ -767,6 +795,14 @@ def write_world(path: Path, world: World) -> None:
         )
     write_chunks_index(out / "chunks.idx", entries)
 
+    # Entities file is optional; only emit when we have any. Old readers that
+    # don't know about entities just ignore the extra file.
+    entities_path = out / "entities.json"
+    if world.entities:
+        write_entities(entities_path, world.entities)
+    elif entities_path.exists():
+        entities_path.unlink()
+
 
 def read_world(path: Path) -> World:
     root = Path(path)
@@ -774,8 +810,59 @@ def read_world(path: Path) -> World:
     palette = read_palette(root / "palette.json")
     chunks: dict = {}
     chunks_dir = root / "chunks"
-    if chunks_dir.is_dir():
+    idx_path = root / "chunks.idx"
+    # Prefer chunks.idx (single-file, fully flushed) over glob — on Windows/NTFS,
+    # write_world's 500+ small chunk writes can leave the directory enumeration
+    # lagging behind actual file presence for a few hundred ms after return.
+    if idx_path.is_file():
+        for entry in read_chunks_index(idx_path):
+            x, y, z = entry.coord
+            cpath = chunks_dir / f"{x}_{y}_{z}.chunk"
+            chunk = read_chunk(cpath)
+            chunks[chunk.coord] = chunk
+    elif chunks_dir.is_dir():
         for cpath in chunks_dir.glob("*.chunk"):
             chunk = read_chunk(cpath)
             chunks[chunk.coord] = chunk
-    return World(manifest=manifest, palette=palette, chunks=chunks)
+    entities: list = []
+    entities_path = root / "entities.json"
+    if entities_path.is_file():
+        entities = read_entities(entities_path)
+    return World(manifest=manifest, palette=palette, chunks=chunks, entities=entities)
+
+
+def write_entities(path: Path, entities: list) -> None:
+    payload = {
+        "format_version": "1.0",
+        "entities": [
+            {
+                "id": e.id,
+                "label": e.label,
+                "label_name": e.label_name,
+                "position": list(e.position),
+                "rotation": list(e.rotation),
+                "bbox_dims": list(e.bbox_dims),
+                "voxel_count": e.voxel_count,
+                "custom_meta": e.custom_meta,
+            }
+            for e in entities
+        ],
+    }
+    Path(path).write_text(json.dumps(payload, indent=2))
+
+
+def read_entities(path: Path) -> list:
+    data = json.loads(Path(path).read_text())
+    out = []
+    for e in data.get("entities", []):
+        out.append(Entity(
+            id=str(e["id"]),
+            label=int(e["label"]),
+            label_name=str(e.get("label_name", "")),
+            position=tuple(e["position"]),
+            rotation=tuple(e["rotation"]),
+            bbox_dims=tuple(e["bbox_dims"]),
+            voxel_count=int(e.get("voxel_count", 0)),
+            custom_meta=dict(e.get("custom_meta", {})),
+        ))
+    return out

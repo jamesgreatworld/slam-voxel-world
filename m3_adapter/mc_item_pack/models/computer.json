@@ -1,0 +1,15 @@
+{
+  "parent": "minecraft:block/block",
+  "comment": "Desktop computer: monitor + base + keyboard.",
+  "textures": {
+    "case": "block/black_concrete",
+    "screen": "block/light_blue_stained_glass",
+    "keys": "block/gray_concrete"
+  },
+  "elements": [
+    {"from": [3,  6,  6],  "to": [13, 14, 8],  "faces": {"north":{"texture":"#screen"},"east":{"texture":"#case"},"south":{"texture":"#case"},"west":{"texture":"#case"},"up":{"texture":"#case"},"down":{"texture":"#case"}}},
+    {"from": [4,  4,  6],  "to": [12, 6,  10], "faces": {"north":{"texture":"#case"},"east":{"texture":"#case"},"south":{"texture":"#case"},"west":{"texture":"#case"},"up":{"texture":"#case"},"down":{"texture":"#case"}}},
+    {"from": [6,  4,  10], "to": [10, 5,  11], "faces": {"north":{"texture":"#case"},"east":{"texture":"#case"},"south":{"texture":"#case"},"west":{"texture":"#case"},"up":{"texture":"#case"},"down":{"texture":"#case"}}},
+    {"from": [2,  0,  6],  "to": [14, 1,  14], "faces": {"north":{"texture":"#keys"},"east":{"texture":"#keys"},"south":{"texture":"#keys"},"west":{"texture":"#keys"},"up":{"texture":"#keys"},"down":{"texture":"#keys"}}}
+  ]
+}

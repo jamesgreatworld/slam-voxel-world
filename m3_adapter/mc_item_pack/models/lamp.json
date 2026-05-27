@@ -1,0 +1,13 @@
+{
+  "parent": "minecraft:block/block",
+  "comment": "Floor lamp: thin stand + shade.",
+  "textures": {
+    "metal": "block/iron_block",
+    "shade": "block/yellow_wool"
+  },
+  "elements": [
+    {"from": [7,  0,  7],  "to": [9,  2,  9],  "faces": {"north":{"texture":"#metal"},"east":{"texture":"#metal"},"south":{"texture":"#metal"},"west":{"texture":"#metal"},"up":{"texture":"#metal"},"down":{"texture":"#metal"}}},
+    {"from": [7,  2,  7],  "to": [9,  18, 9],  "faces": {"north":{"texture":"#metal"},"east":{"texture":"#metal"},"south":{"texture":"#metal"},"west":{"texture":"#metal"},"up":{"texture":"#metal"},"down":{"texture":"#metal"}}},
+    {"from": [4,  18, 4],  "to": [12, 24, 12], "faces": {"north":{"texture":"#shade"},"east":{"texture":"#shade"},"south":{"texture":"#shade"},"west":{"texture":"#shade"},"up":{"texture":"#shade"},"down":{"texture":"#shade"}}}
+  ]
+}

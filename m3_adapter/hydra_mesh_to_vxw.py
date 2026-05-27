@@ -21,6 +21,7 @@ Path A integration (no C++):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import sys
@@ -165,64 +166,300 @@ def voxelize_mesh(mesh_path: Path, voxel_size: float) -> tuple[np.ndarray, np.nd
 
 
 # ---------------------------------------------------------------------------
-# DSG parsing (best-effort; format varies by Hydra version)
+# DSG parsing (SPARK_DSG flat schema: data['nodes'] = list, each node has
+# layer (int) + partition (int) + attributes. OBJECTS layer = layer 2,
+# partition 0 (per data['layer_names']). Tolerates older nested layouts too.
 # ---------------------------------------------------------------------------
 
-def load_dsg_objects(dsg_path: Path) -> list[dict]:
-    """Extract semantic objects with bbox + category from a Hydra dsg.json.
+def _quat_to_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
+    w, x, y, z = q
+    n = w * w + x * x + y * y + z * z
+    if n > 0 and abs(n - 1.0) > 1e-6:
+        s = 1.0 / np.sqrt(n)
+        w, x, y, z = w * s, x * s, y * s, z * s
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+    ], dtype=np.float64)
 
-    The schema isn't 100% stable across Hydra versions, so we hunt through
-    layer dicts and yield anything that looks like an object (has a 'bbox'
-    or 'world_R_bbox' field).
+
+def _obb_aabb_envelope(
+    centre: np.ndarray,
+    half: np.ndarray,
+    quat: tuple[float, float, float, float],
+) -> tuple[np.ndarray, np.ndarray]:
+    R = _quat_to_matrix(quat)
+    signs = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)],
+                     dtype=np.float64)
+    corners = centre + (signs * half) @ R.T
+    return corners.min(axis=0), corners.max(axis=0)
+
+
+def _obb_mask(centres: np.ndarray, obj: dict) -> np.ndarray:
+    """True OBB-membership test; falls back to AABB if rotation absent."""
+    obb_q = obj.get("obb_quat")
+    if obb_q is None:
+        bmin, bmax = obj["bbox_min"], obj["bbox_max"]
+        return np.all((centres >= bmin) & (centres <= bmax), axis=1)
+    # Coarse prefilter with the rotated box's AABB envelope.
+    bmin, bmax = obj["bbox_min"], obj["bbox_max"]
+    coarse = np.all((centres >= bmin) & (centres <= bmax), axis=1)
+    idx = np.flatnonzero(coarse)
+    if idx.size == 0:
+        return coarse
+    R = _quat_to_matrix(obb_q)
+    rel = centres[idx] - obj["obb_center"]
+    local = rel @ R  # equiv to R.T @ rel.T then transpose
+    inside = np.all(np.abs(local) <= obj["obb_half"], axis=1)
+    mask = np.zeros(centres.shape[0], dtype=bool)
+    mask[idx[inside]] = True
+    return mask
+
+
+def _parse_dsg_objects(data: dict) -> list[dict]:
+    """Parse OBJECTS nodes from a SPARK_DSG JSON dict.
+
+    Schema (observed on Hydra/14floor, mid-2025):
+      data['nodes']        = flat list of node dicts
+      data['layer_names']  = {'OBJECTS': {'layer': 2, 'partition': 0}, ...}
+      node                  = {'id', 'layer', 'partition', 'attributes': {...}}
+      attributes            = {'bounding_box': {dimensions, world_P_center,
+                                                world_R_center, type='RAABB'},
+                               'semantic_label': int, 'color': {r,g,b,a},
+                               'name': str, 'position': [x,y,z], ...}
+
+    For backward compatibility, also walks legacy nested `layers[].nodes[]`
+    layouts and looks up `category` strings if present.
+
+    Returns list of dicts with: id, name, category(str|None),
+    semantic_label(int|None), bbox_min(np.ndarray|None),
+    bbox_max(np.ndarray|None), obb_center(np.ndarray|None),
+    obb_half(np.ndarray|None), obb_quat(tuple|None: w,x,y,z),
+    position(list|None), color(tuple|None).
+    AABB is the conservative axis-aligned box; obb_* fields carry the true RAABB
+    rotation when available so overlay can test true OBB membership.
+    """
+    objects: list[dict] = []
+
+    # Resolve the (layer, partition) tuple for OBJECTS from layer_names.
+    layer_names = data.get("layer_names") or {}
+    objects_loc = layer_names.get("OBJECTS")
+    if isinstance(objects_loc, dict):
+        obj_layer = int(objects_loc.get("layer", 2))
+        obj_partition = int(objects_loc.get("partition", 0))
+    else:
+        obj_layer, obj_partition = 2, 0
+
+    # ---- Flat layout: data['nodes'] is a list ----
+    flat_nodes = data.get("nodes")
+    candidates: list[dict] = []
+    if isinstance(flat_nodes, list):
+        for node in flat_nodes:
+            if not isinstance(node, dict):
+                continue
+            if node.get("layer") == obj_layer and node.get("partition") == obj_partition:
+                candidates.append(node)
+
+    # ---- Legacy nested layout fallback ----
+    if not candidates:
+        layers = data.get("layers") or data.get("Layers") or []
+        for layer in layers:
+            for node in (layer.get("nodes") or layer.get("Nodes") or []):
+                if isinstance(node, dict):
+                    candidates.append(node)
+
+    for node in candidates:
+        attrs = node.get("attributes") or node.get("Attributes") or {}
+
+        # AABB/OBB from bounding_box (RAABB or AABB or legacy)
+        bbox_min: np.ndarray | None = None
+        bbox_max: np.ndarray | None = None
+        obb_center: np.ndarray | None = None
+        obb_half: np.ndarray | None = None
+        obb_quat: tuple[float, float, float, float] | None = None
+        bb = attrs.get("bounding_box") or attrs.get("bbox")
+        if isinstance(bb, dict):
+            dims = bb.get("dimensions") or bb.get("extents")
+            ctr = bb.get("world_P_center") or bb.get("center") or attrs.get("position")
+            rot = bb.get("world_R_center")
+            if dims is not None and ctr is not None and len(dims) >= 3 and len(ctr) >= 3:
+                d = np.asarray(dims[:3], dtype=np.float64) * 0.5
+                c = np.asarray(ctr[:3], dtype=np.float64)
+                if isinstance(rot, dict) and all(k in rot for k in ("w", "x", "y", "z")):
+                    obb_center = c
+                    obb_half = d
+                    obb_quat = (
+                        float(rot["w"]), float(rot["x"]),
+                        float(rot["y"]), float(rot["z"]),
+                    )
+                    # AABB envelope of the rotated box (8 corner extrema)
+                    bbox_min, bbox_max = _obb_aabb_envelope(c, d, obb_quat)
+                else:
+                    bbox_min = c - d
+                    bbox_max = c + d
+            elif "min" in bb and "max" in bb:
+                bbox_min = np.asarray(bb["min"][:3], dtype=np.float64)
+                bbox_max = np.asarray(bb["max"][:3], dtype=np.float64)
+        elif isinstance(bb, list) and len(bb) >= 6:
+            bbox_min = np.asarray(bb[:3], dtype=np.float64)
+            bbox_max = np.asarray(bb[3:6], dtype=np.float64)
+
+        # semantic_label: int in new schema, may be str in older
+        sem_raw = attrs.get("semantic_label")
+        sem_label: int | None
+        if isinstance(sem_raw, bool):
+            sem_label = None
+        elif isinstance(sem_raw, int):
+            sem_label = sem_raw
+        elif isinstance(sem_raw, float):
+            sem_label = int(sem_raw)
+        else:
+            sem_label = None
+
+        # category as string (legacy) — may also be derivable from name
+        category = attrs.get("category")
+        if not category and isinstance(sem_raw, str):
+            category = sem_raw
+        if isinstance(category, str):
+            category = category.lower().strip() or None
+        else:
+            category = None
+
+        # color (Hydra emits dict {r,g,b,a}; some versions emit list)
+        color_raw = attrs.get("color")
+        color_rgb: tuple[int, int, int] | None = None
+        if isinstance(color_raw, dict):
+            try:
+                color_rgb = (int(color_raw.get("r", 0)),
+                             int(color_raw.get("g", 0)),
+                             int(color_raw.get("b", 0)))
+            except (TypeError, ValueError):
+                color_rgb = None
+        elif isinstance(color_raw, (list, tuple)) and len(color_raw) >= 3:
+            try:
+                color_rgb = (int(color_raw[0]), int(color_raw[1]), int(color_raw[2]))
+            except (TypeError, ValueError):
+                color_rgb = None
+
+        position = attrs.get("position") or attrs.get("world_t_position")
+
+        # Require enough info to localize
+        if bbox_min is None and position is None:
+            continue
+
+        objects.append({
+            "id": node.get("id") or node.get("symbol"),
+            "name": attrs.get("name") or "",
+            "category": category,
+            "semantic_label": sem_label,
+            "bbox_min": bbox_min,
+            "bbox_max": bbox_max,
+            "obb_center": obb_center,
+            "obb_half": obb_half,
+            "obb_quat": obb_quat,
+            "position": position,
+            "color": color_rgb,
+        })
+
+    return objects
+
+
+def load_dsg_objects(dsg_path: Path) -> list[dict]:
+    """Read dsg.json and parse OBJECTS nodes (flat SPARK_DSG schema).
+
+    Backward-compat: silently returns [] if the file is missing.
     """
     if not dsg_path.is_file():
         log.info("no dsg.json at %s — skipping semantic overlay", dsg_path)
         return []
     log.info("reading DSG %s", dsg_path)
     data = json.loads(dsg_path.read_text(encoding="utf-8"))
-
-    objects: list[dict] = []
-    # Hydra/spark_dsg schemas seen so far: top-level has 'layers' array;
-    # each layer has 'nodes'; object nodes have 'attributes' with bounding boxes.
-    layers = data.get("layers") or data.get("Layers") or []
-    for layer in layers:
-        nodes = layer.get("nodes") or layer.get("Nodes") or []
-        for node in nodes:
-            attrs = node.get("attributes") or node.get("Attributes") or {}
-            name = attrs.get("name") or attrs.get("semantic_label") or ""
-            category = attrs.get("category") or attrs.get("semantic_label") or attrs.get("name") or ""
-            if not category:
-                continue
-            # Look for bbox in a few common forms
-            bbox = None
-            for k in ("bounding_box", "bbox", "world_R_bbox", "world_T_bbox"):
-                if k in attrs:
-                    bbox = attrs[k]
-                    break
-            position = attrs.get("position") or attrs.get("world_t_position")
-            if bbox is None and position is None:
-                continue
-            objects.append({
-                "name": name,
-                "category": str(category).lower(),
-                "bbox": bbox,
-                "position": position,
-                "id": node.get("id") or node.get("symbol"),
-            })
+    objects = _parse_dsg_objects(data)
     log.info("DSG: parsed %d candidate objects", len(objects))
     return objects
 
 
 def category_to_material(category: str) -> int:
-    """Map an arbitrary DSG category string → our material_id. Default 1 (concrete)."""
-    cat = category.lower().strip()
+    """Legacy string-category lookup. Returns 1 (concrete) on unknown."""
+    cat = (category or "").lower().strip()
+    if not cat:
+        return 1
     if cat in DSG_CATEGORY_TO_MATERIAL:
         return DSG_CATEGORY_TO_MATERIAL[cat]
-    # heuristics on substrings
     for key, mid in DSG_CATEGORY_TO_MATERIAL.items():
         if key in cat:
             return mid
     return 1
+
+
+def _label_color(label: int, dsg_color: tuple[int, int, int] | None) -> tuple[int, int, int]:
+    """Pick a stable color for a semantic label.
+
+    Prefer the color Hydra emitted (if non-black); else hash the label to a
+    deterministic mid-bright RGB so distinct labels look distinct."""
+    if dsg_color is not None and any(c > 0 for c in dsg_color):
+        r, g, b = (int(max(0, min(255, c))) for c in dsg_color)
+        return (r, g, b)
+    h = hashlib.md5(f"sem_label_{int(label)}".encode("utf-8")).digest()
+    # Bias toward mid-brightness so colors stay distinguishable in-engine.
+    return (60 + (h[0] % 170), 60 + (h[1] % 170), 60 + (h[2] % 170))
+
+
+def extend_palette_for_labels(
+    palette: vxw.Palette,
+    label_to_color: dict[int, tuple[int, int, int]],
+) -> tuple[vxw.Palette, dict[int, int]]:
+    """Append one Material per semantic label.
+
+    Returns (new_palette, label_to_material_id). Existing materials/classes
+    are preserved unchanged; new material ids are appended after the last
+    existing id. A new SemanticClass is also added per label so palette.json
+    remains self-describing. Caps at 256 materials per vxw spec.
+    """
+    materials = list(palette.materials)
+    semantic_classes = list(palette.semantic_classes)
+    used_ids = {m.id for m in materials}
+    used_class_ids = {sc.id for sc in semantic_classes}
+
+    label_to_mid: dict[int, int] = {}
+    next_mid = max(used_ids) + 1 if used_ids else 1
+    next_cid = max(used_class_ids) + 1 if used_class_ids else 1
+
+    for label in sorted(label_to_color.keys()):
+        if next_mid > 255:
+            log.warning("palette full (256 materials); skipping label %d", label)
+            break
+        color = label_to_color[label]
+        mat = vxw.Material(
+            id=next_mid,
+            name=f"dsg_label_{label}",
+            color_rgb=color,
+            flags=("solid", "destructible"),
+            roughness=0.85,
+        )
+        materials.append(mat)
+        used_ids.add(next_mid)
+        # Pair each new material with a new semantic class for traceability.
+        if next_cid not in used_class_ids:
+            semantic_classes.append(
+                vxw.SemanticClass(
+                    id=next_cid,
+                    name=f"dsg_label_{label}",
+                    default_material=next_mid,
+                )
+            )
+            used_class_ids.add(next_cid)
+            next_cid += 1
+        label_to_mid[label] = next_mid
+        next_mid += 1
+
+    new_palette = vxw.Palette(
+        materials=materials,
+        semantic_classes=semantic_classes,
+        color_lut=list(palette.color_lut),
+    )
+    return new_palette, label_to_mid
 
 
 # ---------------------------------------------------------------------------
@@ -298,41 +535,64 @@ def hydra_to_vxw(
 
     centres, mesh_colors, grid_indices = voxelize_mesh(mesh_path, voxel_size)
 
+    palette = build_hydra_palette()
     per_voxel_material: np.ndarray | None = None
+
     if use_dsg_objects:
         objects = load_dsg_objects(dsg_path)
         if objects:
+            # Collect unique semantic labels & their preferred color.
+            label_to_color: dict[int, tuple[int, int, int]] = {}
+            for obj in objects:
+                lbl = obj.get("semantic_label")
+                if lbl is None:
+                    continue
+                if lbl not in label_to_color:
+                    label_to_color[lbl] = _label_color(lbl, obj.get("color"))
+
+            if label_to_color:
+                palette, label_to_mid = extend_palette_for_labels(palette, label_to_color)
+                log.info("DSG: %d unique semantic_labels → palette extended to %d materials",
+                         len(label_to_color), len(palette.materials))
+            else:
+                label_to_mid = {}
+
             per_voxel_material = np.full(centres.shape[0], 1, dtype=np.uint8)  # default concrete
             applied = 0
+            skipped = 0
             for obj in objects:
-                pos = obj.get("position")
-                bbox = obj.get("bbox")
-                cat = obj.get("category", "")
-                mid = category_to_material(cat)
-                if mid == 1:
-                    continue  # unknown / wall, leave default
-                # Apply bbox if available, else fall back to a small ball around position
-                if isinstance(bbox, dict) and {"min", "max"}.issubset(bbox):
-                    bmin = np.asarray(bbox["min"], dtype=np.float64)
-                    bmax = np.asarray(bbox["max"], dtype=np.float64)
-                    mask = np.all((centres >= bmin) & (centres <= bmax), axis=1)
-                elif isinstance(bbox, list) and len(bbox) >= 6:
-                    bmin = np.asarray(bbox[:3], dtype=np.float64)
-                    bmax = np.asarray(bbox[3:6], dtype=np.float64)
-                    mask = np.all((centres >= bmin) & (centres <= bmax), axis=1)
-                elif pos is not None and isinstance(pos, list) and len(pos) == 3:
-                    p = np.asarray(pos, dtype=np.float64)
-                    radius = 0.6   # generic blob, 60cm
-                    mask = np.linalg.norm(centres - p, axis=1) < radius
+                lbl = obj.get("semantic_label")
+                if lbl is not None and lbl in label_to_mid:
+                    mid = label_to_mid[lbl]
                 else:
+                    # Fallback: try the legacy string category map (older Hydra).
+                    mid = category_to_material(obj.get("category") or "")
+                    if mid == 1:
+                        skipped += 1
+                        continue
+
+                bmin = obj.get("bbox_min")
+                bmax = obj.get("bbox_max")
+                if bmin is not None and bmax is not None:
+                    mask = _obb_mask(centres, obj)
+                else:
+                    pos = obj.get("position")
+                    if pos is None or len(pos) < 3:
+                        skipped += 1
+                        continue
+                    p = np.asarray(pos[:3], dtype=np.float64)
+                    mask = np.linalg.norm(centres - p, axis=1) < 0.6
+                applied_here = int(mask.sum())
+                if applied_here == 0:
+                    skipped += 1
                     continue
                 per_voxel_material[mask] = np.uint8(mid)
-                applied += int(mask.sum())
-            log.info("DSG overlay applied to %d voxels across %d objects", applied, len(objects))
+                applied += applied_here
+            log.info("DSG overlay applied to %d voxels across %d objects (%d skipped/out-of-bounds)",
+                     applied, len(objects) - skipped, skipped)
         else:
             log.info("no DSG objects found — falling back to single-material output")
 
-    palette = build_hydra_palette()
     chunks, bmin_chunk, bmax_chunk, histogram = voxels_to_world(
         centres, voxel_size, chunk_extent, compression, palette,
         default_material_id=1, per_voxel_material=per_voxel_material,

@@ -1,0 +1,15 @@
+{
+  "parent": "minecraft:block/block",
+  "comment": "Simple wooden table. 4 legs + top.",
+  "textures": {
+    "wood": "block/oak_planks",
+    "top": "block/oak_log_top"
+  },
+  "elements": [
+    {"from": [1,  0,  1],  "to": [3,  12, 3],  "faces": {"north":{"texture":"#wood"},"east":{"texture":"#wood"},"south":{"texture":"#wood"},"west":{"texture":"#wood"},"up":{"texture":"#wood"},"down":{"texture":"#wood"}}},
+    {"from": [13, 0,  1],  "to": [15, 12, 3],  "faces": {"north":{"texture":"#wood"},"east":{"texture":"#wood"},"south":{"texture":"#wood"},"west":{"texture":"#wood"},"up":{"texture":"#wood"},"down":{"texture":"#wood"}}},
+    {"from": [1,  0,  13], "to": [3,  12, 15], "faces": {"north":{"texture":"#wood"},"east":{"texture":"#wood"},"south":{"texture":"#wood"},"west":{"texture":"#wood"},"up":{"texture":"#wood"},"down":{"texture":"#wood"}}},
+    {"from": [13, 0,  13], "to": [15, 12, 15], "faces": {"north":{"texture":"#wood"},"east":{"texture":"#wood"},"south":{"texture":"#wood"},"west":{"texture":"#wood"},"up":{"texture":"#wood"},"down":{"texture":"#wood"}}},
+    {"from": [0,  12, 0],  "to": [16, 14, 16], "faces": {"north":{"texture":"#wood"},"east":{"texture":"#wood"},"south":{"texture":"#wood"},"west":{"texture":"#wood"},"up":{"texture":"#top"},"down":{"texture":"#wood"}}}
+  ]
+}
