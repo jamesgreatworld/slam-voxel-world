@@ -19,6 +19,12 @@ signal entity_changed(id: String)
 signal entity_deleted(id: String)
 signal selection_cleared
 
+# Pre-change snapshots for undo. Emitted *before* the mutation so the
+# listener (main.gd) can stash the old state in its undo stack.
+signal will_delete(entity_dict: Dictionary)
+signal will_move(id: String, from_pos: Array, to_pos: Array)
+signal will_rotate(id: String, from_quat: Array, to_quat: Array)
+
 const _ROTATION_STEP_RAD := PI / 4.0
 const _OUTLINE_INFLATE := 0.04
 # Mirrors entity_renderer.ENTITY_META_KEY; duplicated to avoid a runtime
@@ -294,7 +300,12 @@ func _commit_grab() -> void:
     for e in entities:
         if String(e.get("id", "")) != _selected_id:
             continue
-        e["position"] = [new_pos.x, new_pos.y, new_pos.z]
+        var old_pos = e.get("position", [0, 0, 0])
+        var new_pos_arr := [new_pos.x, new_pos.y, new_pos.z]
+        emit_signal("will_move", _selected_id,
+                    [float(old_pos[0]), float(old_pos[1]), float(old_pos[2])],
+                    new_pos_arr)
+        e["position"] = new_pos_arr
         changed = true
         break
     if changed:
@@ -329,7 +340,12 @@ func grab_to(id: String, world_pos: Vector3) -> void:
     for e in entities:
         if String(e.get("id", "")) != id:
             continue
-        e["position"] = [world_pos.x, world_pos.y, world_pos.z]
+        var old_pos = e.get("position", [0, 0, 0])
+        var new_pos_arr := [world_pos.x, world_pos.y, world_pos.z]
+        emit_signal("will_move", id,
+                    [float(old_pos[0]), float(old_pos[1]), float(old_pos[2])],
+                    new_pos_arr)
+        e["position"] = new_pos_arr
         changed = true
         break
     if changed:
@@ -362,19 +378,21 @@ func _delete_selected() -> void:
     var id := _selected_id
     var entities := _read_entities()
     var kept: Array = []
-    var removed := false
+    var removed: Dictionary = {}
     for e in entities:
         if String(e.get("id", "")) == id:
-            removed = true
+            removed = e
             continue
         kept.append(e)
-    if removed:
-        _write_entities(kept)
-        if _logger != null:
-            _logger.info("entity_deleted", {"id": id, "remaining": kept.size()})
-        emit_signal("entity_deleted", id)
-        clear_selection()
-        _reload_entities()
+    if removed.is_empty():
+        return
+    emit_signal("will_delete", removed)
+    _write_entities(kept)
+    if _logger != null:
+        _logger.info("entity_deleted", {"id": id, "remaining": kept.size()})
+    emit_signal("entity_deleted", id)
+    clear_selection()
+    _reload_entities()
 
 
 func _rotate_selected(yaw_delta_rad: float) -> void:
@@ -388,7 +406,10 @@ func _rotate_selected(yaw_delta_rad: float) -> void:
         var cur := Quaternion(float(rot[0]), float(rot[1]), float(rot[2]), float(rot[3]))
         var step := Quaternion(Vector3.UP, yaw_delta_rad)
         var new_q := step * cur
-        e["rotation"] = [new_q.x, new_q.y, new_q.z, new_q.w]
+        var from_q := [rot[0], rot[1], rot[2], rot[3]]
+        var to_q := [new_q.x, new_q.y, new_q.z, new_q.w]
+        emit_signal("will_rotate", id, from_q, to_q)
+        e["rotation"] = to_q
         changed = true
         break
     if changed:

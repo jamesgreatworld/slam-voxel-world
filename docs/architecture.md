@@ -362,3 +362,168 @@ func _ready():
 | R7（玩法） | 真"游戏" | 多周 | 后续 |
 
 R1 + R2 + R3 是这一批的目标。R4 单独一批。R5+ 看实际需要。
+
+---
+
+## 10. M2+ 实际状态（2026-05-27 增量更新）
+
+### 10.1 阶段进展与命名映射
+
+本文 §2–§7 写于 R1–R7 重构计划阶段。实际落地时一些命名变了，对照表如下（防止读老文档迷惑）：
+
+| 文档 §1–§9 用语 | 实际 commit / 模块 | 状态 |
+|---|---|---|
+| R1 拆 main.gd → controllers | `main.gd` 拆成 voxel_renderer / stereo_rig / camera / hud / snapshot / pause_menu 等 | ✅ (commit `62e0bb7`) |
+| R4 per-material 渲染 + Material 扩字段 | 同上 + Material 加 transparent/emission/metallic/roughness | ✅ (commit `d4e44ba`) |
+| R5 MC 对接 (litematic) | `m3_adapter/litematic_to_vxw.py` + `palette_minecraft.json` | ✅ |
+| R6 物理碰撞 (1P 走路) | `voxel_editor` + StaticBody3D ConcavePolygonShape3D 三角片汤 | ✅ (commit `5ecc411`) |
+| R7+ 玩法 | RMB 放置 / 撤销栈 / material picker / litematic 热加载 / Anvil 整世界 | ✅ (commit `5d9eb06` + `4141272`) |
+
+### 10.2 双层场景模型（M2 起新增）
+
+§4.6 spec 里"semantics/instances.json"已经实现成 **`entities.json`**（同位置、字段扩展为可编辑）。**M2 起世界由两层组成**：
+
+```
+.vxw/
+  manifest.json       L0 元数据
+  palette.json        L0 调色板
+  chunks/*.chunk      [voxel 层] 静态结构：墙/地/天花/楼梯/家具的几何
+  chunks.idx          L0 索引
+  entities.json       [entity 层] 独立实体：椅/桌/灯/床/电脑/垃圾桶/人...
+```
+
+**两层的契约**：
+- **voxel 层**：只能整批增/删 voxel；每 voxel 4 字节固定 record (material_id, semantic_id, state, color_palette_idx)；编辑由 voxel_editor 接管
+- **entity 层**：每个实体独立的 transform；可被 picker spawn / selector 选中 / placer 拖动 / Delete 删除 / R 旋转 / G 拖移；entities.json 是 source of truth；entity_renderer 是它的视图
+- **抠除约定**：M2b uhumans2_to_vxw 把 `object_labels` 的 voxel 从 chunks 抠掉、写入 entities.json，避免双层重叠
+
+**entity JSON schema (vxw_format.Entity / entities.json)**:
+```json
+{
+  "format_version": "1.0",
+  "entities": [
+    {
+      "id": "<uuid v4>",
+      "label": 5,                     // super_id (uHumans2 21-class label space)
+      "label_name": "chair",
+      "position": [x, y, z],          // world metres, OBB centre
+      "rotation": [qx, qy, qz, qw],   // world ← entity
+      "bbox_dims": [dx, dy, dz],      // OBB extents in metres
+      "voxel_count": 783,             // for SLAM-extracted entities; 0 for picker-spawned
+      "custom_meta": {                // free-form; mc_item 为 MC 资源包引用
+        "mc_item": "chair",           // preset id in mc_item_pack/_compiled.json
+        "spawned_at": 1779800000.0
+      }
+    }
+  ]
+}
+```
+
+**跨语言契约**：`vxw_format.Entity` (Python) 和 `entity_renderer.gd._spawn_one` (GDScript) 同步消费此 schema。修改前看本节 + spec §4.6，**任何字段改动都要更新两侧 + 加 round-trip 测试**。
+
+### 10.3 M3 适配器扩展（已实现）
+
+§3.3.1 写过 SLAM→体素的并列路线表，实际已落地：
+
+| Adapter | 输入 | 主要技术 | commit |
+|---|---|---|---|
+| `pcd_to_vxw.py` | PCL .pcd | 朴素 voxelize | 初版 |
+| `tsdf_to_vxw.py` | PCL .pcd | open3d voxel_down_sample + 表面带 dilation | `4141272` |
+| `dbscan_to_vxw.py` | PCL .pcd | sklearn DBSCAN 几何聚类 → 每 cluster 一材质 | `2797811` |
+| `bag_to_vxw.py` | rosbag2 (livox CustomMsg) | rosbags + 可选 TUM trajectory + slerp | `2797811` |
+| `hydra_mesh_to_vxw.py` | mesh.ply + dsg.json (Hydra Path A) | Open3D 体素化 + 扁平 SPARK_DSG 解析 + OBB 内积 | `2797811` |
+| **`uhumans2_to_vxw.py`** | rosbag2 (uHumans2 TESSE) | **完整 RGB-D + GT pose + 像素级语义 + 多数表决 + entity 抽取** | `2797811` |
+| `litematic_to_vxw.py` | Minecraft .litematic | litemapy | (R5) |
+| `anvil_to_vxw.py` | Minecraft Anvil 世界 | anvil-parser | (R9) |
+
+**M3 入口约定保持不变**：每个 adapter 自带 CLI + `main()`，输出 .vxw 目录。spec §4 是契约。
+
+### 10.4 M3 MC 资源包（新通道，非 schematic_to_vxw）
+
+文档 §3.2 设想的 `schematic_to_vxw.py` 是"导入 MC 整个世界"。M3 实际开了另一条通道：**MC standard block model JSON 作为"道具库"**。
+
+```
+m3_adapter/mc_item_pack/
+  manifest.json          // pack 入口：items[{id, model, category, default_label}]
+  models/<id>.json       // MC 标准 block model JSON (parent / textures / elements)
+  textures/block/*.png   // 16x16 PNG 贴图（程序生成；不分发 Mojang 资产）
+  _compiled.json         // 由 mc_item_loader.py 编译；godot_viewer 直接读
+  generate_textures.py   // 程序化生成贴图（numpy + Pillow）
+```
+
+**为什么**：MC block model 的 element 数组天生是"一组 box"——跟我们 entity 的 multi-box composite 同构。复用 MC 工具链（BlockBench、resource pack 生态）零成本接入。
+
+**Godot 端**：`entity_renderer._build_mc_composite` 读 `custom_meta.mc_item` → 查 `_compiled.json` → 每 sub-box 一个 BoxMesh，dominant_texture 作 albedo（phase 1 单贴图；phase 2 拆 6 个 PlaneMesh per face）。
+
+### 10.5 Entity 交互管线（M3b/M3c/M4/M5）
+
+新加 4 个 Godot 模块：
+
+```
+godot_viewer/
+  entity_renderer.gd    M2c   渲染 entity / multi-box composite / pick proxy collision
+  item_picker.gd        M3b   I 键开 grid → 选 preset → emit item_chosen
+  entity_placer.gd      M3c   ghost preview 跟鼠标 → LMB commit / R 旋转 / ESC 取消
+  entity_selector.gd    M4/M5 LMB 选中 → outline 高亮; Delete/R/G + grab 模式
+```
+
+**输入优先级**（重要的反直觉点）：
+
+```
+placer.is_active()        → placer 吃 LMB/RMB/ESC，其余路径让出
+selector._grab_active     → selector 吃 LMB/RMB/ESC
+voxel_editor._edit_enabled→ voxel_editor 接 LMB/RMB（**未来加 priority 防 selector 干扰**）
+else                      → selector LMB 用于选中
+```
+
+**当前已知冲突**：voxel_editor edit_enabled = true 时 LMB 既触发 voxel 销毁 又触发 entity 选中。**short-term 不修，因为两个工具是分模式（互斥）的人会切换；long-term 加显式 mode toggle**。
+
+### 10.6 升级路径备选（不要现在做）
+
+随着工程规模扩，会撞到以下墙；这里钉好"什么时候做、做什么"，避免临时 panic 重构。
+
+| 触发条件 | 该升级 | 工作量 | 影响 |
+|---|---|---|---|
+| **palette > 256 materials** | material_id u1→u2 (uint16) | spec §4.4 chunk header + reader/writer/Godot loader 全改 | chunk 字节布局变；走 format_version 1.1 |
+| 同上（替代方案） | 抄 MC 1.13 Flattening：每 chunk 自带 local_palette + bit-packed indices | 重写 chunk 编码 + GDScript bit-unpacker | 真无限上限 |
+| **voxel > 1M / chunk > 2000** | voxel_renderer 加 chunk visibility culling + lazy load (玩家附近 view distance) | renderer 重构 | 大世界必经 |
+| **要"占 voxel 位的有状态物体"**（门/箱子/灯开关） | 加 L1.5 block_entity 层（spec §4 加 `block_entities.json` 或合并进 entities.json）| schema 扩展 + Godot tick loop 雏形 | 中等 |
+| **entity > 500 且要"行为各异"**（开关门、AI 寻路、动画灯） | entity 加 component 系统（ECS-lite 即可，不必引整套 Bevy/godex） | entity_renderer 拆 component | 大 |
+| **entity 实时模拟**（坠落、推动） | tick loop + Godot physics integration | 新 controller | 中 |
+| **多 SLAM 子世界拼合** | 多 .vxw 加载到同一 World3D + 坐标补偿 | manifest 加 root_offset | 小 |
+| **多人协作编辑** | 网络层 + entities.json 操作日志 | 重 | 远期 |
+
+**何时算"撞墙"**：性能基准 30 FPS + 编辑响应 < 100ms。两者中任意一项掉就考虑对应升级。
+
+### 10.7 当前 main.gd 的违规清单（M5 后）
+
+§6 的违规清单大部分已修。M2+ 后又积累了新的：
+
+| # | 违规 | 模块 | 影响 |
+|---|---|---|---|
+| 8 | `main.gd` 又涨到 450+ 行（M2+wiring 全加进去） | main.gd | 跟 §6.1 同病复发，应拆 boot/world/edit 三个 controller |
+| 9 | entity 编辑没 undo/redo（voxel 有） | entity_selector | 误删/误移动无法恢复，应加 entity undo stack |
+| 10 | `entity_renderer.gd:ITEM_PACK_COMPILED` 路径硬编 `res://../m3_adapter/...` | entity_renderer | 项目移动会破；应在 ProjectSettings 加 setting key |
+| 11 | `entity_selector.ENTITY_META_KEY` 跟 `entity_renderer.ENTITY_META_KEY` 重复定义 | 两个文件 | 同步维护，应抽 common.gd 单点 |
+| 12 | `mc_item_pack/_compiled.json` 是构建产物但提交进 git | (.gitignore + ci) | 应改成 build step 自动生成；目前简化方便手动跑 |
+
+### 10.8 操作守则（M2+ 增补）
+
+延续 §8 不变，追加：
+
+6. **改 entities.json schema** 前：
+   - 改 `vxw_format.Entity` dataclass
+   - 改 `entity_renderer.gd` 读取
+   - 改 `entity_selector.gd` 读写
+   - 改 `main.gd._spawn_entity` 写
+   - 更新本文 §10.2 schema 表
+   - 至少跑 `--spawn-items=chair,table --test-rotate-first=90 --test-delete-first` snapshot 流程
+
+7. **改 mc_item_pack 格式**前：
+   - 改 `mc_item_loader.py` 输出
+   - 改 `entity_renderer._build_mc_composite` 消费
+   - 重跑 `python m3_adapter/mc_item_loader.py` 编译
+   - 跑 snapshot 验证至少 chair / table / lamp 三个 preset 渲染对
+
+8. **加 adapter** 优先复用 `m3_adapter/pcd_to_vxw.py` 的 helper (`load_pcd_xyz`、`ros_zup_to_vxw_yup`、`voxelize_and_group`、`build_palette`)。bag/tsdf/uhumans2/dbscan 都是这样做的。
+

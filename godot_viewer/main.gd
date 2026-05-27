@@ -51,6 +51,7 @@ var _test_delete_first: bool = false
 var _test_rotate_first_deg: float = 0.0
 var _test_grab_first_to: Vector3 = Vector3.ZERO
 var _test_grab_first_set: bool = false
+var _test_undo_times: int = 0
 
 
 func _ready() -> void:
@@ -86,6 +87,8 @@ func _ready() -> void:
                     float(parts[0]), float(parts[1]), float(parts[2])
                 )
                 _test_grab_first_set = true
+        elif arg.begins_with("--test-undo-times="):
+            _test_undo_times = int(arg.substr("--test-undo-times=".length()))
 
     logger.info("config", {
         "world_path": world_path,
@@ -139,6 +142,9 @@ func _ready() -> void:
         main_cam, _world_path_absolute, entity_renderer,
         entity_placer, voxel_editor, logger
     )
+    entity_selector.will_delete.connect(_on_entity_will_delete)
+    entity_selector.will_move.connect(_on_entity_will_move)
+    entity_selector.will_rotate.connect(_on_entity_will_rotate)
     left_vp.world_3d = get_viewport().world_3d
     right_vp.world_3d = get_viewport().world_3d
     stereo_rig.init_controller(left_cam, right_cam)
@@ -179,6 +185,9 @@ func _ready() -> void:
                 entity_selector.rotate_by_id(first_id, deg_to_rad(_test_rotate_first_deg))
             if _test_delete_first:
                 entity_selector.delete_by_id(first_id)
+
+    for _i in _test_undo_times:
+        undo_last_edit()
 
 
 func _set_rig_xform_deferred(xf: Transform3D) -> void:
@@ -262,11 +271,24 @@ func _spawn_entity(item_id: String, preset: Dictionary, pos: Vector3, yaw_rad: f
     var existing := _read_entities_json(ent_path)
     existing.append(entity)
     _write_entities_json(ent_path, existing)
+    _push_undo({"op": "entity_spawn", "id": entity_id})
     logger.info("entity_spawned", {"id": entity_id, "item": item_id,
                                    "pos": [pos.x, pos.y, pos.z],
                                    "yaw_deg": rad_to_deg(yaw_rad),
                                    "total_entities": existing.size()})
     entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
+
+
+func _on_entity_will_delete(entity_dict: Dictionary) -> void:
+    _push_undo({"op": "entity_delete", "entity": entity_dict.duplicate(true)})
+
+
+func _on_entity_will_move(id: String, from_pos: Array, to_pos: Array) -> void:
+    _push_undo({"op": "entity_move", "id": id, "from": from_pos, "to": to_pos})
+
+
+func _on_entity_will_rotate(id: String, from_quat: Array, to_quat: Array) -> void:
+    _push_undo({"op": "entity_rotate", "id": id, "from": from_quat, "to": to_quat})
 
 
 func _quat_from_yaw(yaw_rad: float) -> Array:
@@ -440,22 +462,70 @@ func undo_last_edit() -> bool:
         logger.info("undo", {"status": "stack empty"})
         return false
     var entry: Dictionary = _undo_stack.pop_back()
-    var vi: Vector3i = entry["vi"]
     var op: String = entry["op"]
-    var mid: int = int(entry["material_id"])
     if op == "destroy":
-        # Undo a destroy → re-place the voxel
+        var vi: Vector3i = entry["vi"]
+        var mid: int = int(entry["material_id"])
         if renderer.add_voxel(vi, mid):
             voxel_editor._occupied[vi] = true
             _patch_voxel_on_disk(vi, mid, 0)
     elif op == "place":
-        # Undo a place → destroy the voxel
-        if renderer.hide_voxel(vi):
-            voxel_editor._occupied.erase(vi)
-            _patch_voxel_on_disk(vi, 0, 0)
+        var vi2: Vector3i = entry["vi"]
+        if renderer.hide_voxel(vi2):
+            voxel_editor._occupied.erase(vi2)
+            _patch_voxel_on_disk(vi2, 0, 0)
+    elif op == "entity_spawn":
+        _undo_entity_spawn(entry["id"])
+    elif op == "entity_delete":
+        _undo_entity_delete(entry["entity"])
+    elif op == "entity_move":
+        _undo_entity_move(entry["id"], entry["from"])
+    elif op == "entity_rotate":
+        _undo_entity_rotate(entry["id"], entry["from"])
     pause_menu.set_undo_count(_undo_stack.size())
-    logger.info("undo", {"op": op, "vi": [vi.x, vi.y, vi.z], "stack_left": _undo_stack.size()})
+    logger.info("undo", {"op": op, "stack_left": _undo_stack.size()})
     return true
+
+
+func _undo_entity_spawn(id: String) -> void:
+    var ent_path := _world_path_absolute + "/entities.json"
+    var entities := _read_entities_json(ent_path)
+    var kept: Array = []
+    for e in entities:
+        if String(e.get("id", "")) != id:
+            kept.append(e)
+    _write_entities_json(ent_path, kept)
+    entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
+
+
+func _undo_entity_delete(entity_dict: Dictionary) -> void:
+    var ent_path := _world_path_absolute + "/entities.json"
+    var entities := _read_entities_json(ent_path)
+    entities.append(entity_dict)
+    _write_entities_json(ent_path, entities)
+    entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
+
+
+func _undo_entity_move(id: String, from_pos: Array) -> void:
+    var ent_path := _world_path_absolute + "/entities.json"
+    var entities := _read_entities_json(ent_path)
+    for e in entities:
+        if String(e.get("id", "")) == id:
+            e["position"] = from_pos
+            break
+    _write_entities_json(ent_path, entities)
+    entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
+
+
+func _undo_entity_rotate(id: String, from_quat: Array) -> void:
+    var ent_path := _world_path_absolute + "/entities.json"
+    var entities := _read_entities_json(ent_path)
+    for e in entities:
+        if String(e.get("id", "")) == id:
+            e["rotation"] = from_quat
+            break
+    _write_entities_json(ent_path, entities)
+    entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
 
 
 # Map a world voxel index to its (chunk_coord, local_voxel) and patch the chunk
