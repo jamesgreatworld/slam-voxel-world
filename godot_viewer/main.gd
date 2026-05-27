@@ -22,7 +22,9 @@ var _undo_stack: Array = []
 
 @onready var renderer: Node3D = $VoxelRenderer
 const EntityRendererScript = preload("res://entity_renderer.gd")
+const ItemPickerScript = preload("res://item_picker.gd")
 var entity_renderer: Node3D = null
+var item_picker: CanvasLayer = null
 @onready var stereo_rig: Node3D = $StereoRig  # has stereo_rig_controller.gd
 @onready var cam_ctl: Node = $CameraController
 @onready var hud_ctl: Node = $HudController
@@ -50,6 +52,8 @@ func _ready() -> void:
     var world_path := DEFAULT_WORLD_PATH
     var view_override := ""
     var rig_pose_spec := ""
+    var open_item_picker := false
+    var spawn_items: Array = []
     for arg in args:
         if arg.begins_with("--world="):
             world_path = arg.substr("--world=".length())
@@ -59,6 +63,10 @@ func _ready() -> void:
             view_override = "3p"
         elif arg.begins_with("--rig-pose="):
             rig_pose_spec = arg.substr("--rig-pose=".length())
+        elif arg == "--open-item-picker":
+            open_item_picker = true
+        elif arg.begins_with("--spawn-items="):
+            spawn_items = arg.substr("--spawn-items=".length()).split(",")
 
     logger.info("config", {
         "world_path": world_path,
@@ -88,6 +96,14 @@ func _ready() -> void:
     add_child(entity_renderer)
     entity_renderer.init_renderer(logger)
     entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
+
+    item_picker = CanvasLayer.new()
+    item_picker.set_script(ItemPickerScript)
+    item_picker.name = "ItemPicker"
+    add_child(item_picker)
+    item_picker.init_picker(logger)
+    item_picker.set_presets(entity_renderer.get_item_presets())
+    item_picker.item_chosen.connect(_on_item_chosen)
     left_vp.world_3d = get_viewport().world_3d
     right_vp.world_3d = get_viewport().world_3d
     stereo_rig.init_controller(left_cam, right_cam)
@@ -110,6 +126,11 @@ func _ready() -> void:
     if rig_pose_spec != "":
         var xf := _parse_rig_pose(rig_pose_spec)
         call_deferred("_set_rig_xform_deferred", xf)
+    if open_item_picker and item_picker != null:
+        item_picker.open()
+    for sid in spawn_items:
+        if sid != "":
+            _on_item_chosen(String(sid))
 
 
 func _set_rig_xform_deferred(xf: Transform3D) -> void:
@@ -142,6 +163,91 @@ func _input(event: InputEvent) -> void:
             _toggle_pause()
         elif event.keycode == KEY_Z and event.ctrl_pressed:
             undo_last_edit()
+        elif event.keycode == KEY_I and item_picker != null:
+            item_picker.toggle()
+
+
+func _on_item_chosen(item_id: String) -> void:
+    var presets: Dictionary = entity_renderer.get_item_presets()
+    if not presets.has(item_id):
+        push_error("[main] item_chosen for unknown preset: " + item_id)
+        return
+    var preset: Dictionary = presets[item_id]
+
+    # Spawn 1.5m in front of the rig, sitting on its current y plane.
+    var rig_xf: Transform3D = stereo_rig.global_transform
+    var forward: Vector3 = -rig_xf.basis.z.normalized()
+    var pos: Vector3 = rig_xf.origin + forward * 1.5
+
+    var extents = preset.get("overall_extents_m", [0.5, 0.5, 0.5])
+    var label: int = int(preset.get("default_label", 0))
+    var entity_id := _uuid4()
+    var entity: Dictionary = {
+        "id": entity_id,
+        "label": label,
+        "label_name": item_id,
+        "position": [pos.x, pos.y, pos.z],
+        # World-aligned forward (rig yaw applied). For now we drop pitch/roll
+        # so items always sit upright.
+        "rotation": _quat_from_yaw(rig_xf.basis.get_euler().y),
+        "bbox_dims": [float(extents[0]), float(extents[1]), float(extents[2])],
+        "voxel_count": 0,
+        "custom_meta": {"mc_item": item_id, "spawned_at": Time.get_unix_time_from_system()},
+    }
+
+    var ent_path := _world_path_absolute + "/entities.json"
+    var existing := _read_entities_json(ent_path)
+    existing.append(entity)
+    _write_entities_json(ent_path, existing)
+    logger.info("entity_spawned", {"id": entity_id, "item": item_id,
+                                    "pos": [pos.x, pos.y, pos.z],
+                                    "total_entities": existing.size()})
+
+    # Reload all entities — simplest path; the entity count is small (≤ 200).
+    entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
+
+
+func _quat_from_yaw(yaw_rad: float) -> Array:
+    var half := yaw_rad * 0.5
+    return [0.0, sin(half), 0.0, cos(half)]   # [qx, qy, qz, qw]
+
+
+func _uuid4() -> String:
+    # RFC 4122 v4 — enough randomness for our purposes; not cryptographic.
+    var rng := RandomNumberGenerator.new()
+    rng.randomize()
+    var b := PackedByteArray()
+    for i in 16:
+        b.append(rng.randi() & 0xff)
+    b[6] = (b[6] & 0x0f) | 0x40
+    b[8] = (b[8] & 0x3f) | 0x80
+    var hex := b.hex_encode()
+    return "%s-%s-%s-%s-%s" % [
+        hex.substr(0, 8), hex.substr(8, 4), hex.substr(12, 4),
+        hex.substr(16, 4), hex.substr(20, 12),
+    ]
+
+
+func _read_entities_json(path: String) -> Array:
+    if not FileAccess.file_exists(path):
+        return []
+    var txt := FileAccess.get_file_as_string(path)
+    if txt.is_empty():
+        return []
+    var d = JSON.parse_string(txt)
+    if d == null or not d.has("entities"):
+        return []
+    return d.entities
+
+
+func _write_entities_json(path: String, entities: Array) -> void:
+    var payload := {"format_version": "1.0", "entities": entities}
+    var f := FileAccess.open(path, FileAccess.WRITE)
+    if f == null:
+        push_error("[main] cannot write entities.json: " + path)
+        return
+    f.store_string(JSON.stringify(payload, "  "))
+    f.close()
 
 
 func _wire_pause_menu() -> void:
