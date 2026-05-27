@@ -23,8 +23,10 @@ var _undo_stack: Array = []
 @onready var renderer: Node3D = $VoxelRenderer
 const EntityRendererScript = preload("res://entity_renderer.gd")
 const ItemPickerScript = preload("res://item_picker.gd")
+const EntityPlacerScript = preload("res://entity_placer.gd")
 var entity_renderer: Node3D = null
 var item_picker: CanvasLayer = null
+var entity_placer: Node3D = null
 @onready var stereo_rig: Node3D = $StereoRig  # has stereo_rig_controller.gd
 @onready var cam_ctl: Node = $CameraController
 @onready var hud_ctl: Node = $HudController
@@ -104,6 +106,13 @@ func _ready() -> void:
     item_picker.init_picker(logger)
     item_picker.set_presets(entity_renderer.get_item_presets())
     item_picker.item_chosen.connect(_on_item_chosen)
+
+    entity_placer = Node3D.new()
+    entity_placer.set_script(EntityPlacerScript)
+    entity_placer.name = "EntityPlacer"
+    add_child(entity_placer)
+    entity_placer.init_placer(main_cam, voxel_editor, logger)
+    entity_placer.placement_committed.connect(_on_placement_committed)
     left_vp.world_3d = get_viewport().world_3d
     right_vp.world_3d = get_viewport().world_3d
     stereo_rig.init_controller(left_cam, right_cam)
@@ -130,7 +139,9 @@ func _ready() -> void:
         item_picker.open()
     for sid in spawn_items:
         if sid != "":
-            _on_item_chosen(String(sid))
+            var presets: Dictionary = entity_renderer.get_item_presets()
+            if presets.has(sid):
+                _spawn_item_in_front_of_rig(String(sid), presets[sid])
 
 
 func _set_rig_xform_deferred(xf: Transform3D) -> void:
@@ -172,13 +183,31 @@ func _on_item_chosen(item_id: String) -> void:
     if not presets.has(item_id):
         push_error("[main] item_chosen for unknown preset: " + item_id)
         return
-    var preset: Dictionary = presets[item_id]
+    # Hand off to the placer: the user moves the ghost with the mouse and
+    # commits with LMB. The placer emits placement_committed → we spawn.
+    if entity_placer != null:
+        entity_placer.start(item_id, presets[item_id])
+        return
+    # Fallback (placer not ready): spawn in front of rig immediately.
+    _spawn_item_in_front_of_rig(item_id, presets[item_id])
 
-    # Spawn 1.5m in front of the rig, sitting on its current y plane.
+
+func _on_placement_committed(item_id: String, world_pos: Vector3, yaw_rad: float) -> void:
+    var presets: Dictionary = entity_renderer.get_item_presets()
+    if not presets.has(item_id):
+        return
+    _spawn_entity(item_id, presets[item_id], world_pos, yaw_rad)
+
+
+func _spawn_item_in_front_of_rig(item_id: String, preset: Dictionary) -> void:
     var rig_xf: Transform3D = stereo_rig.global_transform
     var forward: Vector3 = -rig_xf.basis.z.normalized()
     var pos: Vector3 = rig_xf.origin + forward * 1.5
+    var yaw: float = rig_xf.basis.get_euler().y
+    _spawn_entity(item_id, preset, pos, yaw)
 
+
+func _spawn_entity(item_id: String, preset: Dictionary, pos: Vector3, yaw_rad: float) -> void:
     var extents = preset.get("overall_extents_m", [0.5, 0.5, 0.5])
     var label: int = int(preset.get("default_label", 0))
     var entity_id := _uuid4()
@@ -187,23 +216,19 @@ func _on_item_chosen(item_id: String) -> void:
         "label": label,
         "label_name": item_id,
         "position": [pos.x, pos.y, pos.z],
-        # World-aligned forward (rig yaw applied). For now we drop pitch/roll
-        # so items always sit upright.
-        "rotation": _quat_from_yaw(rig_xf.basis.get_euler().y),
+        "rotation": _quat_from_yaw(yaw_rad),
         "bbox_dims": [float(extents[0]), float(extents[1]), float(extents[2])],
         "voxel_count": 0,
         "custom_meta": {"mc_item": item_id, "spawned_at": Time.get_unix_time_from_system()},
     }
-
     var ent_path := _world_path_absolute + "/entities.json"
     var existing := _read_entities_json(ent_path)
     existing.append(entity)
     _write_entities_json(ent_path, existing)
     logger.info("entity_spawned", {"id": entity_id, "item": item_id,
-                                    "pos": [pos.x, pos.y, pos.z],
-                                    "total_entities": existing.size()})
-
-    # Reload all entities — simplest path; the entity count is small (≤ 200).
+                                   "pos": [pos.x, pos.y, pos.z],
+                                   "yaw_deg": rad_to_deg(yaw_rad),
+                                   "total_entities": existing.size()})
     entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
 
 

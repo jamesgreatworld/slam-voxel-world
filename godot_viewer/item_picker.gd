@@ -82,12 +82,12 @@ func _build_ui() -> void:
     _panel.add_child(vbox)
 
     _title = Label.new()
-    _title.text = "Items — click to spawn 1.5m in front of rig"
+    _title.text = "Items — click to start placement"
     _title.add_theme_font_size_override("font_size", 18)
     vbox.add_child(_title)
 
     _hint = Label.new()
-    _hint.text = "(Press I to close, RMB on an entity in the world to delete)"
+    _hint.text = "Place: move mouse → LMB to drop  |  R rotate 45°  |  RMB / ESC cancel  |  I toggle this panel"
     _hint.add_theme_font_size_override("font_size", 12)
     _hint.modulate = Color(0.8, 0.8, 0.8)
     vbox.add_child(_hint)
