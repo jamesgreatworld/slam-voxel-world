@@ -130,6 +130,11 @@ func _spawn_one(e: Dictionary, palette_rgb: PackedColorArray) -> Node3D:
         var box_dims = dims if (dims != null and dims.size() >= 3) else [0.5, 0.5, 0.5]
         _build_single_box(root, col, box_dims)
 
+    # Picking proxy: a single AABB-sized StaticBody so PhysicsServer rays from
+    # the cursor can hit this entity even though its visuals are composite.
+    var pick_dims = dims if (dims != null and dims.size() >= 3) else [0.5, 0.5, 0.5]
+    root.add_child(_make_pick_body(pick_dims))
+
     root.set_meta(ENTITY_META_KEY, {
         "id": String(e.get("id", "")),
         "label": label,
@@ -138,6 +143,17 @@ func _spawn_one(e: Dictionary, palette_rgb: PackedColorArray) -> Node3D:
         "custom_meta": custom_meta,
     })
     return root
+
+
+func _make_pick_body(dims) -> StaticBody3D:
+    var body := StaticBody3D.new()
+    body.name = "PickProxy"
+    var cs := CollisionShape3D.new()
+    var shape := BoxShape3D.new()
+    shape.size = Vector3(float(dims[0]), float(dims[1]), float(dims[2]))
+    cs.shape = shape
+    body.add_child(cs)
+    return body
 
 
 func _build_single_box(root: Node3D, col: Color, dims) -> void:

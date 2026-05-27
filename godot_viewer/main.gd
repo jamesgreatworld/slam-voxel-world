@@ -24,9 +24,11 @@ var _undo_stack: Array = []
 const EntityRendererScript = preload("res://entity_renderer.gd")
 const ItemPickerScript = preload("res://item_picker.gd")
 const EntityPlacerScript = preload("res://entity_placer.gd")
+const EntitySelectorScript = preload("res://entity_selector.gd")
 var entity_renderer: Node3D = null
 var item_picker: CanvasLayer = null
 var entity_placer: Node3D = null
+var entity_selector: Node3D = null
 @onready var stereo_rig: Node3D = $StereoRig  # has stereo_rig_controller.gd
 @onready var cam_ctl: Node = $CameraController
 @onready var hud_ctl: Node = $HudController
@@ -45,6 +47,8 @@ var entity_placer: Node3D = null
 @onready var right_vp: SubViewport = $HUD/RightStereoContainer/RightStereoViewport
 
 var _mouse_mode_before_pause: int = Input.MOUSE_MODE_VISIBLE
+var _test_delete_first: bool = false
+var _test_rotate_first_deg: float = 0.0
 
 
 func _ready() -> void:
@@ -69,6 +73,10 @@ func _ready() -> void:
             open_item_picker = true
         elif arg.begins_with("--spawn-items="):
             spawn_items = arg.substr("--spawn-items=".length()).split(",")
+        elif arg == "--test-delete-first":
+            _test_delete_first = true
+        elif arg.begins_with("--test-rotate-first="):
+            _test_rotate_first_deg = float(arg.substr("--test-rotate-first=".length()))
 
     logger.info("config", {
         "world_path": world_path,
@@ -113,6 +121,14 @@ func _ready() -> void:
     add_child(entity_placer)
     entity_placer.init_placer(main_cam, voxel_editor, logger)
     entity_placer.placement_committed.connect(_on_placement_committed)
+
+    entity_selector = Node3D.new()
+    entity_selector.set_script(EntitySelectorScript)
+    entity_selector.name = "EntitySelector"
+    add_child(entity_selector)
+    entity_selector.init_selector(
+        main_cam, _world_path_absolute, entity_renderer, entity_placer, logger
+    )
     left_vp.world_3d = get_viewport().world_3d
     right_vp.world_3d = get_viewport().world_3d
     stereo_rig.init_controller(left_cam, right_cam)
@@ -142,6 +158,15 @@ func _ready() -> void:
             var presets: Dictionary = entity_renderer.get_item_presets()
             if presets.has(sid):
                 _spawn_item_in_front_of_rig(String(sid), presets[sid])
+
+    if _test_delete_first or _test_rotate_first_deg != 0.0:
+        var rec_list := _read_entities_json(_world_path_absolute + "/entities.json")
+        if rec_list.size() > 0:
+            var first_id := String(rec_list[0].get("id", ""))
+            if _test_rotate_first_deg != 0.0:
+                entity_selector.rotate_by_id(first_id, deg_to_rad(_test_rotate_first_deg))
+            if _test_delete_first:
+                entity_selector.delete_by_id(first_id)
 
 
 func _set_rig_xform_deferred(xf: Transform3D) -> void:
@@ -487,6 +512,8 @@ func _load_world_in_place(world_path: String) -> void:
         child.queue_free()
     renderer.build(_world)
     entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
+    if entity_selector != null:
+        entity_selector.set_world_path(_world_path_absolute)
     # Re-init editor with new world
     voxel_editor.init_editor(renderer, main_cam)
     # Reset rig + reset stereo cams sync
