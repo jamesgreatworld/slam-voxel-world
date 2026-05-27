@@ -78,11 +78,23 @@ def _fallback_color(name: str) -> tuple[int, int, int]:
     return (60 + h[0] % 160, 60 + h[1] % 160, 60 + h[2] % 160)
 
 
+def _texture_png_relpath(texture_name: str, pack_root: Path) -> str | None:
+    """`block/oak_planks` → 'textures/block/oak_planks.png' if the file exists
+    under pack_root; else None. Path is relative to pack_root so consumers
+    can join with whatever absolute prefix they need."""
+    rel = Path("textures") / Path(texture_name).with_suffix(".png")
+    if (pack_root / rel).is_file():
+        return str(rel.as_posix())
+    return None
+
+
 @dataclass
 class ItemBox:
     min_m: tuple                       # (x, y, z) metres, model-origin-centred
     max_m: tuple
-    face_colors: dict = field(default_factory=dict)  # face_name -> (r,g,b)
+    face_colors: dict = field(default_factory=dict)    # face_name -> (r,g,b)
+    face_textures: dict = field(default_factory=dict)  # face_name -> rel PNG path
+    dominant_texture: str | None = None                # rel PNG path; phase-1 albedo
 
 
 @dataclass
@@ -124,10 +136,14 @@ def _model_bbox(elements: list) -> tuple[tuple, tuple]:
     )
 
 
-def load_model(model_path: Path) -> tuple[list, tuple, dict]:
+def load_model(model_path: Path, pack_root: Path) -> tuple[list, tuple, dict]:
     """Parse one MC block model JSON. Returns (boxes_in_metres, extents_m,
     textures_map). Sub-box coordinates are centred at the model's overall
-    centre (so the entity's `position` puts that centre in the world)."""
+    centre (so the entity's `position` puts that centre in the world).
+
+    Each box also gets face_textures (face_name → PNG rel path) and a
+    dominant_texture (the most-frequently-referenced face texture; consumers
+    that only support one albedo per box pick this)."""
     data = json.loads(model_path.read_text())
     textures = data.get("textures", {})
     elements = data.get("elements", [])
@@ -143,7 +159,6 @@ def load_model(model_path: Path) -> tuple[list, tuple, dict]:
     boxes: list[ItemBox] = []
     for el in elements:
         f, t = el["from"], el["to"]
-        # centre on the model origin and convert MC units → metres
         box_min = (
             (min(f[0], t[0]) - cx) * _MC_UNIT_TO_METRE,
             (min(f[1], t[1]) - cy) * _MC_UNIT_TO_METRE,
@@ -155,10 +170,22 @@ def load_model(model_path: Path) -> tuple[list, tuple, dict]:
             (max(f[2], t[2]) - cz) * _MC_UNIT_TO_METRE,
         )
         face_colors: dict[str, tuple] = {}
+        face_textures: dict[str, str] = {}
+        tex_counts: dict[str, int] = {}
         for face_name, face in (el.get("faces") or {}).items():
             tname = _resolve_texture(face, textures)
             face_colors[face_name] = _color_for(tname)
-        boxes.append(ItemBox(min_m=box_min, max_m=box_max, face_colors=face_colors))
+            png = _texture_png_relpath(tname, pack_root)
+            if png is not None:
+                face_textures[face_name] = png
+                tex_counts[png] = tex_counts.get(png, 0) + 1
+        dominant = max(tex_counts, key=tex_counts.get) if tex_counts else None
+        boxes.append(ItemBox(
+            min_m=box_min, max_m=box_max,
+            face_colors=face_colors,
+            face_textures=face_textures,
+            dominant_texture=dominant,
+        ))
 
     extents_m = tuple(e * _MC_UNIT_TO_METRE for e in extents_units)
     return boxes, extents_m, textures
@@ -173,7 +200,7 @@ def load_pack(pack_root: Path) -> dict[str, ItemPreset]:
             log.warning("model file missing for item %r: %s",
                         entry["id"], model_path)
             continue
-        boxes, extents_m, _ = load_model(model_path)
+        boxes, extents_m, _ = load_model(model_path, pack_root)
         presets[entry["id"]] = ItemPreset(
             id=entry["id"],
             category=str(entry.get("category", "misc")),
@@ -197,6 +224,8 @@ def _preset_to_dict(p: ItemPreset) -> dict:
                 "min": list(b.min_m),
                 "max": list(b.max_m),
                 "face_colors": {k: list(v) for k, v in b.face_colors.items()},
+                "face_textures": dict(b.face_textures),
+                "dominant_texture": b.dominant_texture,
             }
             for b in p.boxes
         ],

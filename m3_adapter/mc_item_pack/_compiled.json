@@ -55,7 +55,16 @@
               132,
               77
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/oak_planks.png",
+            "east": "textures/block/oak_planks.png",
+            "south": "textures/block/oak_planks.png",
+            "west": "textures/block/oak_planks.png",
+            "up": "textures/block/oak_planks.png",
+            "down": "textures/block/oak_planks.png"
+          },
+          "dominant_texture": "textures/block/oak_planks.png"
         },
         {
           "min": [
@@ -99,7 +108,16 @@
               132,
               77
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/oak_planks.png",
+            "east": "textures/block/oak_planks.png",
+            "south": "textures/block/oak_planks.png",
+            "west": "textures/block/oak_planks.png",
+            "up": "textures/block/oak_planks.png",
+            "down": "textures/block/oak_planks.png"
+          },
+          "dominant_texture": "textures/block/oak_planks.png"
         },
         {
           "min": [
@@ -143,7 +161,16 @@
               132,
               77
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/oak_planks.png",
+            "east": "textures/block/oak_planks.png",
+            "south": "textures/block/oak_planks.png",
+            "west": "textures/block/oak_planks.png",
+            "up": "textures/block/oak_planks.png",
+            "down": "textures/block/oak_planks.png"
+          },
+          "dominant_texture": "textures/block/oak_planks.png"
         },
         {
           "min": [
@@ -187,7 +214,16 @@
               132,
               77
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/oak_planks.png",
+            "east": "textures/block/oak_planks.png",
+            "south": "textures/block/oak_planks.png",
+            "west": "textures/block/oak_planks.png",
+            "up": "textures/block/oak_planks.png",
+            "down": "textures/block/oak_planks.png"
+          },
+          "dominant_texture": "textures/block/oak_planks.png"
         },
         {
           "min": [
@@ -231,7 +267,16 @@
               132,
               77
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/red_wool.png",
+            "east": "textures/block/red_wool.png",
+            "south": "textures/block/red_wool.png",
+            "west": "textures/block/red_wool.png",
+            "up": "textures/block/red_wool.png",
+            "down": "textures/block/oak_planks.png"
+          },
+          "dominant_texture": "textures/block/red_wool.png"
         },
         {
           "min": [
@@ -275,7 +320,16 @@
               132,
               77
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/oak_planks.png",
+            "east": "textures/block/oak_planks.png",
+            "south": "textures/block/oak_planks.png",
+            "west": "textures/block/oak_planks.png",
+            "up": "textures/block/oak_planks.png",
+            "down": "textures/block/oak_planks.png"
+          },
+          "dominant_texture": "textures/block/oak_planks.png"
         }
       ]
     },
@@ -332,7 +386,16 @@
               132,
               77
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/oak_planks.png",
+            "east": "textures/block/oak_planks.png",
+            "south": "textures/block/oak_planks.png",
+            "west": "textures/block/oak_planks.png",
+            "up": "textures/block/oak_planks.png",
+            "down": "textures/block/oak_planks.png"
+          },
+          "dominant_texture": "textures/block/oak_planks.png"
         },
         {
           "min": [
@@ -376,7 +439,16 @@
               132,
               77
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/oak_planks.png",
+            "east": "textures/block/oak_planks.png",
+            "south": "textures/block/oak_planks.png",
+            "west": "textures/block/oak_planks.png",
+            "up": "textures/block/oak_planks.png",
+            "down": "textures/block/oak_planks.png"
+          },
+          "dominant_texture": "textures/block/oak_planks.png"
         },
         {
           "min": [
@@ -420,7 +492,16 @@
               132,
               77
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/oak_planks.png",
+            "east": "textures/block/oak_planks.png",
+            "south": "textures/block/oak_planks.png",
+            "west": "textures/block/oak_planks.png",
+            "up": "textures/block/oak_planks.png",
+            "down": "textures/block/oak_planks.png"
+          },
+          "dominant_texture": "textures/block/oak_planks.png"
         },
         {
           "min": [
@@ -464,7 +545,16 @@
               132,
               77
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/oak_planks.png",
+            "east": "textures/block/oak_planks.png",
+            "south": "textures/block/oak_planks.png",
+            "west": "textures/block/oak_planks.png",
+            "up": "textures/block/oak_planks.png",
+            "down": "textures/block/oak_planks.png"
+          },
+          "dominant_texture": "textures/block/oak_planks.png"
         },
         {
           "min": [
@@ -508,7 +598,16 @@
               132,
               77
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/oak_planks.png",
+            "east": "textures/block/oak_planks.png",
+            "south": "textures/block/oak_planks.png",
+            "west": "textures/block/oak_planks.png",
+            "up": "textures/block/oak_log_top.png",
+            "down": "textures/block/oak_planks.png"
+          },
+          "dominant_texture": "textures/block/oak_planks.png"
         }
       ]
     },
@@ -565,7 +664,16 @@
               220,
               220
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/iron_block.png",
+            "east": "textures/block/iron_block.png",
+            "south": "textures/block/iron_block.png",
+            "west": "textures/block/iron_block.png",
+            "up": "textures/block/iron_block.png",
+            "down": "textures/block/iron_block.png"
+          },
+          "dominant_texture": "textures/block/iron_block.png"
         },
         {
           "min": [
@@ -609,7 +717,16 @@
               220,
               220
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/iron_block.png",
+            "east": "textures/block/iron_block.png",
+            "south": "textures/block/iron_block.png",
+            "west": "textures/block/iron_block.png",
+            "up": "textures/block/iron_block.png",
+            "down": "textures/block/iron_block.png"
+          },
+          "dominant_texture": "textures/block/iron_block.png"
         },
         {
           "min": [
@@ -653,7 +770,16 @@
               180,
               47
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/yellow_wool.png",
+            "east": "textures/block/yellow_wool.png",
+            "south": "textures/block/yellow_wool.png",
+            "west": "textures/block/yellow_wool.png",
+            "up": "textures/block/yellow_wool.png",
+            "down": "textures/block/yellow_wool.png"
+          },
+          "dominant_texture": "textures/block/yellow_wool.png"
         }
       ]
     },
@@ -710,7 +836,16 @@
               53,
               27
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/dark_oak_planks.png",
+            "east": "textures/block/dark_oak_planks.png",
+            "south": "textures/block/dark_oak_planks.png",
+            "west": "textures/block/dark_oak_planks.png",
+            "up": "textures/block/dark_oak_planks.png",
+            "down": "textures/block/dark_oak_planks.png"
+          },
+          "dominant_texture": "textures/block/dark_oak_planks.png"
         },
         {
           "min": [
@@ -754,7 +889,16 @@
               236,
               236
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/white_wool.png",
+            "east": "textures/block/white_wool.png",
+            "south": "textures/block/white_wool.png",
+            "west": "textures/block/white_wool.png",
+            "up": "textures/block/white_wool.png",
+            "down": "textures/block/white_wool.png"
+          },
+          "dominant_texture": "textures/block/white_wool.png"
         },
         {
           "min": [
@@ -798,7 +942,16 @@
               168,
               213
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/light_blue_wool.png",
+            "east": "textures/block/light_blue_wool.png",
+            "south": "textures/block/light_blue_wool.png",
+            "west": "textures/block/light_blue_wool.png",
+            "up": "textures/block/light_blue_wool.png",
+            "down": "textures/block/light_blue_wool.png"
+          },
+          "dominant_texture": "textures/block/light_blue_wool.png"
         },
         {
           "min": [
@@ -842,7 +995,16 @@
               53,
               27
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/dark_oak_planks.png",
+            "east": "textures/block/dark_oak_planks.png",
+            "south": "textures/block/dark_oak_planks.png",
+            "west": "textures/block/dark_oak_planks.png",
+            "up": "textures/block/dark_oak_planks.png",
+            "down": "textures/block/dark_oak_planks.png"
+          },
+          "dominant_texture": "textures/block/dark_oak_planks.png"
         }
       ]
     },
@@ -899,7 +1061,16 @@
               16,
               19
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/light_blue_stained_glass.png",
+            "east": "textures/block/black_concrete.png",
+            "south": "textures/block/black_concrete.png",
+            "west": "textures/block/black_concrete.png",
+            "up": "textures/block/black_concrete.png",
+            "down": "textures/block/black_concrete.png"
+          },
+          "dominant_texture": "textures/block/black_concrete.png"
         },
         {
           "min": [
@@ -943,7 +1114,16 @@
               16,
               19
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/black_concrete.png",
+            "east": "textures/block/black_concrete.png",
+            "south": "textures/block/black_concrete.png",
+            "west": "textures/block/black_concrete.png",
+            "up": "textures/block/black_concrete.png",
+            "down": "textures/block/black_concrete.png"
+          },
+          "dominant_texture": "textures/block/black_concrete.png"
         },
         {
           "min": [
@@ -987,7 +1167,16 @@
               16,
               19
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/black_concrete.png",
+            "east": "textures/block/black_concrete.png",
+            "south": "textures/block/black_concrete.png",
+            "west": "textures/block/black_concrete.png",
+            "up": "textures/block/black_concrete.png",
+            "down": "textures/block/black_concrete.png"
+          },
+          "dominant_texture": "textures/block/black_concrete.png"
         },
         {
           "min": [
@@ -1031,7 +1220,16 @@
               68,
               73
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/gray_concrete.png",
+            "east": "textures/block/gray_concrete.png",
+            "south": "textures/block/gray_concrete.png",
+            "west": "textures/block/gray_concrete.png",
+            "up": "textures/block/gray_concrete.png",
+            "down": "textures/block/gray_concrete.png"
+          },
+          "dominant_texture": "textures/block/gray_concrete.png"
         }
       ]
     },
@@ -1088,7 +1286,16 @@
               220,
               220
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/iron_block.png",
+            "east": "textures/block/iron_block.png",
+            "south": "textures/block/iron_block.png",
+            "west": "textures/block/iron_block.png",
+            "up": "textures/block/black_concrete.png",
+            "down": "textures/block/iron_block.png"
+          },
+          "dominant_texture": "textures/block/iron_block.png"
         },
         {
           "min": [
@@ -1132,7 +1339,16 @@
               220,
               220
             ]
-          }
+          },
+          "face_textures": {
+            "north": "textures/block/iron_block.png",
+            "east": "textures/block/iron_block.png",
+            "south": "textures/block/iron_block.png",
+            "west": "textures/block/iron_block.png",
+            "up": "textures/block/iron_block.png",
+            "down": "textures/block/iron_block.png"
+          },
+          "dominant_texture": "textures/block/iron_block.png"
         }
       ]
     }

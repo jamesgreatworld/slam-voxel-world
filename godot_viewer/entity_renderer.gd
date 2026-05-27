@@ -169,9 +169,11 @@ func _build_single_box(root: Node3D, col: Color, dims) -> void:
     root.add_child(mi)
 
 
-# Per MC convention, each sub-box has up to 6 different face colours. We can
-# only assign a single albedo to a BoxMesh, so we average the visible faces.
-# Future improvement: spawn 6 textured Quads per box for per-face shading.
+# Phase-1 multi-box composite: one BoxMesh per sub-box. Each box uses its
+# `dominant_texture` (most-frequently-referenced face PNG) as a single
+# albedo_texture covering all 6 faces. If no PNG is on disk for that
+# texture name we fall back to the averaged face colour. Phase 2 will
+# split into 6 textured PlaneMesh quads when per-face textures matter.
 func _build_mc_composite(root: Node3D, preset: Dictionary) -> void:
     for b in preset.get("boxes", []):
         var bmin = b.get("min")
@@ -184,29 +186,57 @@ func _build_mc_composite(root: Node3D, preset: Dictionary) -> void:
         var cx: float = (float(bmax[0]) + float(bmin[0])) * 0.5
         var cy: float = (float(bmax[1]) + float(bmin[1])) * 0.5
         var cz: float = (float(bmax[2]) + float(bmin[2])) * 0.5
-        # Average colour across faces.
-        var r := 0.0; var g := 0.0; var bl := 0.0
-        var n := 0
+
+        var r := 0.0; var g := 0.0; var bl := 0.0; var n := 0
         var fc: Dictionary = b.get("face_colors") if b.has("face_colors") else {}
         for f in fc.values():
-            if f.size() < 3:
-                continue
-            r += float(f[0]); g += float(f[1]); bl += float(f[2])
-            n += 1
-        var col := Color(0.6, 0.6, 0.6)
-        if n > 0:
-            col = Color(r / n / 255.0, g / n / 255.0, bl / n / 255.0)
+            if f.size() < 3: continue
+            r += float(f[0]); g += float(f[1]); bl += float(f[2]); n += 1
+        var col := Color(0.6, 0.6, 0.6) if n == 0 else \
+            Color(r / n / 255.0, g / n / 255.0, bl / n / 255.0)
+
         var box := BoxMesh.new()
         box.size = Vector3(dx, dy, dz)
         var mat := StandardMaterial3D.new()
-        mat.albedo_color = col
+        var dom: String = String(b.get("dominant_texture", ""))
+        var tex: Texture2D = _load_pack_texture(dom) if dom != "" else null
+        if tex != null:
+            mat.albedo_texture = tex
+            mat.albedo_color = Color.WHITE
+            mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST     # crisp pixel art
+        else:
+            mat.albedo_color = col
         mat.metallic = 0.05
-        mat.roughness = 0.65
+        mat.roughness = 0.7
         var mi := MeshInstance3D.new()
         mi.mesh = box
         mi.material_override = mat
         mi.transform = Transform3D(Basis(), Vector3(cx, cy, cz))
         root.add_child(mi)
+
+
+var _tex_cache: Dictionary = {}    # rel path → Texture2D
+
+# Texture PNGs live next to the compiled pack JSON, under
+# m3_adapter/mc_item_pack/textures/... — same root as _compiled.json.
+func _load_pack_texture(rel_path: String) -> Texture2D:
+    if rel_path == "":
+        return null
+    if _tex_cache.has(rel_path):
+        return _tex_cache[rel_path]
+    var abs_path := ProjectSettings.globalize_path("res://").path_join(
+        "../m3_adapter/mc_item_pack"
+    ).path_join(rel_path)
+    if not FileAccess.file_exists(abs_path):
+        _tex_cache[rel_path] = null
+        return null
+    var img := Image.load_from_file(abs_path)
+    if img == null:
+        _tex_cache[rel_path] = null
+        return null
+    var tex := ImageTexture.create_from_image(img)
+    _tex_cache[rel_path] = tex
+    return tex
 
 
 func entity_count() -> int:
