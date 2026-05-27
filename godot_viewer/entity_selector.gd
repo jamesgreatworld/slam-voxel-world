@@ -29,22 +29,29 @@ var _cam: Camera3D = null
 var _world_path: String = ""
 var _entity_renderer = null
 var _placer = null
+var _voxel_editor = null
 var _logger = null
 
 var _selected_id: String = ""
 var _selected_node: Node3D = null
 var _outline: MeshInstance3D = null
 
+# Grab mode state: when not "" we're moving _selected_node with the mouse.
+var _grab_active: bool = false
+var _grab_original_pos: Vector3 = Vector3.ZERO
+
 
 func init_selector(cam: Camera3D,
                    world_path: String,
                    entity_renderer,
                    placer,
+                   voxel_editor,
                    logger = null) -> void:
     _cam = cam
     _world_path = world_path
     _entity_renderer = entity_renderer
     _placer = placer
+    _voxel_editor = voxel_editor
     _logger = logger
     _build_outline()
 
@@ -90,6 +97,22 @@ func _is_placer_active() -> bool:
 func _input(event: InputEvent) -> void:
     if _is_placer_active():
         return
+    # Grab mode owns LMB (confirm) / ESC (cancel); everything else passes
+    # through to whichever subsystem normally handles it.
+    if _grab_active:
+        if event is InputEventMouseButton and event.pressed:
+            if event.button_index == MOUSE_BUTTON_LEFT:
+                _commit_grab()
+                get_viewport().set_input_as_handled()
+            elif event.button_index == MOUSE_BUTTON_RIGHT:
+                _cancel_grab()
+                get_viewport().set_input_as_handled()
+        elif event is InputEventKey and event.pressed:
+            if event.keycode == KEY_ESCAPE:
+                _cancel_grab()
+                get_viewport().set_input_as_handled()
+        return
+
     if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
         _try_pick_at_mouse()
     elif event is InputEventKey and event.pressed:
@@ -99,9 +122,17 @@ func _input(event: InputEvent) -> void:
         elif event.keycode == KEY_R and _selected_id != "":
             _rotate_selected(_ROTATION_STEP_RAD)
             get_viewport().set_input_as_handled()
+        elif event.keycode == KEY_G and _selected_id != "":
+            _start_grab()
+            get_viewport().set_input_as_handled()
         elif event.keycode == KEY_ESCAPE and _selected_id != "":
             clear_selection()
             get_viewport().set_input_as_handled()
+
+
+func _process(_delta: float) -> void:
+    if _grab_active:
+        _update_grab_position()
 
 
 func _try_pick_at_mouse() -> void:
@@ -204,6 +235,109 @@ func _write_entities(entities: Array) -> void:
         return
     f.store_string(JSON.stringify({"format_version": "1.0", "entities": entities}, "  "))
     f.close()
+
+
+# ---------------------------------------------------------------------------
+# Grab mode
+# ---------------------------------------------------------------------------
+
+func _start_grab() -> void:
+    if _selected_node == null or _voxel_editor == null:
+        return
+    _grab_active = true
+    _grab_original_pos = _selected_node.global_position
+    if _logger != null:
+        _logger.info("entity_grab_started", {"id": _selected_id})
+
+
+func _update_grab_position() -> void:
+    if _selected_node == null or _cam == null or _voxel_editor == null:
+        return
+    var vp := _cam.get_viewport()
+    if vp == null:
+        return
+    var mouse: Vector2 = vp.get_mouse_position()
+    var ro: Vector3 = _cam.project_ray_origin(mouse)
+    var rd: Vector3 = _cam.project_ray_normal(mouse)
+    var result: Dictionary = _voxel_editor._march_find_with_prev(ro, rd, 200.0)
+    if not result.has_hit:
+        return
+    var vsize: float = _voxel_editor._voxel_size
+    var prev: Vector3i = result.prev
+    var meta: Dictionary = _selected_node.get_meta(ENTITY_META_KEY)
+    var rec := _find_record(_selected_id)
+    var dy := 1.0
+    if not rec.is_empty():
+        var bb = rec.get("bbox_dims", [1, 1, 1])
+        dy = float(bb[1])
+    var pos := Vector3(
+        Vector3(prev).x * vsize + vsize * 0.5,
+        Vector3(prev).y * vsize + dy * 0.5,
+        Vector3(prev).z * vsize + vsize * 0.5,
+    )
+    var xf := _selected_node.global_transform
+    xf.origin = pos
+    _selected_node.global_transform = xf
+    if _outline != null:
+        var ox := _outline.global_transform
+        ox.origin = pos
+        _outline.global_transform = ox
+
+
+func _commit_grab() -> void:
+    if _selected_node == null:
+        _grab_active = false
+        return
+    var new_pos := _selected_node.global_position
+    var entities := _read_entities()
+    var changed := false
+    for e in entities:
+        if String(e.get("id", "")) != _selected_id:
+            continue
+        e["position"] = [new_pos.x, new_pos.y, new_pos.z]
+        changed = true
+        break
+    if changed:
+        _write_entities(entities)
+        if _logger != null:
+            _logger.info("entity_moved",
+                         {"id": _selected_id, "pos": [new_pos.x, new_pos.y, new_pos.z]})
+        emit_signal("entity_changed", _selected_id)
+    _grab_active = false
+    _reload_entities()
+
+
+func _cancel_grab() -> void:
+    if _selected_node != null:
+        var xf := _selected_node.global_transform
+        xf.origin = _grab_original_pos
+        _selected_node.global_transform = xf
+        if _outline != null:
+            var ox := _outline.global_transform
+            ox.origin = _grab_original_pos
+            _outline.global_transform = ox
+    _grab_active = false
+    if _logger != null:
+        _logger.info("entity_grab_cancelled", {"id": _selected_id})
+
+
+func grab_to(id: String, world_pos: Vector3) -> void:
+    """Programmatic move (for tests). Writes entities.json directly without
+    raycasting; useful for snapshot verification."""
+    var entities := _read_entities()
+    var changed := false
+    for e in entities:
+        if String(e.get("id", "")) != id:
+            continue
+        e["position"] = [world_pos.x, world_pos.y, world_pos.z]
+        changed = true
+        break
+    if changed:
+        _write_entities(entities)
+        if _logger != null:
+            _logger.info("entity_moved",
+                         {"id": id, "pos": [world_pos.x, world_pos.y, world_pos.z]})
+        _reload_entities()
 
 
 func delete_by_id(id: String) -> bool:

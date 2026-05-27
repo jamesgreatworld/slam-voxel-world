@@ -49,6 +49,8 @@ var entity_selector: Node3D = null
 var _mouse_mode_before_pause: int = Input.MOUSE_MODE_VISIBLE
 var _test_delete_first: bool = false
 var _test_rotate_first_deg: float = 0.0
+var _test_grab_first_to: Vector3 = Vector3.ZERO
+var _test_grab_first_set: bool = false
 
 
 func _ready() -> void:
@@ -77,6 +79,13 @@ func _ready() -> void:
             _test_delete_first = true
         elif arg.begins_with("--test-rotate-first="):
             _test_rotate_first_deg = float(arg.substr("--test-rotate-first=".length()))
+        elif arg.begins_with("--test-grab-first-to="):
+            var parts := arg.substr("--test-grab-first-to=".length()).split(",")
+            if parts.size() == 3:
+                _test_grab_first_to = Vector3(
+                    float(parts[0]), float(parts[1]), float(parts[2])
+                )
+                _test_grab_first_set = true
 
     logger.info("config", {
         "world_path": world_path,
@@ -127,7 +136,8 @@ func _ready() -> void:
     entity_selector.name = "EntitySelector"
     add_child(entity_selector)
     entity_selector.init_selector(
-        main_cam, _world_path_absolute, entity_renderer, entity_placer, logger
+        main_cam, _world_path_absolute, entity_renderer,
+        entity_placer, voxel_editor, logger
     )
     left_vp.world_3d = get_viewport().world_3d
     right_vp.world_3d = get_viewport().world_3d
@@ -159,10 +169,12 @@ func _ready() -> void:
             if presets.has(sid):
                 _spawn_item_in_front_of_rig(String(sid), presets[sid])
 
-    if _test_delete_first or _test_rotate_first_deg != 0.0:
+    if _test_delete_first or _test_rotate_first_deg != 0.0 or _test_grab_first_set:
         var rec_list := _read_entities_json(_world_path_absolute + "/entities.json")
         if rec_list.size() > 0:
             var first_id := String(rec_list[0].get("id", ""))
+            if _test_grab_first_set:
+                entity_selector.grab_to(first_id, _test_grab_first_to)
             if _test_rotate_first_deg != 0.0:
                 entity_selector.rotate_by_id(first_id, deg_to_rad(_test_rotate_first_deg))
             if _test_delete_first:
