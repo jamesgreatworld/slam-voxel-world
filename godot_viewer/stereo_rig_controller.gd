@@ -41,8 +41,12 @@ func init_controller(left_cam: Camera3D, right_cam: Camera3D) -> void:
             _visuals.append(get_node(name))
 
 
+@export var spawn_y_m: float = 1.0   # rig centre height above world origin; safe
+                                     # default so 1P physics doesn't dunk us
+                                     # into a floor voxel at y=0.
+
 func reset_pose() -> void:
-    global_transform = Transform3D.IDENTITY
+    global_transform = Transform3D(Basis.IDENTITY, Vector3(0.0, spawn_y_m, 0.0))
     _vertical_velocity = 0.0
 
 
