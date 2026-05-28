@@ -25,6 +25,13 @@ var orbit_distance: float
 var orbit_yaw: float
 var orbit_pitch: float
 
+# First-person free-head: yaw/pitch applied on top of the rig's position
+# (only — never the rig's basis), so the cursor turns the camera without
+# turning the rig or the stereo PiP viewports.
+var _fp_yaw: float = 0.0
+var _fp_pitch: float = 0.0
+const _FP_MAX_PITCH := PI * 85.0 / 180.0
+
 var _cam: Camera3D = null
 var _rig_ctl: Node3D = null   # stereo_rig_controller (Node3D w/ that script)
 var _logger = null
@@ -59,6 +66,11 @@ func get_orbit_state() -> Dictionary:
 func toggle_view_mode() -> void:
     if view_mode == ViewMode.THIRD_PERSON:
         view_mode = ViewMode.FIRST_PERSON
+        # Seed the free-head from the rig's current yaw so the camera starts
+        # looking where the rig is facing rather than snapping to world +Z.
+        var e: Vector3 = _rig_ctl.global_transform.basis.get_euler()
+        _fp_yaw = e.y
+        _fp_pitch = clamp(e.x, -_FP_MAX_PITCH, _FP_MAX_PITCH)
     else:
         view_mode = ViewMode.THIRD_PERSON
     apply_mouse_mode()
@@ -116,12 +128,14 @@ func _input(event: InputEvent) -> void:
     if event is InputEventKey and event.pressed and event.keycode == KEY_TAB:
         toggle_view_mode()
         return
-    # 1P: route mouse motion to the rig for FPS-style look. All other mouse
-    # events (clicks / wheel) are ignored in 1P.
+    # 1P FPS look: mouse motion only rotates main_cam (a free head on top of
+    # the rig). The rig itself + the L/R stereo PiP keep their orientation —
+    # the cursor never moves the red box or the side viewports.
     if view_mode == ViewMode.FIRST_PERSON:
-        if event is InputEventMouseMotion and _rig_ctl != null and \
-           _rig_ctl.has_method("apply_mouse_look"):
-            _rig_ctl.apply_mouse_look(event.relative * mouse_sensitivity)
+        if event is InputEventMouseMotion:
+            _fp_yaw -= event.relative.x * mouse_sensitivity
+            _fp_pitch -= event.relative.y * mouse_sensitivity
+            _fp_pitch = clamp(_fp_pitch, -_FP_MAX_PITCH, _FP_MAX_PITCH)
         return
 
     if event is InputEventMouseButton:
@@ -153,7 +167,12 @@ func _process(_delta: float) -> void:
         return
     var rig_xf: Transform3D = _rig_ctl.global_transform
     if view_mode == ViewMode.FIRST_PERSON:
-        _cam.global_transform = rig_xf
+        # Position only from the rig; orientation is the free-head yaw/pitch.
+        # Result: rig + L/R PiP unchanged, only main_cam swivels.
+        var basis := Basis.IDENTITY \
+            .rotated(Vector3.UP, _fp_yaw) \
+            .rotated(Vector3.RIGHT, _fp_pitch)
+        _cam.global_transform = Transform3D(basis, rig_xf.origin)
         _rig_ctl.set_visuals_visible(false)
     else:
         var offset := Vector3(

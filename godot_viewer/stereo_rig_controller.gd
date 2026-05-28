@@ -59,12 +59,6 @@ func get_pose() -> Transform3D:
 # obeys gravity and is blocked by voxel collision in WASD movement.
 func set_physics_mode(enabled: bool) -> void:
     _physics_mode = enabled
-    if enabled:
-        # When entering 1P, capture current pitch so the mouse-look pitch
-        # accumulator continues from the rig's existing orientation.
-        _accum_pitch = clamp(transform.basis.get_euler().x, -_MAX_PITCH, _MAX_PITCH)
-    else:
-        _accum_pitch = 0.0
     _vertical_velocity = 0.0
 
 
@@ -76,28 +70,6 @@ func set_visuals_visible(v: bool) -> void:
 func _input(event: InputEvent) -> void:
     if event is InputEventKey and event.pressed and event.keycode == KEY_R:
         reset_pose()
-
-
-# Called by camera_controller when the cursor moves in 1P mode. `delta` is
-# the cursor motion already multiplied by mouse_sensitivity (radians-ish).
-# Yaw rotates around world-up so the horizon stays level; pitch rotates
-# around the rig's own X axis and is clamped to ±85°.
-var _accum_pitch: float = 0.0
-const _MAX_PITCH := PI * 85.0 / 180.0
-
-func apply_mouse_look(delta: Vector2) -> void:
-    if not _physics_mode:
-        return
-    var dyaw := -delta.x
-    var dpitch := -delta.y
-    if dyaw != 0.0:
-        rotate(Vector3.UP, dyaw)
-    if dpitch != 0.0:
-        var new_pitch: float = clamp(_accum_pitch + dpitch, -_MAX_PITCH, _MAX_PITCH)
-        var applied := new_pitch - _accum_pitch
-        if applied != 0.0:
-            rotate_object_local(Vector3.RIGHT, applied)
-            _accum_pitch = new_pitch
 
 
 func _process(delta: float) -> void:
