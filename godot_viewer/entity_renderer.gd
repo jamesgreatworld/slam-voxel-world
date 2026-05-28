@@ -169,50 +169,122 @@ func _build_single_box(root: Node3D, col: Color, dims) -> void:
     root.add_child(mi)
 
 
-# Phase-1 multi-box composite: one BoxMesh per sub-box. Each box uses its
-# `dominant_texture` (most-frequently-referenced face PNG) as a single
-# albedo_texture covering all 6 faces. If no PNG is on disk for that
-# texture name we fall back to the averaged face colour. Phase 2 will
-# split into 6 textured PlaneMesh quads when per-face textures matter.
+# Phase-2 multi-box composite: each MC sub-box becomes 6 PlaneMesh faces,
+# one per side, each with its own albedo_texture / albedo_color taken from
+# that face's entry in face_textures / face_colors. This is the MC
+# convention — a chair seat can have red_wool on top, oak_planks on bottom,
+# and the model JSON spelled that out per face.
+#
+# Face axis convention (matches MC + our coord system Y-up, -Z forward):
+#   up    +Y, plane normal +Y
+#   down  -Y
+#   north -Z  (looking at the front of a chair from -Z)
+#   south +Z
+#   east  +X
+#   west  -X
 func _build_mc_composite(root: Node3D, preset: Dictionary) -> void:
+    var face_names := ["up", "down", "north", "south", "east", "west"]
     for b in preset.get("boxes", []):
         var bmin = b.get("min")
         var bmax = b.get("max")
         if bmin == null or bmax == null or bmin.size() < 3 or bmax.size() < 3:
             continue
-        var dx: float = float(bmax[0]) - float(bmin[0])
-        var dy: float = float(bmax[1]) - float(bmin[1])
-        var dz: float = float(bmax[2]) - float(bmin[2])
-        var cx: float = (float(bmax[0]) + float(bmin[0])) * 0.5
-        var cy: float = (float(bmax[1]) + float(bmin[1])) * 0.5
-        var cz: float = (float(bmax[2]) + float(bmin[2])) * 0.5
-
-        var r := 0.0; var g := 0.0; var bl := 0.0; var n := 0
+        var dims := Vector3(
+            float(bmax[0]) - float(bmin[0]),
+            float(bmax[1]) - float(bmin[1]),
+            float(bmax[2]) - float(bmin[2]),
+        )
+        var center := Vector3(
+            (float(bmax[0]) + float(bmin[0])) * 0.5,
+            (float(bmax[1]) + float(bmin[1])) * 0.5,
+            (float(bmax[2]) + float(bmin[2])) * 0.5,
+        )
         var fc: Dictionary = b.get("face_colors") if b.has("face_colors") else {}
-        for f in fc.values():
-            if f.size() < 3: continue
-            r += float(f[0]); g += float(f[1]); bl += float(f[2]); n += 1
-        var col := Color(0.6, 0.6, 0.6) if n == 0 else \
-            Color(r / n / 255.0, g / n / 255.0, bl / n / 255.0)
+        var ft: Dictionary = b.get("face_textures") if b.has("face_textures") else {}
+        # Fallback colour for any face missing a face_colors entry.
+        var avg_col := _avg_color(fc)
+        for face in face_names:
+            var face_col: Color = avg_col
+            if fc.has(face):
+                var c = fc[face]
+                if c is Array and c.size() >= 3:
+                    face_col = Color(float(c[0]) / 255.0,
+                                     float(c[1]) / 255.0,
+                                     float(c[2]) / 255.0)
+            var tex_path := String(ft.get(face, ""))
+            var tex: Texture2D = _load_pack_texture(tex_path) if tex_path != "" else null
+            var mi := _build_face_quad(face, center, dims, face_col, tex)
+            if mi != null:
+                root.add_child(mi)
 
-        var box := BoxMesh.new()
-        box.size = Vector3(dx, dy, dz)
-        var mat := StandardMaterial3D.new()
-        var dom: String = String(b.get("dominant_texture", ""))
-        var tex: Texture2D = _load_pack_texture(dom) if dom != "" else null
-        if tex != null:
-            mat.albedo_texture = tex
-            mat.albedo_color = Color.WHITE
-            mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST     # crisp pixel art
-        else:
-            mat.albedo_color = col
-        mat.metallic = 0.05
-        mat.roughness = 0.7
-        var mi := MeshInstance3D.new()
-        mi.mesh = box
-        mi.material_override = mat
-        mi.transform = Transform3D(Basis(), Vector3(cx, cy, cz))
-        root.add_child(mi)
+
+func _avg_color(fc: Dictionary) -> Color:
+    var r := 0.0; var g := 0.0; var b := 0.0; var n := 0
+    for f in fc.values():
+        if f is Array and f.size() >= 3:
+            r += float(f[0]); g += float(f[1]); b += float(f[2]); n += 1
+    if n == 0:
+        return Color(0.6, 0.6, 0.6)
+    return Color(r / n / 255.0, g / n / 255.0, b / n / 255.0)
+
+
+# Build one face as a PlaneMesh oriented so its outward normal points along
+# the named axis. PlaneMesh defaults to lying flat in XZ with normal +Y and
+# size.x → X extent, size.y → Z extent; we rotate the basis to put that
+# normal on each of the 6 sides and pick size accordingly.
+func _build_face_quad(face: String, center: Vector3, dims: Vector3,
+                      col: Color, tex: Texture2D) -> MeshInstance3D:
+    var sx := 0.0
+    var sy := 0.0
+    var pos := center
+    var basis := Basis()
+    match face:
+        "up":
+            sx = dims.x; sy = dims.z
+            pos.y = center.y + dims.y * 0.5
+            basis = Basis()
+        "down":
+            sx = dims.x; sy = dims.z
+            pos.y = center.y - dims.y * 0.5
+            basis = Basis().rotated(Vector3.RIGHT, PI)        # flip normal to -Y
+        "north":
+            sx = dims.x; sy = dims.y
+            pos.z = center.z - dims.z * 0.5
+            basis = Basis().rotated(Vector3.RIGHT, -PI / 2.0) # normal → -Z
+        "south":
+            sx = dims.x; sy = dims.y
+            pos.z = center.z + dims.z * 0.5
+            basis = Basis().rotated(Vector3.RIGHT, PI / 2.0)  # normal → +Z
+        "east":
+            sx = dims.z; sy = dims.y
+            pos.x = center.x + dims.x * 0.5
+            basis = Basis().rotated(Vector3.FORWARD, -PI / 2.0)  # normal → +X
+        "west":
+            sx = dims.z; sy = dims.y
+            pos.x = center.x - dims.x * 0.5
+            basis = Basis().rotated(Vector3.FORWARD, PI / 2.0)   # normal → -X
+        _:
+            return null
+    if sx <= 0.0 or sy <= 0.0:
+        return null
+    var plane := PlaneMesh.new()
+    plane.size = Vector2(sx, sy)
+    var mat := StandardMaterial3D.new()
+    if tex != null:
+        mat.albedo_texture = tex
+        mat.albedo_color = Color.WHITE
+        mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+    else:
+        mat.albedo_color = col
+    mat.metallic = 0.05
+    mat.roughness = 0.75
+    # PlaneMesh is single-sided; outward normal is set by `basis`, so backface
+    # culling is correct as long as we built the box right.
+    var mi := MeshInstance3D.new()
+    mi.mesh = plane
+    mi.material_override = mat
+    mi.transform = Transform3D(basis, pos)
+    return mi
 
 
 var _tex_cache: Dictionary = {}    # rel path → Texture2D
