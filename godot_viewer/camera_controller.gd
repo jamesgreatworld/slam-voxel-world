@@ -103,11 +103,12 @@ func set_view_mode_str(s: String) -> void:
 
 func apply_mouse_mode() -> void:
     # 3P: free cursor for hover-picking; right-drag will temporarily capture for orbit.
-    # 1P: hide (no mouse interaction).
+    # 1P: CAPTURED — lock cursor to screen centre, FPS-style. Mouse motion is
+    # routed to stereo_rig.apply_mouse_look() so the rig yaws/pitches.
     if view_mode == ViewMode.THIRD_PERSON:
         Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
     else:
-        Input.mouse_mode = Input.MOUSE_MODE_HIDDEN
+        Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
     _right_held = false
 
 
@@ -115,7 +116,12 @@ func _input(event: InputEvent) -> void:
     if event is InputEventKey and event.pressed and event.keycode == KEY_TAB:
         toggle_view_mode()
         return
-    if view_mode != ViewMode.THIRD_PERSON:
+    # 1P: route mouse motion to the rig for FPS-style look. All other mouse
+    # events (clicks / wheel) are ignored in 1P.
+    if view_mode == ViewMode.FIRST_PERSON:
+        if event is InputEventMouseMotion and _rig_ctl != null and \
+           _rig_ctl.has_method("apply_mouse_look"):
+            _rig_ctl.apply_mouse_look(event.relative * mouse_sensitivity)
         return
 
     if event is InputEventMouseButton:
