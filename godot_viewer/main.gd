@@ -62,6 +62,7 @@ var _test_grab_first_set: bool = false
 var _test_undo_times: int = 0
 var _test_duplicate_first: bool = false
 var _test_snapshot_world: bool = false
+var _test_toggle_behavior_on_first: bool = false
 
 
 func _ready() -> void:
@@ -103,6 +104,8 @@ func _ready() -> void:
             _test_duplicate_first = true
         elif arg == "--test-snapshot-world":
             _test_snapshot_world = true
+        elif arg == "--test-toggle-behavior-on-first":
+            _test_toggle_behavior_on_first = true
 
     logger.info("config", {
         "world_path": world_path,
@@ -190,6 +193,7 @@ func _ready() -> void:
     entity_context_bar.physics_toggle_pressed.connect(func(): entity_selector.toggle_physics_on_selected())
     entity_context_bar.rotate_pressed.connect(_on_context_rotate)
     entity_context_bar.delete_pressed.connect(_on_context_delete)
+    entity_context_bar.use_pressed.connect(func(): entity_edit.apply_behavior("switchable"))
     entity_selector.entity_selected.connect(func(id: String):
         entity_context_bar.on_entity_selected(id, entity_selector.get_selected_label_name())
     )
@@ -263,6 +267,40 @@ func _ready() -> void:
     if _test_snapshot_world:
         _save_world_snapshot()
 
+    if _test_toggle_behavior_on_first:
+        # Find the first entity whose preset declares "switchable" and toggle
+        # it. Logs the resulting state so the caller can assert
+        # entities.json[<idx>].custom_meta.state == "on".
+        var ent_path3 := _world_path_absolute + "/entities.json"
+        var recs3: Array = []
+        if FileAccess.file_exists(ent_path3):
+            var t3 := FileAccess.get_file_as_string(ent_path3)
+            if not t3.is_empty():
+                var dd3 = JSON.parse_string(t3)
+                if dd3 != null and dd3.has("entities"):
+                    recs3 = dd3.entities
+        var presets3: Dictionary = entity_renderer.get_item_presets()
+        var picked_id := ""
+        var picked_idx := -1
+        for i in recs3.size():
+            var rec: Dictionary = recs3[i]
+            var item_id: String = String(rec.get("custom_meta", {}).get("mc_item", ""))
+            if item_id == "" or not presets3.has(item_id):
+                continue
+            var behs: Array = presets3[item_id].get("behaviors", [])
+            if behs.has("switchable"):
+                picked_id = String(rec.get("id", ""))
+                picked_idx = i
+                break
+        if picked_id != "":
+            entity_selector._selected_id = picked_id
+            var ok3: bool = bool(entity_edit.apply_behavior("switchable"))
+            logger.info("test_toggle_behavior_on_first",
+                        {"id": picked_id, "index": picked_idx, "applied": ok3})
+        else:
+            logger.info("test_toggle_behavior_on_first",
+                        {"status": "no switchable entity"})
+
 
 func _set_rig_xform_deferred(xf: Transform3D) -> void:
     stereo_rig.set_pose(xf)
@@ -301,6 +339,9 @@ func _input(event: InputEvent) -> void:
             get_viewport().set_input_as_handled()
         elif event.keycode == KEY_F2 and entity_inspector != null and entity_selector != null:
             _open_inspector_for_selection()
+            get_viewport().set_input_as_handled()
+        elif event.keycode == KEY_U and entity_edit != null:
+            entity_edit.apply_behavior("switchable")
             get_viewport().set_input_as_handled()
         elif event.keycode == KEY_F5:
             _save_world_snapshot()

@@ -6,6 +6,9 @@
       "id": "chair",
       "category": "furniture",
       "default_label": 5,
+      "behaviors": [
+        "sittable"
+      ],
       "overall_extents_m": [
         0.625,
         1.125,
@@ -337,6 +340,7 @@
       "id": "table",
       "category": "furniture",
       "default_label": 16,
+      "behaviors": [],
       "overall_extents_m": [
         1.0,
         0.875,
@@ -615,6 +619,9 @@
       "id": "lamp",
       "category": "furniture",
       "default_label": 11,
+      "behaviors": [
+        "switchable"
+      ],
       "overall_extents_m": [
         0.5,
         1.5,
@@ -787,6 +794,7 @@
       "id": "bed",
       "category": "furniture",
       "default_label": 14,
+      "behaviors": [],
       "overall_extents_m": [
         1.0,
         0.875,
@@ -1012,6 +1020,9 @@
       "id": "computer",
       "category": "electronics",
       "default_label": 10,
+      "behaviors": [
+        "switchable"
+      ],
       "overall_extents_m": [
         0.75,
         0.875,
@@ -1237,6 +1248,7 @@
       "id": "trashcan",
       "category": "misc",
       "default_label": 18,
+      "behaviors": [],
       "overall_extents_m": [
         0.625,
         0.75,

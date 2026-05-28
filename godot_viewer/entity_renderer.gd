@@ -121,8 +121,12 @@ func _spawn_one(e: Dictionary, palette_rgb: PackedColorArray) -> Node3D:
         Vector3(float(pos[0]), float(pos[1]), float(pos[2])),
     )
 
+    var state: String = String(custom_meta.get("state", "off"))
+    var behaviors: Array = []
     if mc_item_id != "" and _item_presets.has(mc_item_id):
-        _build_mc_composite(root, _item_presets[mc_item_id])
+        var preset: Dictionary = _item_presets[mc_item_id]
+        behaviors = preset.get("behaviors", []) if preset.has("behaviors") else []
+        _build_mc_composite(root, preset, state)
     else:
         var col: Color = Color(0.5, 0.5, 0.5)
         if label >= 0 and label < palette_rgb.size():
@@ -143,6 +147,7 @@ func _spawn_one(e: Dictionary, palette_rgb: PackedColorArray) -> Node3D:
         "label_name": label_name,
         "voxel_count": int(e.get("voxel_count", 0)),
         "custom_meta": custom_meta,
+        "behaviors": behaviors,
     })
     return root
 
@@ -191,8 +196,10 @@ func _build_single_box(root: Node3D, col: Color, dims) -> void:
 #   south +Z
 #   east  +X
 #   west  -X
-func _build_mc_composite(root: Node3D, preset: Dictionary) -> void:
+func _build_mc_composite(root: Node3D, preset: Dictionary, state: String = "off") -> void:
     var face_names := ["up", "down", "north", "south", "east", "west"]
+    var behaviors: Array = preset.get("behaviors", []) if preset.has("behaviors") else []
+    var glow_on := state == "on" and behaviors.has("switchable")
     for b in preset.get("boxes", []):
         var bmin = b.get("min")
         var bmax = b.get("max")
@@ -222,7 +229,7 @@ func _build_mc_composite(root: Node3D, preset: Dictionary) -> void:
                                      float(c[2]) / 255.0)
             var tex_path := String(ft.get(face, ""))
             var tex: Texture2D = _load_pack_texture(tex_path) if tex_path != "" else null
-            var mi := _build_face_quad(face, center, dims, face_col, tex)
+            var mi := _build_face_quad(face, center, dims, face_col, tex, glow_on)
             if mi != null:
                 root.add_child(mi)
 
@@ -242,7 +249,8 @@ func _avg_color(fc: Dictionary) -> Color:
 # size.x → X extent, size.y → Z extent; we rotate the basis to put that
 # normal on each of the 6 sides and pick size accordingly.
 func _build_face_quad(face: String, center: Vector3, dims: Vector3,
-                      col: Color, tex: Texture2D) -> MeshInstance3D:
+                      col: Color, tex: Texture2D,
+                      glow_on: bool = false) -> MeshInstance3D:
     var sx := 0.0
     var sy := 0.0
     var pos := center
@@ -287,6 +295,15 @@ func _build_face_quad(face: String, center: Vector3, dims: Vector3,
         mat.albedo_color = col
     mat.metallic = 0.05
     mat.roughness = 0.75
+    # Behavior "switchable" with state=="on": light up the sub-box faces by
+    # enabling emission tinted to albedo. Off / non-switchable items keep
+    # emission disabled.
+    if glow_on:
+        mat.emission_enabled = true
+        mat.emission = col * 1.2
+        mat.emission_energy_multiplier = 2.5
+    else:
+        mat.emission_enabled = false
     # PlaneMesh is single-sided; outward normal is set by `basis`, so backface
     # culling is correct as long as we built the box right.
     var mi := MeshInstance3D.new()

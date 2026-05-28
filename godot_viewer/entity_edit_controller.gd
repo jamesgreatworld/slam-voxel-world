@@ -165,6 +165,46 @@ func spawn_entity(item_id: String, preset: Dictionary,
 
 
 # ---------------------------------------------------------------------------
+# Behavior toggle (entity custom_meta.state mutation, no undo entry).
+# ---------------------------------------------------------------------------
+
+# Apply a behavior (e.g. "switchable") to the currently selected entity.
+# Mutates entities.json custom_meta.state and re-renders. Returns true if
+# something changed. No undo entry: behavior toggles can be high-frequency,
+# and the visual state is recoverable by toggling again.
+func apply_behavior(behavior: String) -> bool:
+    if _entity_selector == null:
+        return false
+    var sel_id: String = _entity_selector.get_selected_id()
+    if sel_id == "":
+        return false
+    var ent_path := _world_path + "/entities.json"
+    var entities := _read_entities_json(ent_path)
+    var changed := false
+    var new_state := ""
+    for e in entities:
+        if String(e.get("id", "")) != sel_id:
+            continue
+        var cm: Dictionary = e.get("custom_meta", {})
+        if behavior == "switchable":
+            var cur := String(cm.get("state", "off"))
+            new_state = "on" if cur == "off" else "off"
+            cm["state"] = new_state
+        else:
+            return false
+        e["custom_meta"] = cm
+        changed = true
+        break
+    if changed:
+        _write_entities_json(ent_path, entities)
+        if _logger != null:
+            _logger.info("entity_behavior_applied",
+                         {"id": sel_id, "behavior": behavior, "state": new_state})
+        _entity_renderer.load_entities(_world_path, _world.palette_rgb)
+    return changed
+
+
+# ---------------------------------------------------------------------------
 # Selector mutation → undo entry
 # ---------------------------------------------------------------------------
 

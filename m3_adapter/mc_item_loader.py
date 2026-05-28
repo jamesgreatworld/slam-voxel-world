@@ -105,6 +105,7 @@ class ItemPreset:
     boxes: list                        # list[ItemBox]
     overall_extents_m: tuple           # (dx, dy, dz) metres
     source_model: str                  # relative path to source .json
+    behaviors: list = field(default_factory=list)  # e.g. ["switchable", "sittable"]
 
 
 def _resolve_texture(face: dict, textures: dict) -> str:
@@ -201,6 +202,8 @@ def load_pack(pack_root: Path) -> dict[str, ItemPreset]:
                         entry["id"], model_path)
             continue
         boxes, extents_m, _ = load_model(model_path, pack_root)
+        raw_behaviors = entry.get("behaviors", []) or []
+        behaviors = [str(b) for b in raw_behaviors if isinstance(b, str)]
         presets[entry["id"]] = ItemPreset(
             id=entry["id"],
             category=str(entry.get("category", "misc")),
@@ -208,6 +211,7 @@ def load_pack(pack_root: Path) -> dict[str, ItemPreset]:
             boxes=boxes,
             overall_extents_m=extents_m,
             source_model=str(model_path.relative_to(pack_root).as_posix()),
+            behaviors=behaviors,
         )
     return presets
 
@@ -217,6 +221,7 @@ def _preset_to_dict(p: ItemPreset) -> dict:
         "id": p.id,
         "category": p.category,
         "default_label": p.default_label,
+        "behaviors": list(p.behaviors),
         "overall_extents_m": list(p.overall_extents_m),
         "source_model": p.source_model,
         "boxes": [

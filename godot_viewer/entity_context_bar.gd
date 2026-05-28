@@ -17,6 +17,7 @@ signal duplicate_pressed
 signal physics_toggle_pressed
 signal rotate_pressed(yaw_delta_rad: float)
 signal delete_pressed
+signal use_pressed
 
 const _BTN_MIN_SIZE := Vector2(120, 36)
 const _ROT_STEP := PI / 4.0   # 45°
@@ -74,6 +75,7 @@ func _ready() -> void:
     _row.add_theme_constant_override("separation", 6)
     vbox.add_child(_row)
 
+    _add_button("Use [U]",           func(): emit_signal("use_pressed"))
     _add_button("Inspector [F2]",    func(): emit_signal("inspector_pressed"))
     _add_button("Duplicate [Ctrl+D]", func(): emit_signal("duplicate_pressed"))
     _add_button("Physics [P]",       func(): emit_signal("physics_toggle_pressed"))

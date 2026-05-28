@@ -3,11 +3,11 @@
   "name": "slam-voxel-world default items",
   "description": "Hand-written MC-style block models, no MC assets, no third-party textures. Drop any standard MC resource-pack-style models/ + textures/ tree alongside this manifest to extend.",
   "items": [
-    {"id": "chair",     "model": "models/chair.json",    "category": "furniture", "default_label": 5},
-    {"id": "table",     "model": "models/table.json",    "category": "furniture", "default_label": 16},
-    {"id": "lamp",      "model": "models/lamp.json",     "category": "furniture", "default_label": 11},
-    {"id": "bed",       "model": "models/bed.json",      "category": "furniture", "default_label": 14},
-    {"id": "computer",  "model": "models/computer.json", "category": "electronics", "default_label": 10},
-    {"id": "trashcan",  "model": "models/trashcan.json", "category": "misc",      "default_label": 18}
+    {"id": "chair",     "model": "models/chair.json",    "category": "furniture",   "default_label": 5,  "behaviors": ["sittable"]},
+    {"id": "table",     "model": "models/table.json",    "category": "furniture",   "default_label": 16, "behaviors": []},
+    {"id": "lamp",      "model": "models/lamp.json",     "category": "furniture",   "default_label": 11, "behaviors": ["switchable"]},
+    {"id": "bed",       "model": "models/bed.json",      "category": "furniture",   "default_label": 14, "behaviors": []},
+    {"id": "computer",  "model": "models/computer.json", "category": "electronics", "default_label": 10, "behaviors": ["switchable"]},
+    {"id": "trashcan",  "model": "models/trashcan.json", "category": "misc",        "default_label": 18, "behaviors": []}
   ]
 }
