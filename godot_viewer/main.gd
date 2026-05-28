@@ -26,11 +26,13 @@ const ItemPickerScript = preload("res://item_picker.gd")
 const EntityPlacerScript = preload("res://entity_placer.gd")
 const EntitySelectorScript = preload("res://entity_selector.gd")
 const EntityEditControllerScript = preload("res://entity_edit_controller.gd")
+const EntityInspectorScript = preload("res://entity_inspector.gd")
 var entity_renderer: Node3D = null
 var item_picker: CanvasLayer = null
 var entity_placer: Node3D = null
 var entity_selector: Node3D = null
 var entity_edit: Node = null
+var entity_inspector: CanvasLayer = null
 @onready var stereo_rig: Node3D = $StereoRig  # has stereo_rig_controller.gd
 @onready var cam_ctl: Node = $CameraController
 @onready var hud_ctl: Node = $HudController
@@ -54,6 +56,8 @@ var _test_rotate_first_deg: float = 0.0
 var _test_grab_first_to: Vector3 = Vector3.ZERO
 var _test_grab_first_set: bool = false
 var _test_undo_times: int = 0
+var _test_duplicate_first: bool = false
+var _test_snapshot_world: bool = false
 
 
 func _ready() -> void:
@@ -91,6 +95,10 @@ func _ready() -> void:
                 _test_grab_first_set = true
         elif arg.begins_with("--test-undo-times="):
             _test_undo_times = int(arg.substr("--test-undo-times=".length()))
+        elif arg == "--test-duplicate-first":
+            _test_duplicate_first = true
+        elif arg == "--test-snapshot-world":
+            _test_snapshot_world = true
 
     logger.info("config", {
         "world_path": world_path,
@@ -153,6 +161,14 @@ func _ready() -> void:
         stereo_rig, logger
     )
     entity_edit.entity_undo_push.connect(_push_undo)
+
+    entity_inspector = CanvasLayer.new()
+    entity_inspector.set_script(EntityInspectorScript)
+    entity_inspector.name = "EntityInspector"
+    add_child(entity_inspector)
+    entity_inspector.init_inspector(_world_path_absolute, logger)
+    entity_inspector.entity_committed.connect(_on_entity_inspector_committed)
+
     left_vp.world_3d = get_viewport().world_3d
     right_vp.world_3d = get_viewport().world_3d
     stereo_rig.init_controller(left_cam, right_cam)
@@ -202,6 +218,23 @@ func _ready() -> void:
     for _i in _test_undo_times:
         undo_last_edit()
 
+    if _test_duplicate_first:
+        var ent_path2 := _world_path_absolute + "/entities.json"
+        var recs: Array = []
+        if FileAccess.file_exists(ent_path2):
+            var t := FileAccess.get_file_as_string(ent_path2)
+            if not t.is_empty():
+                var dd = JSON.parse_string(t)
+                if dd != null and dd.has("entities"):
+                    recs = dd.entities
+        if recs.size() > 0:
+            var fid := String(recs[0].get("id", ""))
+            entity_selector._selected_id = fid
+            entity_edit.duplicate_selected()
+
+    if _test_snapshot_world:
+        _save_world_snapshot()
+
 
 func _set_rig_xform_deferred(xf: Transform3D) -> void:
     stereo_rig.set_pose(xf)
@@ -235,6 +268,65 @@ func _input(event: InputEvent) -> void:
             undo_last_edit()
         elif event.keycode == KEY_I and item_picker != null:
             item_picker.toggle()
+        elif event.keycode == KEY_D and event.ctrl_pressed and entity_edit != null:
+            entity_edit.duplicate_selected()
+            get_viewport().set_input_as_handled()
+        elif event.keycode == KEY_F2 and entity_inspector != null and entity_selector != null:
+            _open_inspector_for_selection()
+            get_viewport().set_input_as_handled()
+        elif event.keycode == KEY_F5:
+            _save_world_snapshot()
+            get_viewport().set_input_as_handled()
+
+
+func _open_inspector_for_selection() -> void:
+    if entity_inspector == null or entity_selector == null:
+        return
+    var sel_id: String = String(entity_selector._selected_id)
+    if sel_id == "":
+        if logger != null:
+            logger.info("entity_inspector_open", {"status": "no selection"})
+        return
+    var path := _world_path_absolute + "/entities.json"
+    if not FileAccess.file_exists(path):
+        return
+    var txt := FileAccess.get_file_as_string(path)
+    if txt.is_empty():
+        return
+    var d = JSON.parse_string(txt)
+    if d == null or not d.has("entities"):
+        return
+    for e in d.entities:
+        if String(e.get("id", "")) == sel_id:
+            entity_inspector.set_world_path(_world_path_absolute)
+            entity_inspector.open_for(e)
+            return
+
+
+func _on_entity_inspector_committed(_updated: Dictionary) -> void:
+    if entity_renderer != null and _world != null:
+        entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
+
+
+func _save_world_snapshot() -> void:
+    # Snapshot the current world dir into out/snapshots/<base>_<ts>/
+    # Uses _copy_dir_recursive to grab manifest/palette/entities.json/chunks.
+    var src := _world_path_absolute
+    if src == "" or not DirAccess.dir_exists_absolute(src):
+        if logger != null:
+            logger.error("world_snapshot", {"reason": "src missing", "src": src})
+        return
+    var ts := Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
+    var base := src.get_file()
+    if base.ends_with(".vxw"):
+        base = base.substr(0, base.length() - 4)
+    var proj_root := ProjectSettings.globalize_path("res://..")
+    var dst_root := proj_root + "/out/snapshots"
+    DirAccess.make_dir_recursive_absolute(dst_root)
+    var dst := "%s/%s_%s" % [dst_root, base, ts]
+    var ok := _copy_dir_recursive(src, dst)
+    if logger != null:
+        logger.info("world_snapshot", {"src": src, "dst": dst, "ok": ok})
 
 
 # Entity-layer mutations live on entity_edit (see entity_edit_controller.gd).
@@ -460,6 +552,8 @@ func _load_world_in_place(world_path: String) -> void:
         entity_selector.set_world_path(_world_path_absolute)
     if entity_edit != null:
         entity_edit.set_world(_world, _world_path_absolute)
+    if entity_inspector != null:
+        entity_inspector.set_world_path(_world_path_absolute)
     # Re-init editor with new world
     voxel_editor.init_editor(renderer, main_cam)
     # Reset rig + reset stereo cams sync

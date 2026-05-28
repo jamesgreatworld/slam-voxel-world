@@ -74,6 +74,49 @@ func _on_item_chosen(item_id: String) -> void:
     spawn_in_front_of_rig(item_id)
 
 
+func duplicate_selected() -> bool:
+    # Deep-copy the currently-selected entity, offset its position by
+    # (0, +0.5, +0.5), give it a fresh uuid, append to entities.json, reload
+    # the renderer and push an entity_spawn undo entry so Ctrl+Z removes it.
+    if _entity_selector == null:
+        return false
+    var sel_id: String = String(_entity_selector._selected_id)
+    if sel_id == "":
+        if _logger != null:
+            _logger.info("entity_duplicate", {"status": "no selection"})
+        return false
+    var ent_path := _world_path + "/entities.json"
+    var existing := _read_entities_json(ent_path)
+    var src: Dictionary = {}
+    for e in existing:
+        if String(e.get("id", "")) == sel_id:
+            src = e
+            break
+    if src.is_empty():
+        if _logger != null:
+            _logger.info("entity_duplicate", {"status": "id not in entities.json", "id": sel_id})
+        return false
+    var copy: Dictionary = src.duplicate(true)
+    var new_id := _uuid4()
+    copy["id"] = new_id
+    var pos = copy.get("position", [0, 0, 0])
+    copy["position"] = [
+        float(pos[0]) + 0.0,
+        float(pos[1]) + 0.5,
+        float(pos[2]) + 0.5,
+    ]
+    existing.append(copy)
+    _write_entities_json(ent_path, existing)
+    emit_signal("entity_undo_push", {"op": "entity_spawn", "id": new_id})
+    if _logger != null:
+        _logger.info("entity_duplicated", {
+            "src_id": sel_id, "new_id": new_id,
+            "pos": copy["position"], "total": existing.size(),
+        })
+    _entity_renderer.load_entities(_world_path, _world.palette_rgb)
+    return true
+
+
 func _on_placement_committed(item_id: String, world_pos: Vector3, yaw_rad: float) -> void:
     var presets: Dictionary = _entity_renderer.get_item_presets()
     if not presets.has(item_id):

@@ -112,17 +112,17 @@ def _setup_logging() -> Path:
 # Hydra config: label space + colour CSV
 # ----------------------------------------------------------------------------
 
-def _resolve_hydra_paths(hydra_cfg_root: Path) -> tuple[Path, Path]:
+def _resolve_hydra_paths(hydra_cfg_root: Path, scene: str = "apartment") -> tuple[Path, Path]:
     """Return (label_space_yaml, color_csv) under either install/ or src/ layout."""
     # src/ first — Hydra's install/ copies are symlinks to Linux paths and
     # appear is_file()-OK but fail to read on Windows.
     candidates_yaml = [
-        hydra_cfg_root / "src/Hydra/config/label_spaces/uhumans2_apartment_label_space.yaml",
-        hydra_cfg_root / "install/hydra/share/hydra/config/label_spaces/uhumans2_apartment_label_space.yaml",
+        hydra_cfg_root / f"src/Hydra/config/label_spaces/uhumans2_{scene}_label_space.yaml",
+        hydra_cfg_root / f"install/hydra/share/hydra/config/label_spaces/uhumans2_{scene}_label_space.yaml",
     ]
     candidates_csv = [
-        hydra_cfg_root / "src/Hydra-ROS/hydra_ros/config/color/uhumans2_apartment.csv",
-        hydra_cfg_root / "install/hydra_ros/share/hydra_ros/config/color/uhumans2_apartment.csv",
+        hydra_cfg_root / f"src/Hydra-ROS/hydra_ros/config/color/uhumans2_{scene}.csv",
+        hydra_cfg_root / f"install/hydra_ros/share/hydra_ros/config/color/uhumans2_{scene}.csv",
     ]
     def _readable(p: Path) -> bool:
         try:
@@ -472,6 +472,9 @@ def main() -> None:
     ap.add_argument("--hydra-cfg", type=Path,
                     default=Path("E:/aros_slam_ws/hydra_ws"),
                     help="Hydra workspace root (uses install/ or src/ uhumans2 config)")
+    ap.add_argument("--scene", choices=["apartment", "office", "subway"],
+                    default="apartment",
+                    help="uHumans2 scene name; selects matching label_space yaml + colour CSV")
     ap.add_argument("--voxel-size", type=float, default=0.05)
     ap.add_argument("--chunk-extent", type=int, default=32)
     ap.add_argument("--compression", choices=["raw", "gzip", "zstd"], default="gzip")
@@ -502,7 +505,7 @@ def main() -> None:
         log.error("not a rosbag2 dir: %s", args.bag_dir); sys.exit(1)
 
     # ---- config ----
-    yaml_path, csv_path = _resolve_hydra_paths(args.hydra_cfg)
+    yaml_path, csv_path = _resolve_hydra_paths(args.hydra_cfg, args.scene)
     log.info("[1/5] loading Hydra cfg yaml=%s  csv=%s", yaml_path.name, csv_path.name)
     label_names = load_label_space(yaml_path)
     color_to_id = load_color_to_super_id(csv_path)
@@ -703,7 +706,7 @@ def main() -> None:
         bounds_chunks_min=bmin,
         bounds_chunks_max=bmax,
         created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        source_slam_system="uhumans2_tesse",
+        source_slam_system=f"uhumans2_tesse_{args.scene}",
         source_sensor="depth+seg",
         raw_data_hash=f"sha-skip:{args.bag_dir.name}",
     )
