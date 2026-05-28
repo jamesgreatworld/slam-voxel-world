@@ -79,6 +79,18 @@ func clear_selection() -> void:
     emit_signal("selection_cleared")
 
 
+func get_selected_id() -> String:
+    return _selected_id
+
+
+func get_selected_label_name() -> String:
+    if _selected_node == null:
+        return ""
+    var m: Dictionary = _selected_node.get_meta(ENTITY_META_KEY) \
+        if _selected_node.has_meta(ENTITY_META_KEY) else {}
+    return String(m.get("label_name", ""))
+
+
 func _build_outline() -> void:
     _outline = MeshInstance3D.new()
     _outline.name = "SelectionOutline"
@@ -357,6 +369,10 @@ func grab_to(id: String, world_pos: Vector3) -> void:
             _logger.info("entity_moved",
                          {"id": id, "pos": [world_pos.x, world_pos.y, world_pos.z]})
         _reload_entities()
+
+
+func toggle_physics_on_selected() -> void:
+    _toggle_physics_on_selected()
 
 
 func _toggle_physics_on_selected() -> void:

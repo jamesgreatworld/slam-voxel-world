@@ -27,12 +27,16 @@ const EntityPlacerScript = preload("res://entity_placer.gd")
 const EntitySelectorScript = preload("res://entity_selector.gd")
 const EntityEditControllerScript = preload("res://entity_edit_controller.gd")
 const EntityInspectorScript = preload("res://entity_inspector.gd")
+const TopToolbarScript = preload("res://top_toolbar.gd")
+const EntityContextBarScript = preload("res://entity_context_bar.gd")
 var entity_renderer: Node3D = null
 var item_picker: CanvasLayer = null
 var entity_placer: Node3D = null
 var entity_selector: Node3D = null
 var entity_edit: Node = null
 var entity_inspector: CanvasLayer = null
+var top_toolbar: CanvasLayer = null
+var entity_context_bar: CanvasLayer = null
 @onready var stereo_rig: Node3D = $StereoRig  # has stereo_rig_controller.gd
 @onready var cam_ctl: Node = $CameraController
 @onready var hud_ctl: Node = $HudController
@@ -168,6 +172,30 @@ func _ready() -> void:
     add_child(entity_inspector)
     entity_inspector.init_inspector(_world_path_absolute, logger)
     entity_inspector.entity_committed.connect(_on_entity_inspector_committed)
+
+    top_toolbar = CanvasLayer.new()
+    top_toolbar.set_script(TopToolbarScript)
+    top_toolbar.name = "TopToolbar"
+    add_child(top_toolbar)
+    top_toolbar.items_pressed.connect(func(): item_picker.toggle())
+    top_toolbar.snapshot_pressed.connect(_save_world_snapshot)
+    top_toolbar.menu_pressed.connect(_toggle_pause)
+
+    entity_context_bar = CanvasLayer.new()
+    entity_context_bar.set_script(EntityContextBarScript)
+    entity_context_bar.name = "EntityContextBar"
+    add_child(entity_context_bar)
+    entity_context_bar.inspector_pressed.connect(_open_inspector_for_selection)
+    entity_context_bar.duplicate_pressed.connect(func(): entity_edit.duplicate_selected())
+    entity_context_bar.physics_toggle_pressed.connect(func(): entity_selector.toggle_physics_on_selected())
+    entity_context_bar.rotate_pressed.connect(_on_context_rotate)
+    entity_context_bar.delete_pressed.connect(_on_context_delete)
+    entity_selector.entity_selected.connect(func(id: String):
+        entity_context_bar.on_entity_selected(id, entity_selector.get_selected_label_name())
+    )
+    entity_selector.selection_cleared.connect(func():
+        entity_context_bar.on_selection_cleared()
+    )
 
     left_vp.world_3d = get_viewport().world_3d
     right_vp.world_3d = get_viewport().world_3d
@@ -331,6 +359,18 @@ func _save_world_snapshot() -> void:
 
 # Entity-layer mutations live on entity_edit (see entity_edit_controller.gd).
 # main.gd only routes undo entries through it.
+
+
+func _on_context_rotate(yaw_delta_rad: float) -> void:
+    var sid: String = entity_selector.get_selected_id()
+    if sid != "":
+        entity_selector.rotate_by_id(sid, yaw_delta_rad)
+
+
+func _on_context_delete() -> void:
+    var sid: String = entity_selector.get_selected_id()
+    if sid != "":
+        entity_selector.delete_by_id(sid)
 
 
 func _wire_pause_menu() -> void:
