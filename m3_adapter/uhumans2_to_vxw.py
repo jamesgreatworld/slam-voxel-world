@@ -46,6 +46,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import vxw_format as vxw  # noqa: E402
+from m3_adapter.pcd_to_vxw import ros_zup_to_vxw_yup  # noqa: E402
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -479,6 +480,10 @@ def main() -> None:
     ap.add_argument("--depth-max", type=float, default=15.0)
     ap.add_argument("--pixel-stride", type=int, default=1,
                     help="downsample depth pixels by this factor (1=full)")
+    ap.add_argument("--no-swap-yz", action="store_true",
+                    help="skip the ROS Z-up → vxw Y-up swap (uHumans2/TESSE odom "
+                         "publishes Z-up; without the swap the world ends up "
+                         "lying on its side and the player floats in mid-air)")
     ap.add_argument("--extract-entities", action="store_true",
                     help="DBSCAN-cluster object-label voxels into entities + remove "
                          "their voxels from the grid (writes entities.json)")
@@ -590,6 +595,8 @@ def main() -> None:
                 [xyz_cam, np.ones((xyz_cam.shape[0], 1), dtype=np.float32)], axis=1
             )
             xyz_world = (xyz_h @ T_world_cam.T.astype(np.float32))[:, :3]
+            if not args.no_swap_yz:
+                xyz_world = ros_zup_to_vxw_yup(xyz_world)
             vc = np.floor(xyz_world / args.voxel_size).astype(np.int32)
             stacked = np.concatenate([vc, labels[:, None].astype(np.int32)], axis=1)
             stacked = np.unique(stacked, axis=0)
