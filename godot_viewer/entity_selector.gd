@@ -131,6 +131,9 @@ func _input(event: InputEvent) -> void:
         elif event.keycode == KEY_G and _selected_id != "":
             _start_grab()
             get_viewport().set_input_as_handled()
+        elif event.keycode == KEY_P and _selected_id != "":
+            _toggle_physics_on_selected()
+            get_viewport().set_input_as_handled()
         elif event.keycode == KEY_ESCAPE and _selected_id != "":
             clear_selection()
             get_viewport().set_input_as_handled()
@@ -353,6 +356,30 @@ func grab_to(id: String, world_pos: Vector3) -> void:
         if _logger != null:
             _logger.info("entity_moved",
                          {"id": id, "pos": [world_pos.x, world_pos.y, world_pos.z]})
+        _reload_entities()
+
+
+func _toggle_physics_on_selected() -> void:
+    if _selected_id == "":
+        return
+    var entities := _read_entities()
+    var changed := false
+    var new_state := false
+    for e in entities:
+        if String(e.get("id", "")) != _selected_id:
+            continue
+        var cm: Dictionary = e.get("custom_meta", {})
+        new_state = not bool(cm.get("physics_dynamic", false))
+        cm["physics_dynamic"] = new_state
+        e["custom_meta"] = cm
+        changed = true
+        break
+    if changed:
+        _write_entities(entities)
+        if _logger != null:
+            _logger.info("entity_physics_toggled",
+                         {"id": _selected_id, "dynamic": new_state})
+        emit_signal("entity_changed", _selected_id)
         _reload_entities()
 
 

@@ -130,10 +130,12 @@ func _spawn_one(e: Dictionary, palette_rgb: PackedColorArray) -> Node3D:
         var box_dims = dims if (dims != null and dims.size() >= 3) else [0.5, 0.5, 0.5]
         _build_single_box(root, col, box_dims)
 
-    # Picking proxy: a single AABB-sized StaticBody so PhysicsServer rays from
-    # the cursor can hit this entity even though its visuals are composite.
+    # Picking + physics proxy. Default freeze=true so the entity stays put
+    # (selection-time / grab-time semantics). custom_meta.physics_dynamic
+    # toggles freeze off so gravity + collisions take over.
     var pick_dims = dims if (dims != null and dims.size() >= 3) else [0.5, 0.5, 0.5]
-    root.add_child(_make_pick_body(pick_dims))
+    var dynamic := bool(custom_meta.get("physics_dynamic", false))
+    root.add_child(_make_physics_body(pick_dims, dynamic))
 
     root.set_meta(ENTITY_META_KEY, {
         "id": String(e.get("id", "")),
@@ -145,9 +147,16 @@ func _spawn_one(e: Dictionary, palette_rgb: PackedColorArray) -> Node3D:
     return root
 
 
-func _make_pick_body(dims) -> StaticBody3D:
-    var body := StaticBody3D.new()
+func _make_physics_body(dims, dynamic: bool) -> RigidBody3D:
+    var body := RigidBody3D.new()
     body.name = "PickProxy"
+    body.freeze = not dynamic
+    # When dynamic = false, freeze mode "static" (the default) means the body
+    # never moves and acts identically to a StaticBody for raycasts. When
+    # dynamic = true, freeze=false, and gravity + collisions take over.
+    body.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+    body.mass = max(0.5, float(dims[0]) * float(dims[1]) * float(dims[2]) * 100.0)
+    body.contact_monitor = false   # we don't need callbacks yet
     var cs := CollisionShape3D.new()
     var shape := BoxShape3D.new()
     shape.size = Vector3(float(dims[0]), float(dims[1]), float(dims[2]))
