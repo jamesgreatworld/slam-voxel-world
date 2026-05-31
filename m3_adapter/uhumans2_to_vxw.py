@@ -460,6 +460,65 @@ def extract_entities(
     return entities, keep_mask
 
 
+def _find_spawn_hint(final_vc, final_lbl, voxel_size, floor_label: int = 3
+                     ) -> list | None:
+    """Pick a spawn point on top of an open floor cell with at least 2.5 m
+    of head-clearance air above it. Returns [x, y, z, yaw_deg] in metres,
+    or None if no suitable floor was found.
+
+    Strategy:
+      1. Filter voxels labeled `floor` (super_id=3 in the uhumans2 label space).
+      2. For each floor voxel, count vertical air clearance above it (no occupied
+         voxel up to `headroom` cells). Skip if clearance < headroom.
+      3. Among candidates, pick the one closest to the (x, z) centroid of all
+         floor voxels — keeps the spawn away from edges / hallway ends and
+         roughly in the middle of the largest room.
+      4. yaw faces the centroid (so the rig walks into the apartment, not at a
+         wall).
+    """
+    if final_vc.size == 0:
+        return None
+    floor_mask = final_lbl == floor_label
+    if not floor_mask.any():
+        return None
+    floor_vc = final_vc[floor_mask]
+    # Occupancy lookup as a set of tuples — fine at hundreds of thousands.
+    occupied = {tuple(v) for v in final_vc.tolist()}
+    headroom_cells = max(2, int(round(2.5 / voxel_size)))
+
+    candidates = []
+    for v in floor_vc.tolist():
+        clear = True
+        for h in range(1, headroom_cells + 1):
+            if (v[0], v[1] + h, v[2]) in occupied:
+                clear = False
+                break
+        if clear:
+            candidates.append(v)
+    if not candidates:
+        return None
+
+    import numpy as np
+    floor_xz = floor_vc[:, [0, 2]].astype(np.float64)
+    cx, cz = floor_xz.mean(axis=0)
+    cand_np = np.asarray(candidates, dtype=np.float64)
+    dx = cand_np[:, 0] - cx
+    dz = cand_np[:, 2] - cz
+    dist2 = dx * dx + dz * dz
+    best = candidates[int(dist2.argmin())]
+    # Spawn 1.0 m above the floor cell top; floor cell top sits at (y+1)*size.
+    spawn_x = (best[0] + 0.5) * voxel_size
+    spawn_y = (best[1] + 1) * voxel_size + 1.0
+    spawn_z = (best[2] + 0.5) * voxel_size
+    # Face roughly the centroid so we look into the room.
+    import math
+    dx_to_centroid = cx * voxel_size - spawn_x
+    dz_to_centroid = cz * voxel_size - spawn_z
+    yaw_deg = math.degrees(math.atan2(dx_to_centroid, -dz_to_centroid))
+    return [round(spawn_x, 3), round(spawn_y, 3),
+            round(spawn_z, 3), round(yaw_deg, 1)]
+
+
 # ----------------------------------------------------------------------------
 # Main pipeline
 # ----------------------------------------------------------------------------
@@ -699,6 +758,9 @@ def main() -> None:
         )
     bmin = tuple(int(x) for x in cc.min(axis=0))
     bmax = tuple(int(x) + 1 for x in cc.max(axis=0))
+    spawn_hint = _find_spawn_hint(final_vc, final_lbl, args.voxel_size)
+    if spawn_hint is not None:
+        log.info("spawn_hint: %s", spawn_hint)
     manifest = vxw.Manifest(
         world_id=str(uuid.uuid4()),
         voxel_size_meters=args.voxel_size,
@@ -709,6 +771,7 @@ def main() -> None:
         source_slam_system=f"uhumans2_tesse_{args.scene}",
         source_sensor="depth+seg",
         raw_data_hash=f"sha-skip:{args.bag_dir.name}",
+        spawn_hint=spawn_hint,
     )
     palette = build_palette(label_names)
     world = vxw.World(manifest=manifest, palette=palette,

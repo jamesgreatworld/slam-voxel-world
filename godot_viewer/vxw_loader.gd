@@ -43,6 +43,9 @@ static func crc32(data: PackedByteArray) -> int:
 class VxwWorld extends RefCounted:
     var voxel_size_meters: float = 0.10
     var chunk_extent: int = 32
+    # Optional [x_m, y_m, z_m, yaw_deg] adapter hint for the rig's initial
+    # pose. Empty Array if manifest didn't carry one.
+    var spawn_hint: Array = []
     # palette_rgb[material_id] = Color (legacy convenience accessor)
     var palette_rgb: PackedColorArray
     # palette_materials[material_id] = Dictionary with full Material data
@@ -68,6 +71,10 @@ static func load_world(world_path: String) -> VxwWorld:
     var manifest = JSON.parse_string(mtxt)
     world.voxel_size_meters = float(manifest.voxel.size_meters)
     world.chunk_extent = int(manifest.voxel.chunk_extent_voxels[0])
+    if manifest.has("spawn_hint"):
+        var sh = manifest.spawn_hint
+        if sh is Array and sh.size() == 4:
+            world.spawn_hint = [float(sh[0]), float(sh[1]), float(sh[2]), float(sh[3])]
 
     # ---- palette.json ----
     var ptxt := FileAccess.get_file_as_string(world_path + "/palette.json")

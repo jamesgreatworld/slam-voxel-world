@@ -232,6 +232,11 @@ class Manifest:
     source_sensor: str = ""
     raw_data_hash: str = ""
     format_version: str = "1.0"
+    # Optional [x_m, y_m, z_m, yaw_deg]: where the viewer should spawn the
+    # rig on first load. None means "use the engine default (0, spawn_y_m, 0)".
+    # Adapters that know the floor/room layout (uhumans2, pcd) can fill this
+    # so the user lands in the middle of an open room facing into the scene.
+    spawn_hint: Optional[list] = None
 
     def __post_init__(self) -> None:
         self.bounds_chunks_min = tuple(self.bounds_chunks_min)
@@ -471,6 +476,8 @@ def write_manifest(path: Path, m: Manifest) -> None:
         },
         "lod_levels": m.lod_levels,
     }
+    if m.spawn_hint is not None:
+        data["spawn_hint"] = [float(x) for x in m.spawn_hint]
     Path(path).write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
@@ -505,6 +512,7 @@ def read_manifest(path: Path) -> Manifest:
         source_sensor=src.get("sensor", ""),
         raw_data_hash=src.get("raw_data_hash", ""),
         format_version=data.get("format_version", "1.0"),
+        spawn_hint=[float(x) for x in data["spawn_hint"]] if data.get("spawn_hint") else None,
     )
 
 

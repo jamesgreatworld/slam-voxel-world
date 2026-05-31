@@ -63,6 +63,12 @@ var _test_undo_times: int = 0
 var _test_duplicate_first: bool = false
 var _test_snapshot_world: bool = false
 var _test_toggle_behavior_on_first: bool = false
+# Phase-2 renderer test hook: hide the voxel at the given world index after
+# the world has loaded, then let _process drain the dirty-chunk queue. The
+# next snapshot frame should show no voxel at that index (renderer prints
+# rebuild evidence to stdout: "[renderer] dirty rebuild ...").
+var _test_hide_voxel_set: bool = false
+var _test_hide_voxel_vi: Vector3i = Vector3i.ZERO
 
 
 func _ready() -> void:
@@ -106,6 +112,13 @@ func _ready() -> void:
             _test_snapshot_world = true
         elif arg == "--test-toggle-behavior-on-first":
             _test_toggle_behavior_on_first = true
+        elif arg.begins_with("--test-hide-voxel="):
+            var hv_parts := arg.substr("--test-hide-voxel=".length()).split(",")
+            if hv_parts.size() == 3:
+                _test_hide_voxel_vi = Vector3i(
+                    int(hv_parts[0]), int(hv_parts[1]), int(hv_parts[2])
+                )
+                _test_hide_voxel_set = true
 
     logger.info("config", {
         "world_path": world_path,
@@ -217,6 +230,16 @@ func _ready() -> void:
     pause_menu.set_persistence_available(true)
     pause_menu.set_edit_mode_label(false)
 
+    # Apply manifest spawn_hint if present and no explicit --rig-pose was
+    # given. The hint is [x_m, y_m, z_m, yaw_deg]: an adapter-picked open
+    # floor cell so the user lands in the middle of a room facing inward.
+    if rig_pose_spec == "" and _world.spawn_hint.size() == 4:
+        var sh: Array = _world.spawn_hint
+        var basis_h := Basis().rotated(Vector3.UP, deg_to_rad(float(sh[3])))
+        var xf_h := Transform3D(basis_h, Vector3(float(sh[0]), float(sh[1]), float(sh[2])))
+        call_deferred("_set_rig_xform_deferred", xf_h)
+        logger.info("spawn_hint_applied", {"pos": [sh[0], sh[1], sh[2]], "yaw_deg": sh[3]})
+
     # CLI-driven overrides (must happen after init_controller)
     if view_override != "":
         cam_ctl.set_view_mode_str(view_override)
@@ -300,6 +323,19 @@ func _ready() -> void:
         else:
             logger.info("test_toggle_behavior_on_first",
                         {"status": "no switchable entity"})
+
+    if _test_hide_voxel_set:
+        # Phase-2 dirty-rebuild verification hook. Hide a single voxel and
+        # log whether the renderer accepted the call. The snapshot frame
+        # (20 frames later by default) gives _process plenty of time to
+        # rebuild the affected chunk, so visual evidence is the snapshot
+        # itself; log evidence is the print on the next dirty drain.
+        var hv_ok := bool(renderer.hide_voxel(_test_hide_voxel_vi))
+        logger.info("test_hide_voxel", {
+            "vi": [_test_hide_voxel_vi.x, _test_hide_voxel_vi.y, _test_hide_voxel_vi.z],
+            "ok": hv_ok,
+            "still_has": renderer.has_voxel(_test_hide_voxel_vi),
+        })
 
 
 func _set_rig_xform_deferred(xf: Transform3D) -> void:
