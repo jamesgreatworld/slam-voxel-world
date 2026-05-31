@@ -546,6 +546,12 @@ def main() -> None:
                     help="skip the ROS Z-up → vxw Y-up swap (uHumans2/TESSE odom "
                          "publishes Z-up; without the swap the world ends up "
                          "lying on its side and the player floats in mid-air)")
+    ap.add_argument("--min-observations", type=int, default=3,
+                    help="drop voxels seen in fewer than N frames "
+                         "(noise filter; 1 = off, 3 = recommended for uhumans2)")
+    ap.add_argument("--close-iters", type=int, default=1,
+                    help="binary closing iterations on the voxel grid "
+                         "(fills 1-cell holes in walls / surfaces; 0 = off)")
     ap.add_argument("--extract-entities", action="store_true",
                     help="DBSCAN-cluster object-label voxels into entities + remove "
                          "their voxels from the grid (writes entities.json)")
@@ -698,20 +704,63 @@ def main() -> None:
     ends = np.concatenate([starts[1:], [len(vc_only)]])
     final_vc = np.empty((len(starts), 3), dtype=np.int32)
     final_lbl = np.empty(len(starts), dtype=np.uint8)
+    final_total = np.zeros(len(starts), dtype=np.int64)
     for k, (s, e) in enumerate(zip(starts, ends)):
         run_counts = counts[s:e]
         run_labels = labels[s:e]
         winner = run_labels[int(np.argmax(run_counts))]
         final_vc[k] = vc_only[s]
         final_lbl[k] = winner
+        final_total[k] = int(run_counts.sum())
     # Drop unknown (super_id=0); vxw treats material_id=0 as air, so any
     # unknown voxel would be invisible anyway and would break round-trip count.
     keep = final_lbl != 0
-    dropped = int((~keep).sum())
+    dropped_unknown = int((~keep).sum())
     final_vc = final_vc[keep]
     final_lbl = final_lbl[keep]
+    final_total = final_total[keep]
+    # --- noise filter: voxels seen in fewer than N frames are likely RGB-D
+    # outliers / specular pops. min_observations=1 is a no-op (legacy).
+    if args.min_observations > 1:
+        keep_n = final_total >= args.min_observations
+        dropped_noise = int((~keep_n).sum())
+        final_vc = final_vc[keep_n]
+        final_lbl = final_lbl[keep_n]
+        log.info("      noise filter (>=%d obs) dropped %d voxels",
+                 args.min_observations, dropped_noise)
     log.info("      %d unique voxels (dropped %d unknown) in %.2fs",
-             len(final_vc), dropped, time.perf_counter() - t0)
+             len(final_vc), dropped_unknown, time.perf_counter() - t0)
+    # --- morphological closing: fill 1-cell holes in walls / surfaces. Runs
+    # on a dense bool grid of the occupied set; newly-closed voxels inherit
+    # the label of the nearest existing voxel (k=1 with scipy's KDTree).
+    if args.close_iters > 0 and len(final_vc) > 0:
+        t1 = time.perf_counter()
+        from scipy.ndimage import binary_closing
+        from scipy.spatial import cKDTree
+        mn = final_vc.min(axis=0)
+        mx = final_vc.max(axis=0)
+        shape = tuple(int(s) for s in (mx - mn + 1))
+        # Cap the grid to ~512MB to be safe on big scenes.
+        cells = shape[0] * shape[1] * shape[2]
+        if cells < 512_000_000:
+            grid = np.zeros(shape, dtype=bool)
+            local = (final_vc - mn).astype(np.int32)
+            grid[local[:, 0], local[:, 1], local[:, 2]] = True
+            closed = binary_closing(grid, iterations=args.close_iters)
+            new_mask = closed & ~grid
+            new_local = np.argwhere(new_mask).astype(np.int32)
+            if new_local.size > 0:
+                new_vc = new_local + mn
+                tree = cKDTree(final_vc.astype(np.float32))
+                _, nn = tree.query(new_vc.astype(np.float32), k=1)
+                new_lbl = final_lbl[nn]
+                final_vc = np.concatenate([final_vc, new_vc.astype(np.int32)], axis=0)
+                final_lbl = np.concatenate([final_lbl, new_lbl], axis=0)
+            log.info("      morphological close (%d iter) filled %d voxels in %.2fs",
+                     args.close_iters, int(new_local.shape[0] if new_local.size else 0),
+                     time.perf_counter() - t1)
+        else:
+            log.warning("      skip closing: grid %s too large", shape)
     # label histogram
     uniq_l, cnt_l = np.unique(final_lbl, return_counts=True)
     log.info("      label histogram:")
