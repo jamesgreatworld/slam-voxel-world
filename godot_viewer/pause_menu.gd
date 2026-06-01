@@ -17,6 +17,7 @@ signal save_world_requested
 signal reload_world_requested
 signal load_world_requested(path: String)
 signal import_litematic_requested(path: String)
+signal toggle_day_night_requested
 signal quit_requested
 
 @onready var _panel: PanelContainer = $Backdrop/Panel
@@ -34,6 +35,10 @@ signal quit_requested
 @onready var _file_dialog: FileDialog = $LoadDialog
 @onready var _litematic_dialog: FileDialog = $LitematicImportDialog
 
+# Day/Night button is added dynamically (main.tscn is not edited).
+var _day_night_btn: Button = null
+var _is_night: bool = false
+
 
 func _ready() -> void:
     # Menu and its inputs must keep working when game tree is paused.
@@ -50,6 +55,7 @@ func _ready() -> void:
     _save_btn.pressed.connect(func(): emit_signal("save_world_requested"))
     _reload_btn.pressed.connect(func(): emit_signal("reload_world_requested"))
     _quit_btn.pressed.connect(func(): emit_signal("quit_requested"))
+    _install_day_night_button()
     # FileDialog signals
     _file_dialog.dir_selected.connect(_on_dir_selected)
     _litematic_dialog.file_selected.connect(_on_litematic_selected)
@@ -116,3 +122,31 @@ func set_edit_mode_label(enabled: bool) -> void:
     else:
         _edit_btn.text = "Edit Mode: OFF  (clicks ignored)"
         _edit_btn.modulate = Color(1, 1, 1, 1)
+
+
+# Day/Night button is created dynamically so main.tscn does not need editing.
+# Placed in the VBox right before the Quit button.
+func _install_day_night_button() -> void:
+    _day_night_btn = Button.new()
+    _day_night_btn.name = "DayNightButton"
+    _day_night_btn.text = "Switch to Night"
+    _day_night_btn.custom_minimum_size = Vector2(0, 40)
+    _day_night_btn.pressed.connect(func(): emit_signal("toggle_day_night_requested"))
+    var vbox: VBoxContainer = $Backdrop/Panel/VBox
+    vbox.add_child(_day_night_btn)
+    # Move it to just above the Quit button.
+    var quit_idx: int = _quit_btn.get_index()
+    vbox.move_child(_day_night_btn, quit_idx)
+
+
+# Called by main.gd after a successful toggle so the button label reflects the
+# current state. is_night=true means it is currently night (so button offers to
+# switch back to day).
+func set_day_night_label(is_night: bool) -> void:
+    _is_night = is_night
+    if _day_night_btn == null:
+        return
+    if is_night:
+        _day_night_btn.text = "Switch to Day"
+    else:
+        _day_night_btn.text = "Switch to Night"
