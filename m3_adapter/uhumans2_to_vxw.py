@@ -46,7 +46,8 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import vxw_format as vxw  # noqa: E402
-from m3_adapter.pcd_to_vxw import ros_zup_to_vxw_yup  # noqa: E402
+from m3_adapter.common import ros_zup_to_vxw_yup  # noqa: E402
+from m3_adapter.voxel_postprocess import close_holes, denoise_by_count  # noqa: E402
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -719,48 +720,24 @@ def main() -> None:
     final_vc = final_vc[keep]
     final_lbl = final_lbl[keep]
     final_total = final_total[keep]
-    # --- noise filter: voxels seen in fewer than N frames are likely RGB-D
-    # outliers / specular pops. min_observations=1 is a no-op (legacy).
-    if args.min_observations > 1:
-        keep_n = final_total >= args.min_observations
-        dropped_noise = int((~keep_n).sum())
-        final_vc = final_vc[keep_n]
-        final_lbl = final_lbl[keep_n]
+    # --- quality passes delegated to m3_adapter/voxel_postprocess so every
+    # adapter shares a single implementation. Hydra adapter keeps both off
+    # by default to mirror raw Hydra; this one defaults to mild cleanup.
+    final_vc, final_lbl, dropped_noise = denoise_by_count(
+        final_vc, final_lbl, final_total, args.min_observations,
+    )
+    if dropped_noise > 0:
         log.info("      noise filter (>=%d obs) dropped %d voxels",
                  args.min_observations, dropped_noise)
     log.info("      %d unique voxels (dropped %d unknown) in %.2fs",
              len(final_vc), dropped_unknown, time.perf_counter() - t0)
-    # --- morphological closing: fill 1-cell holes in walls / surfaces. Runs
-    # on a dense bool grid of the occupied set; newly-closed voxels inherit
-    # the label of the nearest existing voxel (k=1 with scipy's KDTree).
     if args.close_iters > 0 and len(final_vc) > 0:
         t1 = time.perf_counter()
-        from scipy.ndimage import binary_closing
-        from scipy.spatial import cKDTree
-        mn = final_vc.min(axis=0)
-        mx = final_vc.max(axis=0)
-        shape = tuple(int(s) for s in (mx - mn + 1))
-        # Cap the grid to ~512MB to be safe on big scenes.
-        cells = shape[0] * shape[1] * shape[2]
-        if cells < 512_000_000:
-            grid = np.zeros(shape, dtype=bool)
-            local = (final_vc - mn).astype(np.int32)
-            grid[local[:, 0], local[:, 1], local[:, 2]] = True
-            closed = binary_closing(grid, iterations=args.close_iters)
-            new_mask = closed & ~grid
-            new_local = np.argwhere(new_mask).astype(np.int32)
-            if new_local.size > 0:
-                new_vc = new_local + mn
-                tree = cKDTree(final_vc.astype(np.float32))
-                _, nn = tree.query(new_vc.astype(np.float32), k=1)
-                new_lbl = final_lbl[nn]
-                final_vc = np.concatenate([final_vc, new_vc.astype(np.int32)], axis=0)
-                final_lbl = np.concatenate([final_lbl, new_lbl], axis=0)
-            log.info("      morphological close (%d iter) filled %d voxels in %.2fs",
-                     args.close_iters, int(new_local.shape[0] if new_local.size else 0),
-                     time.perf_counter() - t1)
-        else:
-            log.warning("      skip closing: grid %s too large", shape)
+        final_vc, final_lbl, filled = close_holes(
+            final_vc, final_lbl, args.close_iters,
+        )
+        log.info("      morphological close (%d iter) filled %d voxels in %.2fs",
+                 args.close_iters, filled, time.perf_counter() - t1)
     # label histogram
     uniq_l, cnt_l = np.unique(final_lbl, return_counts=True)
     log.info("      label histogram:")

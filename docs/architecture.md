@@ -525,5 +525,89 @@ else                      → selector LMB 用于选中
    - 重跑 `python m3_adapter/mc_item_loader.py` 编译
    - 跑 snapshot 验证至少 chair / table / lamp 三个 preset 渲染对
 
-8. **加 adapter** 优先复用 `m3_adapter/pcd_to_vxw.py` 的 helper (`load_pcd_xyz`、`ros_zup_to_vxw_yup`、`voxelize_and_group`、`build_palette`)。bag/tsdf/uhumans2/dbscan 都是这样做的。
+8. **加 adapter** 优先复用 `m3_adapter/common.py` 的 helper (`load_pcd_xyz`、`ros_zup_to_vxw_yup`、`voxelize_and_group`、`build_concrete_palette`)。bag/tsdf/uhumans2/dbscan 都是这样做的。
+
+---
+
+## 11. M3 模块组织（2026-06 重整）
+
+`m3_adapter/` 之前是个平的 import-adapter 目录，公共 helper 散落在 `pcd_to_vxw.py` 里被其他 adapter 反向 import。现在按职责分 3 类（仍是平铺，没引入 subpackage 以避免破坏 CLI 路径）：
+
+```
+m3_adapter/
+  common.py                  ← shared helper hub。任何 adapter 都 import 它
+                                load_pcd_xyz / ros_zup_to_vxw_yup
+                                voxelize_and_group / build_concrete_palette
+                                COMPRESSION_MAP
+  voxel_postprocess.py       ← 质量后处理。adapter 可选调用 + standalone CLI
+                                denoise_by_count(vc, lbl, counts, min_n)
+                                close_holes(vc, lbl, iterations)
+                                CLI: 任意 .vxw → 后处理 .vxw
+
+  # ---- import adapters：每条 = 一种外部源 → .vxw ----
+  pcd_to_vxw.py              PCL .pcd 朴素
+  tsdf_to_vxw.py             PCL .pcd → Open3D TSDF 平滑壳
+  dbscan_to_vxw.py           PCL .pcd → sklearn DBSCAN 几何聚类
+  bag_to_vxw.py              rosbag2 (livox CustomMsg) + 可选 TUM trajectory
+  uhumans2_to_vxw.py         rosbag2 (TESSE RGB-D + odom + 像素语义)
+  hydra_mesh_to_vxw.py       Hydra mesh.ply + dsg.json (Path A 黑盒)
+  litematic_to_vxw.py        Minecraft Litematica .litematic
+  anvil_to_vxw.py            Minecraft Anvil 整世界
+
+  # ---- 资源包 ----
+  mc_blockmap.py             MC block-id → vxw material 共享映射
+  mc_item_loader.py          MC item 资源包编译器 (CLI)
+  mc_item_pack/              MC item 资源包 (manifest + models/ + textures/)
+```
+
+### 11.1 职责契约
+
+| 模块 | 输入 | 输出 | 是否包含 CLI |
+|---|---|---|---|
+| `common.py` | numpy data | numpy data | 否 |
+| `voxel_postprocess.py` | numpy data (inline) **或** .vxw (standalone) | numpy data **或** .vxw | 是 |
+| `*_to_vxw.py` | 外部格式 | .vxw | 是 |
+| `mc_blockmap.py` | — | 映射表 | 否 |
+| `mc_item_loader.py` | resource pack | `_compiled.json` | 是 |
+
+### 11.2 后处理使用模式
+
+**Mode A — adapter inline**（用于 adapter 知道每 voxel 累积次数时）：
+```python
+from m3_adapter.voxel_postprocess import denoise_by_count, close_holes
+vc, lbl, dropped = denoise_by_count(vc, lbl, counts, min_n=3)
+vc, lbl, filled  = close_holes(vc, lbl, iterations=1)
+```
+
+**Mode B — standalone**（对任意已有 .vxw 跑后处理）：
+```powershell
+pixi run python m3_adapter/voxel_postprocess.py out/14floor.vxw out/14floor_clean.vxw --close-iters 1
+```
+
+### 11.3 Hydra 适配的特殊约束
+
+**`hydra_mesh_to_vxw.py` 默认不调任何后处理** —— 这是设计契约。理由：
+- 我们 Path A 是"黑盒消费 Hydra"，应该可以重现一份 Hydra 原本输出
+- 任何后处理用 Mode B 单独再跑一遍，保留可 reproducibility 边界
+
+如果你想看"Hydra + 我们优化"，命令链是两步：
+```powershell
+pixi run python m3_adapter/hydra_mesh_to_vxw.py F:/hydra_ws/datasets/14floor/backend out/14floor_raw.vxw --use-dsg-objects
+pixi run python m3_adapter/voxel_postprocess.py out/14floor_raw.vxw out/14floor_clean.vxw --close-iters 1
+```
+
+第一步可 byte-级比对 Hydra 原版输出（如有第三方 Hydra 实现），第二步是我们专有的提升。
+
+### 11.4 加新 adapter / 新后处理的步骤
+
+加 adapter：
+1. 拷一份 pcd_to_vxw.py 改名
+2. 复用 `from m3_adapter.common import ...`
+3. CLI 自带 `main()`，写出 .vxw
+4. 不要 import 其他 adapter
+
+加后处理：
+1. 在 `voxel_postprocess.py` 加 `def your_op(vc, lbl, ...) -> tuple[vc, lbl, stats]`
+2. inline mode: adapter 直接 import + 调
+3. standalone mode: 在 `main()` 里加 CLI flag
 

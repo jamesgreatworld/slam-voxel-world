@@ -32,8 +32,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import vxw_format as vxw  # noqa: E402
-from m3_adapter.pcd_to_vxw import (  # noqa: E402
-    build_palette,
+from m3_adapter.common import (  # noqa: E402
+    build_concrete_palette as build_palette,
     ros_zup_to_vxw_yup,
     voxelize_and_group,
 )

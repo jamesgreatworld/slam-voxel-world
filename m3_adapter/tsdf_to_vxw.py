@@ -54,7 +54,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 sys.path.insert(0, str(_PROJECT_ROOT / "m3_adapter"))
 
 import vxw_format as vxw  # noqa: E402
-from pcd_to_vxw import load_pcd_xyz, ros_zup_to_vxw_yup  # noqa: E402
+from m3_adapter.common import load_pcd_xyz, ros_zup_to_vxw_yup  # noqa: E402
 
 _LOG_DIR = _PROJECT_ROOT / "out" / "logs"
 log = logging.getLogger("tsdf_to_vxw")

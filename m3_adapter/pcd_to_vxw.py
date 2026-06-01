@@ -60,103 +60,13 @@ def _log_bbox(prefix: str, xyz: np.ndarray) -> None:
     )
 
 
-def load_pcd_xyz(path: Path) -> np.ndarray:
-    """Read XYZ from a .pcd (any encoding pypcd4 supports)."""
-    from pypcd4 import PointCloud
-
-    pc = PointCloud.from_path(str(path))
-    arr = pc.numpy()
-    if arr.shape[1] < 3:
-        raise ValueError(f"pcd has only {arr.shape[1]} fields, need >=3 (XYZ)")
-    return np.ascontiguousarray(arr[:, :3], dtype=np.float64)
-
-
-def ros_zup_to_vxw_yup(xyz: np.ndarray) -> np.ndarray:
-    """Convert ROS frame (X-forward, Y-left, Z-up) to vxw frame (Godot convention).
-
-    Both right-handed. vxw uses Godot/OpenGL convention: X-right, Y-up, Z-back
-    (camera looks down -Z, so "forward" is -Z). To make ROS-forward map to
-    Godot-forward (the natural user expectation), ROS.X → -vxw.Z.
-
-    Verified: this transform has determinant +1 (rotation, not reflection).
-    See tests/test_adapter.py::test_coord_swap_preserves_handedness.
-    """
-    out = np.empty_like(xyz)
-    out[:, 0] = -xyz[:, 1]  # vxw.X (right)   = -ROS.Y (left)
-    out[:, 1] = xyz[:, 2]   # vxw.Y (up)      =  ROS.Z (up)
-    out[:, 2] = -xyz[:, 0]  # vxw.Z (back)    = -ROS.X (forward)
-    return out
-
-
-_COMPRESSION_MAP = {
-    "raw": vxw.Compression.RAW,
-    "gzip": vxw.Compression.GZIP,
-    "zstd": vxw.Compression.ZSTD,
-}
-
-
-def voxelize_and_group(
-    xyz: np.ndarray,
-    voxel_size: float,
-    chunk_extent: int,
-    compression: vxw.Compression = vxw.Compression.GZIP,
-) -> tuple[dict, tuple[int, int, int], tuple[int, int, int]]:
-    """Map points to (chunk_coord, local_coord, ...) and group by chunk.
-
-    Returns (chunks_dict, bounds_min_chunk, bounds_max_chunk).
-    """
-    # Voxel coordinates (signed int)
-    vc = np.floor(xyz / voxel_size).astype(np.int64)
-    # Dedupe — many points may fall in the same voxel
-    vc_unique = np.unique(vc, axis=0)
-
-    cc = np.floor_divide(vc_unique, chunk_extent).astype(np.int64)
-    local = (vc_unique - cc * chunk_extent).astype(np.uint8)
-
-    # Group voxels by chunk coord using numpy
-    chunk_keys, inverse = np.unique(cc, axis=0, return_inverse=True)
-
-    chunks: dict = {}
-    for chunk_id in range(len(chunk_keys)):
-        mask = inverse == chunk_id
-        locs = local[mask]
-        arr = np.zeros(
-            (chunk_extent, chunk_extent, chunk_extent), dtype=vxw.VOXEL_DTYPE
-        )
-        arr["material_id"][locs[:, 0], locs[:, 1], locs[:, 2]] = 1
-        arr["semantic_id"][locs[:, 0], locs[:, 1], locs[:, 2]] = 1
-        ckey = tuple(int(x) for x in chunk_keys[chunk_id])
-        chunks[ckey] = vxw.Chunk(
-            coord=ckey,
-            voxels=arr,
-            encoding=vxw.Encoding.RLE,
-            compression=compression,
-        )
-
-    bounds_min = tuple(int(x) for x in cc.min(axis=0))
-    bounds_max = tuple(int(x) + 1 for x in cc.max(axis=0))
-    return chunks, bounds_min, bounds_max
-
-
-def build_palette() -> vxw.Palette:
-    return vxw.Palette(
-        materials=[
-            vxw.Material(id=0, name="air", color_rgb=(0, 0, 0), flags=("empty",)),
-            vxw.Material(
-                id=1,
-                name="concrete",
-                color_rgb=(180, 180, 180),
-                flags=("solid", "destructible"),
-                density=2400.0,
-                hardness=30.0,
-            ),
-        ],
-        semantic_classes=[
-            vxw.SemanticClass(id=0, name="unknown", default_material=1),
-            vxw.SemanticClass(id=1, name="wall", default_material=1),
-        ],
-        color_lut=[(0, 0, 0), (180, 178, 175)],
-    )
+from m3_adapter.common import (  # noqa: E402
+    COMPRESSION_MAP as _COMPRESSION_MAP,
+    build_concrete_palette as build_palette,
+    load_pcd_xyz,
+    ros_zup_to_vxw_yup,
+    voxelize_and_group,
+)
 
 
 def main() -> None:
