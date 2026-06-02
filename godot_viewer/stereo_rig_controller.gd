@@ -47,6 +47,12 @@ var _right_arm: Node3D = null
 var _left_leg: Node3D = null
 var _right_leg: Node3D = null
 
+# A2 sit/lay state. When _seated_entity_id != "" the rig is parked on top
+# of an entity and the WASD / mouse-look paths skip movement.
+var _seated_entity_id: String = ""
+const _SIT_LIFT_ABOVE_ENTITY_CENTRE: float = 0.45  # rig waist sits above seat
+const _SIT_LEG_PITCH: float = PI * 0.5             # legs out ~90°
+
 
 const HumanoidVisualScript = preload("res://humanoid_visual.gd")
 
@@ -90,6 +96,38 @@ func get_pose() -> Transform3D:
     return global_transform
 
 
+# ---------------------------------------------------------------------------
+# A2 sit: park the rig on top of an entity. The entity supplies the chair's
+# world-space centre + yaw; we lift the waist by _SIT_LIFT and bend the legs
+# 90° forward so the humanoid reads as "sitting". WASD is gated on
+# is_seated() in _apply_keyboard_*.
+# ---------------------------------------------------------------------------
+
+func enter_sit(entity_id: String, entity_pos: Vector3, entity_yaw_rad: float) -> void:
+    _seated_entity_id = entity_id
+    _vertical_velocity = 0.0
+    var basis := Basis().rotated(Vector3.UP, entity_yaw_rad)
+    var pos := entity_pos + Vector3(0.0, _SIT_LIFT_ABOVE_ENTITY_CENTRE, 0.0)
+    global_transform = Transform3D(basis, pos)
+    if _left_leg  != null: _left_leg.rotation.x  = _SIT_LEG_PITCH
+    if _right_leg != null: _right_leg.rotation.x = _SIT_LEG_PITCH
+
+
+func exit_seat() -> void:
+    _seated_entity_id = ""
+    _vertical_velocity = 0.0
+    if _left_leg  != null: _left_leg.rotation.x  = 0.0
+    if _right_leg != null: _right_leg.rotation.x = 0.0
+
+
+func is_seated() -> bool:
+    return _seated_entity_id != ""
+
+
+func get_seated_entity_id() -> String:
+    return _seated_entity_id
+
+
 # Called by camera_controller when the view mode toggles. When ON, the rig
 # obeys gravity and is blocked by voxel collision in WASD movement.
 func set_physics_mode(enabled: bool) -> void:
@@ -108,6 +146,10 @@ func _input(event: InputEvent) -> void:
 
 
 func _process(delta: float) -> void:
+    if is_seated():
+        # Sit mode: rig stays glued to the entity; ignore movement keys.
+        _sync_stereo()
+        return
     if _physics_mode:
         _apply_keyboard_physics(delta)
     else:

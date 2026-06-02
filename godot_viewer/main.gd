@@ -214,7 +214,7 @@ func _ready() -> void:
     entity_context_bar.physics_toggle_pressed.connect(func(): entity_selector.toggle_physics_on_selected())
     entity_context_bar.rotate_pressed.connect(_on_context_rotate)
     entity_context_bar.delete_pressed.connect(_on_context_delete)
-    entity_context_bar.use_pressed.connect(func(): entity_edit.apply_behavior("switchable"))
+    entity_context_bar.use_pressed.connect(func(): entity_edit.use_selected())
     entity_selector.entity_selected.connect(func(id: String):
         entity_context_bar.on_entity_selected(id, entity_selector.get_selected_label_name())
     )
@@ -325,7 +325,7 @@ func _ready() -> void:
                 break
         if picked_id != "":
             entity_selector._selected_id = picked_id
-            var ok3: bool = bool(entity_edit.apply_behavior("switchable"))
+            var ok3: bool = bool(entity_edit.use_selected())
             logger.info("test_toggle_behavior_on_first",
                         {"id": picked_id, "index": picked_idx, "applied": ok3})
         else:
@@ -391,7 +391,7 @@ func _input(event: InputEvent) -> void:
             _open_inspector_for_selection()
             get_viewport().set_input_as_handled()
         elif event.keycode == KEY_U and entity_edit != null:
-            entity_edit.apply_behavior("switchable")
+            entity_edit.use_selected()
             get_viewport().set_input_as_handled()
         elif event.keycode == KEY_F5:
             _save_world_snapshot()

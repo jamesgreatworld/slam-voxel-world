@@ -168,6 +168,34 @@ func spawn_entity(item_id: String, preset: Dictionary,
 # Behavior toggle (entity custom_meta.state mutation, no undo entry).
 # ---------------------------------------------------------------------------
 
+# Look up the selected entity's mc_item preset and dispatch the first
+# declared behavior. lamp/computer → switchable; chair → sittable.
+# Falls back to a no-op (returns false) if the entity has no behaviors.
+func use_selected() -> bool:
+    if _entity_selector == null or _entity_renderer == null:
+        return false
+    var sel_id: String = _entity_selector.get_selected_id()
+    if sel_id == "":
+        return false
+    var entities := _read_entities_json(_world_path + "/entities.json")
+    var mc_item: String = ""
+    for e in entities:
+        if String(e.get("id", "")) == sel_id:
+            var cm: Dictionary = e.get("custom_meta", {})
+            mc_item = String(cm.get("mc_item", ""))
+            break
+    if mc_item == "":
+        return apply_behavior("switchable")
+    var presets: Dictionary = _entity_renderer.get_item_presets()
+    if not presets.has(mc_item):
+        return apply_behavior("switchable")
+    var preset: Dictionary = presets[mc_item]
+    var beh = preset.get("behaviors", [])
+    if beh is Array and beh.size() > 0:
+        return apply_behavior(String(beh[0]))
+    return false
+
+
 # Apply a behavior (e.g. "switchable") to the currently selected entity.
 # Mutates entities.json custom_meta.state and re-renders. Returns true if
 # something changed. No undo entry: behavior toggles can be high-frequency,
@@ -190,6 +218,24 @@ func apply_behavior(behavior: String) -> bool:
             var cur := String(cm.get("state", "off"))
             new_state = "on" if cur == "off" else "off"
             cm["state"] = new_state
+        elif behavior == "sittable":
+            # Toggle sit on/off using the same selected chair entity.
+            if _stereo_rig != null and _stereo_rig.has_method("is_seated"):
+                if _stereo_rig.is_seated() and \
+                   _stereo_rig.get_seated_entity_id() == sel_id:
+                    _stereo_rig.exit_seat()
+                    new_state = "standing"
+                else:
+                    var pos_arr = e.get("position", [0, 0, 0])
+                    var rot_arr = e.get("rotation", [0, 0, 0, 1])
+                    var ent_pos := Vector3(float(pos_arr[0]), float(pos_arr[1]), float(pos_arr[2]))
+                    var ent_quat := Quaternion(float(rot_arr[0]), float(rot_arr[1]),
+                                                float(rot_arr[2]), float(rot_arr[3]))
+                    var yaw := ent_quat.get_euler().y
+                    _stereo_rig.enter_sit(sel_id, ent_pos, yaw)
+                    new_state = "sitting"
+            else:
+                return false
         else:
             return false
         e["custom_meta"] = cm
