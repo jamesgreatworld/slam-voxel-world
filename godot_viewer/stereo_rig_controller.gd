@@ -31,6 +31,22 @@ var _visuals: Array[Node3D] = []
 var _physics_mode: bool = false       # toggled by camera_controller on view_mode change
 var _vertical_velocity: float = 0.0   # for gravity + jump in 1P
 
+# Walk-cycle animation state. _walk_cycle advances when the rig is moving
+# horizontally (any view mode); when it stops, it lerps back toward 0 so the
+# limbs settle to neutral. The four pivots are cached from the humanoid
+# after init_controller builds it.
+var _walk_cycle: float = 0.0
+var _last_pos: Vector3 = Vector3.ZERO
+var _last_pos_inited: bool = false
+const _WALK_FREQ_HZ: float = 1.6
+const _WALK_AMPL_RAD: float = 0.5    # ±28°, roughly natural
+const _WALK_DAMP_PER_SEC: float = 8.0 # fade to 0 when not moving
+const _WALK_VEL_THRESHOLD: float = 0.05  # m/s gate for "moving"
+var _left_arm: Node3D = null
+var _right_arm: Node3D = null
+var _left_leg: Node3D = null
+var _right_leg: Node3D = null
+
 
 const HumanoidVisualScript = preload("res://humanoid_visual.gd")
 
@@ -49,6 +65,11 @@ func init_controller(left_cam: Camera3D, right_cam: Camera3D) -> void:
     for name in ["LeftEyeMarker", "RightEyeMarker"]:
         if has_node(name):
             _visuals.append(get_node(name))
+    # Cache pivots for the walk cycle. They were named in HumanoidVisual.build().
+    _left_arm  = humanoid.get_node_or_null("LeftArm")
+    _right_arm = humanoid.get_node_or_null("RightArm")
+    _left_leg  = humanoid.get_node_or_null("LeftLeg")
+    _right_leg = humanoid.get_node_or_null("RightLeg")
 
 
 @export var spawn_y_m: float = 1.0   # rig centre height above world origin; safe
@@ -92,6 +113,49 @@ func _process(delta: float) -> void:
     else:
         _apply_keyboard_freefly(delta)
     _sync_stereo()
+    _animate_walk(delta)
+
+
+# Advance the walk cycle when the rig is moving horizontally and apply
+# sin-driven swing to the four limb pivots. Opposite limbs swing in
+# opposition (left leg forward → right arm forward), and arms swing
+# counter-phase to the legs for a natural gait.
+func _animate_walk(delta: float) -> void:
+    if _left_arm == null:
+        return    # humanoid wasn't built yet
+    var pos := global_position
+    var horizontal_speed := 0.0
+    if _last_pos_inited:
+        var dx := pos.x - _last_pos.x
+        var dz := pos.z - _last_pos.z
+        horizontal_speed = sqrt(dx * dx + dz * dz) / max(delta, 0.0001)
+    _last_pos = pos
+    _last_pos_inited = true
+
+    var moving := horizontal_speed > _WALK_VEL_THRESHOLD
+    var target_speed := horizontal_speed if moving else 0.0
+    # Cycle advances proportionally to speed (faster walk = faster swing)
+    # but capped so sprint doesn't blur the limbs.
+    var cycle_rate: float = min(target_speed, 4.0) * _WALK_FREQ_HZ
+    _walk_cycle = fmod(_walk_cycle + cycle_rate * delta, TAU)
+
+    var swing := sin(_walk_cycle) * _WALK_AMPL_RAD
+    if not moving:
+        # When standing, decay the visible swing toward 0 even though the
+        # internal cycle keeps its phase — avoids snapping mid-step.
+        swing = lerp(_get_current_swing(), 0.0,
+                     clamp(delta * _WALK_DAMP_PER_SEC, 0.0, 1.0))
+
+    if _left_leg  != null: _left_leg.rotation.x  = swing
+    if _right_leg != null: _right_leg.rotation.x = -swing
+    if _left_arm  != null: _left_arm.rotation.x  = -swing
+    if _right_arm != null: _right_arm.rotation.x = swing
+
+
+func _get_current_swing() -> float:
+    if _left_leg == null:
+        return 0.0
+    return _left_leg.rotation.x
 
 
 # Free-fly mode (3P): unchanged behaviour, ignores gravity & collision.
