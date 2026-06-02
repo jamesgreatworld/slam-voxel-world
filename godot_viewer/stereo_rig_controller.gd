@@ -32,11 +32,21 @@ var _physics_mode: bool = false       # toggled by camera_controller on view_mod
 var _vertical_velocity: float = 0.0   # for gravity + jump in 1P
 
 
+const HumanoidVisualScript = preload("res://humanoid_visual.gd")
+
+
 func init_controller(left_cam: Camera3D, right_cam: Camera3D) -> void:
     _left_cam = left_cam
     _right_cam = right_cam
-    _visuals.clear()
-    for name in ["RedBox", "LeftEyeMarker", "RightEyeMarker"]:
+    # Replace the red sensor box with a block-style humanoid. Hide the
+    # original RedBox so we don't see both. Eye markers stay (they show
+    # the stereo baseline).
+    if has_node("RedBox"):
+        get_node("RedBox").visible = false
+    var humanoid: Node3D = HumanoidVisualScript.build()
+    add_child(humanoid)
+    _visuals = [humanoid]
+    for name in ["LeftEyeMarker", "RightEyeMarker"]:
         if has_node(name):
             _visuals.append(get_node(name))
 
