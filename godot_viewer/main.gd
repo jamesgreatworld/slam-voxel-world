@@ -528,14 +528,18 @@ const _DAY_SKY_HORIZON: Color = Color(0.65, 0.7, 0.75, 1)
 const _DAY_GROUND_BOTTOM: Color = Color(0.1, 0.1, 0.1, 1)
 const _DAY_GROUND_HORIZON: Color = Color(0.45, 0.4, 0.35, 1)
 
-const _NIGHT_LIGHT_ENERGY: float = 0.12
-const _NIGHT_LIGHT_COLOR: Color = Color(0.65, 0.75, 1.0)
-const _NIGHT_AMBIENT_COLOR: Color = Color(0.18, 0.22, 0.32, 1)
-const _NIGHT_AMBIENT_ENERGY: float = 0.05
-const _NIGHT_SKY_TOP: Color = Color(0.02, 0.04, 0.10, 1)
-const _NIGHT_SKY_HORIZON: Color = Color(0.08, 0.10, 0.18, 1)
-const _NIGHT_GROUND_BOTTOM: Color = Color(0.01, 0.01, 0.03, 1)
-const _NIGHT_GROUND_HORIZON: Color = Color(0.06, 0.08, 0.12, 1)
+const _NIGHT_LIGHT_ENERGY: float = 0.55
+const _NIGHT_LIGHT_COLOR: Color = Color(0.82, 0.88, 1.0)
+const _NIGHT_AMBIENT_COLOR: Color = Color(0.20, 0.24, 0.34, 1)
+const _NIGHT_AMBIENT_ENERGY: float = 0.12
+const _NIGHT_SKY_TOP: Color = Color(0.05, 0.07, 0.16, 1)
+const _NIGHT_SKY_HORIZON: Color = Color(0.12, 0.16, 0.26, 1)
+const _NIGHT_GROUND_BOTTOM: Color = Color(0.02, 0.02, 0.05, 1)
+const _NIGHT_GROUND_HORIZON: Color = Color(0.08, 0.10, 0.16, 1)
+# Sharper shadows in moonlight — real moonlight casts harder edges than the
+# soft default. Day mode keeps the default blur.
+const _DAY_SHADOW_BLUR: float = 1.0
+const _NIGHT_SHADOW_BLUR: float = 0.5
 
 
 func _get_sky_material() -> ProceduralSkyMaterial:
@@ -554,6 +558,7 @@ func _apply_day_mode() -> void:
     if directional_light != null:
         directional_light.light_energy = _DAY_LIGHT_ENERGY
         directional_light.light_color = _DAY_LIGHT_COLOR
+        directional_light.shadow_blur = _DAY_SHADOW_BLUR
     if world_env != null and world_env.environment != null:
         world_env.environment.ambient_light_color = _DAY_AMBIENT_COLOR
         world_env.environment.ambient_light_energy = _DAY_AMBIENT_ENERGY
@@ -569,6 +574,7 @@ func _apply_night_mode() -> void:
     if directional_light != null:
         directional_light.light_energy = _NIGHT_LIGHT_ENERGY
         directional_light.light_color = _NIGHT_LIGHT_COLOR
+        directional_light.shadow_blur = _NIGHT_SHADOW_BLUR
     if world_env != null and world_env.environment != null:
         world_env.environment.ambient_light_color = _NIGHT_AMBIENT_COLOR
         world_env.environment.ambient_light_energy = _NIGHT_AMBIENT_ENERGY
