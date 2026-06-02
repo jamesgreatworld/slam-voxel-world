@@ -36,26 +36,25 @@ static func build() -> Node3D:
               Vector3(0, 0.4, 0))
 
     # ---- Arms (pivoted at the shoulder so phase-2 swing rotates around it) ----
-    _add_pivoted_limb(root, "LeftArm",
+    # Hands hang from each arm pivot so they swing along with the arm.
+    var left_arm := _add_pivoted_limb(root, "LeftArm",
         _SHIRT, Vector3(0.12, 0.45, 0.12), Vector3(-0.28, 0.6, 0))
-    _add_pivoted_limb(root, "RightArm",
+    _add_part(left_arm, "Hand", _SKIN, Vector3(0.13, 0.13, 0.13),
+              Vector3(0, -0.515, 0))   # wrist sits just below the sleeve end
+    var right_arm := _add_pivoted_limb(root, "RightArm",
         _SHIRT, Vector3(0.12, 0.45, 0.12), Vector3(0.28, 0.6, 0))
-    # Hands as skin-coloured cubes at the wrists
-    _add_part(root, "LeftHand", _SKIN, Vector3(0.13, 0.12, 0.13),
-              Vector3(-0.28, 0.12, 0))
-    _add_part(root, "RightHand", _SKIN, Vector3(0.13, 0.12, 0.13),
-              Vector3(0.28, 0.12, 0))
+    _add_part(right_arm, "Hand", _SKIN, Vector3(0.13, 0.13, 0.13),
+              Vector3(0, -0.515, 0))
 
-    # ---- Legs (pivoted at the hip) ----
-    _add_pivoted_limb(root, "LeftLeg",
+    # ---- Legs (pivoted at the hip) — shoes ride on the legs ----
+    var left_leg := _add_pivoted_limb(root, "LeftLeg",
         _PANT, Vector3(0.16, 0.55, 0.16), Vector3(-0.1, 0.05, 0))
-    _add_pivoted_limb(root, "RightLeg",
+    _add_part(left_leg, "Shoe", _SHOE, Vector3(0.18, 0.08, 0.26),
+              Vector3(0, -0.59, 0.04))
+    var right_leg := _add_pivoted_limb(root, "RightLeg",
         _PANT, Vector3(0.16, 0.55, 0.16), Vector3(0.1, 0.05, 0))
-    # Shoes at the ankles
-    _add_part(root, "LeftShoe", _SHOE, Vector3(0.18, 0.08, 0.26),
-              Vector3(-0.1, -0.36, 0.04))
-    _add_part(root, "RightShoe", _SHOE, Vector3(0.18, 0.08, 0.26),
-              Vector3(0.1, -0.36, 0.04))
+    _add_part(right_leg, "Shoe", _SHOE, Vector3(0.18, 0.08, 0.26),
+              Vector3(0, -0.59, 0.04))
 
     return root
 
