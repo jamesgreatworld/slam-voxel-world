@@ -8,7 +8,7 @@ extends Node3D
 const VxwLoader = preload("res://vxw_loader.gd")
 const VxwWriter = preload("res://vxw_writer.gd")
 const VxwLogger = preload("res://logger.gd")
-const DEFAULT_WORLD_PATH := "../out/baseline.vxw"
+const BootConfig = preload("res://boot_config.gd")
 
 var logger  # VxwLog instance, untyped to avoid class_name registration issues
 var _world  # loaded VxwLoader.VxwWorld
@@ -57,21 +57,7 @@ var entity_context_bar: CanvasLayer = null
 @onready var right_vp: SubViewport = $HUD/RightStereoContainer/RightStereoViewport
 
 var _mouse_mode_before_pause: int = Input.MOUSE_MODE_VISIBLE
-var _test_delete_first: bool = false
-var _test_rotate_first_deg: float = 0.0
-var _test_grab_first_to: Vector3 = Vector3.ZERO
-var _test_grab_first_set: bool = false
-var _test_undo_times: int = 0
-var _test_duplicate_first: bool = false
-var _test_snapshot_world: bool = false
-var _test_toggle_behavior_on_first: bool = false
-# Phase-2 renderer test hook: hide the voxel at the given world index after
-# the world has loaded, then let _process drain the dirty-chunk queue. The
-# next snapshot frame should show no voxel at that index (renderer prints
-# rebuild evidence to stdout: "[renderer] dirty rebuild ...").
-var _test_hide_voxel_set: bool = false
-var _test_hide_voxel_vi: Vector3i = Vector3i.ZERO
-var _test_toggle_day_night: bool = false
+var cfg  # BootConfig
 
 # Day/Night state. Default is Day to match the values baked into main.tscn.
 var _night_mode: bool = false
@@ -80,65 +66,20 @@ var _night_mode: bool = false
 func _ready() -> void:
     logger = VxwLogger.new()
 
-    var args: PackedStringArray = OS.get_cmdline_user_args()
-    var world_path := DEFAULT_WORLD_PATH
-    var view_override := ""
-    var rig_pose_spec := ""
-    var open_item_picker := false
-    var spawn_items: Array = []
-    for arg in args:
-        if arg.begins_with("--world="):
-            world_path = arg.substr("--world=".length())
-        elif arg == "--view=1p":
-            view_override = "1p"
-        elif arg == "--view=3p":
-            view_override = "3p"
-        elif arg.begins_with("--rig-pose="):
-            rig_pose_spec = arg.substr("--rig-pose=".length())
-        elif arg == "--open-item-picker":
-            open_item_picker = true
-        elif arg.begins_with("--spawn-items="):
-            spawn_items = arg.substr("--spawn-items=".length()).split(",")
-        elif arg == "--test-delete-first":
-            _test_delete_first = true
-        elif arg.begins_with("--test-rotate-first="):
-            _test_rotate_first_deg = float(arg.substr("--test-rotate-first=".length()))
-        elif arg.begins_with("--test-grab-first-to="):
-            var parts := arg.substr("--test-grab-first-to=".length()).split(",")
-            if parts.size() == 3:
-                _test_grab_first_to = Vector3(
-                    float(parts[0]), float(parts[1]), float(parts[2])
-                )
-                _test_grab_first_set = true
-        elif arg.begins_with("--test-undo-times="):
-            _test_undo_times = int(arg.substr("--test-undo-times=".length()))
-        elif arg == "--test-duplicate-first":
-            _test_duplicate_first = true
-        elif arg == "--test-snapshot-world":
-            _test_snapshot_world = true
-        elif arg == "--test-toggle-behavior-on-first":
-            _test_toggle_behavior_on_first = true
-        elif arg.begins_with("--test-hide-voxel="):
-            var hv_parts := arg.substr("--test-hide-voxel=".length()).split(",")
-            if hv_parts.size() == 3:
-                _test_hide_voxel_vi = Vector3i(
-                    int(hv_parts[0]), int(hv_parts[1]), int(hv_parts[2])
-                )
-                _test_hide_voxel_set = true
-        elif arg == "--test-toggle-day-night":
-            _test_toggle_day_night = true
+    cfg = BootConfig.new()
+    cfg.parse_args(OS.get_cmdline_user_args())
 
     logger.info("config", {
-        "world_path": world_path,
-        "view_override": view_override,
-        "rig_pose_spec": rig_pose_spec,
+        "world_path": cfg.world_path,
+        "view_override": cfg.view_override,
+        "rig_pose_spec": cfg.rig_pose_spec,
     })
 
-    _world_path_absolute = _resolve(world_path)
+    _world_path_absolute = _resolve(cfg.world_path)
     _world = VxwLoader.load_world(_world_path_absolute)
     if _world.voxel_count() == 0:
-        status_label.text = "No voxels loaded. Path tried: " + world_path
-        logger.error("world", {"reason": "empty load", "path": world_path})
+        status_label.text = "No voxels loaded. Path tried: " + cfg.world_path
+        logger.error("world", {"reason": "empty load", "path": cfg.world_path})
         return
 
     logger.info("world_loaded", {
@@ -229,7 +170,7 @@ func _ready() -> void:
     cam_ctl.init_controller(main_cam, stereo_rig, logger)
     hud_ctl.init_controller(status_label, mode_label, pose_label, _world, stereo_rig, cam_ctl, logger)
     snap_ctl.init_controller(stereo_rig, cam_ctl, logger)
-    snap_ctl.configure_from_cli(args)
+    snap_ctl.configure_from_cli(cfg.raw_args)
     voxel_editor.init_editor(renderer, main_cam)
     voxel_editor.voxel_destroyed.connect(_on_voxel_destroyed)
     voxel_editor.voxel_placed.connect(_on_voxel_placed)
@@ -241,7 +182,7 @@ func _ready() -> void:
     # Apply manifest spawn_hint if present and no explicit --rig-pose was
     # given. The hint is [x_m, y_m, z_m, yaw_deg]: an adapter-picked open
     # floor cell so the user lands in the middle of a room facing inward.
-    if rig_pose_spec == "" and _world.spawn_hint.size() == 4:
+    if cfg.rig_pose_spec == "" and _world.spawn_hint.size() == 4:
         var sh: Array = _world.spawn_hint
         var basis_h := Basis().rotated(Vector3.UP, deg_to_rad(float(sh[3])))
         var xf_h := Transform3D(basis_h, Vector3(float(sh[0]), float(sh[1]), float(sh[2])))
@@ -249,18 +190,18 @@ func _ready() -> void:
         logger.info("spawn_hint_applied", {"pos": [sh[0], sh[1], sh[2]], "yaw_deg": sh[3]})
 
     # CLI-driven overrides (must happen after init_controller)
-    if view_override != "":
-        cam_ctl.set_view_mode_str(view_override)
-    if rig_pose_spec != "":
-        var xf := _parse_rig_pose(rig_pose_spec)
+    if cfg.view_override != "":
+        cam_ctl.set_view_mode_str(cfg.view_override)
+    if cfg.rig_pose_spec != "":
+        var xf := BootConfig.parse_rig_pose(cfg.rig_pose_spec)
         call_deferred("_set_rig_xform_deferred", xf)
-    if open_item_picker and item_picker != null:
+    if cfg.open_item_picker and item_picker != null:
         item_picker.open()
-    for sid in spawn_items:
+    for sid in cfg.spawn_items:
         if sid != "":
             entity_edit.spawn_in_front_of_rig(String(sid))
 
-    if _test_delete_first or _test_rotate_first_deg != 0.0 or _test_grab_first_set:
+    if cfg.test_delete_first or cfg.test_rotate_first_deg != 0.0 or cfg.test_grab_first_set:
         var ent_path := _world_path_absolute + "/entities.json"
         var rec_list: Array = []
         if FileAccess.file_exists(ent_path):
@@ -271,17 +212,17 @@ func _ready() -> void:
                     rec_list = d.entities
         if rec_list.size() > 0:
             var first_id := String(rec_list[0].get("id", ""))
-            if _test_grab_first_set:
-                entity_selector.grab_to(first_id, _test_grab_first_to)
-            if _test_rotate_first_deg != 0.0:
-                entity_selector.rotate_by_id(first_id, deg_to_rad(_test_rotate_first_deg))
-            if _test_delete_first:
+            if cfg.test_grab_first_set:
+                entity_selector.grab_to(first_id, cfg.test_grab_first_to)
+            if cfg.test_rotate_first_deg != 0.0:
+                entity_selector.rotate_by_id(first_id, deg_to_rad(cfg.test_rotate_first_deg))
+            if cfg.test_delete_first:
                 entity_selector.delete_by_id(first_id)
 
-    for _i in _test_undo_times:
+    for _i in cfg.test_undo_times:
         undo_last_edit()
 
-    if _test_duplicate_first:
+    if cfg.test_duplicate_first:
         var ent_path2 := _world_path_absolute + "/entities.json"
         var recs: Array = []
         if FileAccess.file_exists(ent_path2):
@@ -295,10 +236,10 @@ func _ready() -> void:
             entity_selector._selected_id = fid
             entity_edit.duplicate_selected()
 
-    if _test_snapshot_world:
+    if cfg.test_snapshot_world:
         _save_world_snapshot()
 
-    if _test_toggle_behavior_on_first:
+    if cfg.test_toggle_behavior_on_first:
         # Find the first entity whose preset declares "switchable" and toggle
         # it. Logs the resulting state so the caller can assert
         # entities.json[<idx>].custom_meta.state == "on".
@@ -332,20 +273,20 @@ func _ready() -> void:
             logger.info("test_toggle_behavior_on_first",
                         {"status": "no switchable entity"})
 
-    if _test_hide_voxel_set:
+    if cfg.test_hide_voxel_set:
         # Phase-2 dirty-rebuild verification hook. Hide a single voxel and
         # log whether the renderer accepted the call. The snapshot frame
         # (20 frames later by default) gives _process plenty of time to
         # rebuild the affected chunk, so visual evidence is the snapshot
         # itself; log evidence is the print on the next dirty drain.
-        var hv_ok := bool(renderer.hide_voxel(_test_hide_voxel_vi))
+        var hv_ok := bool(renderer.hide_voxel(cfg.test_hide_voxel_vi))
         logger.info("test_hide_voxel", {
-            "vi": [_test_hide_voxel_vi.x, _test_hide_voxel_vi.y, _test_hide_voxel_vi.z],
+            "vi": [cfg.test_hide_voxel_vi.x, cfg.test_hide_voxel_vi.y, cfg.test_hide_voxel_vi.z],
             "ok": hv_ok,
-            "still_has": renderer.has_voxel(_test_hide_voxel_vi),
+            "still_has": renderer.has_voxel(cfg.test_hide_voxel_vi),
         })
 
-    if _test_toggle_day_night:
+    if cfg.test_toggle_day_night:
         # CLI hook: flip to Night so the next snapshot frame captures the
         # darker visuals. Logs the new DirectionalLight.light_energy so
         # callers can grep for the value (0.12 = night, 1.6 = day).
@@ -361,19 +302,6 @@ func _resolve(p: String) -> String:
         return p
     var base := ProjectSettings.globalize_path("res://")
     return base.path_join(p)
-
-
-func _parse_rig_pose(spec: String) -> Transform3D:
-    var parts := spec.split(",")
-    if parts.size() != 6:
-        push_error("[main] --rig-pose needs 6 comma-separated numbers, got %d" % parts.size())
-        return Transform3D.IDENTITY
-    var p := Vector3(float(parts[0]), float(parts[1]), float(parts[2]))
-    var basis := Basis()
-    basis = basis.rotated(Vector3.UP, deg_to_rad(float(parts[3])))     # yaw
-    basis = basis.rotated(basis.x, deg_to_rad(float(parts[4])))        # pitch (local X)
-    basis = basis.rotated(basis.z, deg_to_rad(float(parts[5])))        # roll (local Z)
-    return Transform3D(basis, p)
 
 
 func _input(event: InputEvent) -> void:
