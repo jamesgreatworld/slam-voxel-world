@@ -611,3 +611,27 @@ pixi run python m3_adapter/voxel_postprocess.py out/14floor_raw.vxw out/14floor_
 2. inline mode: adapter 直接 import + 调
 3. standalone mode: 在 `main()` 里加 CLI flag
 
+---
+
+## 12. 轻前端 / 显示终端化方向（2026-06-11 记录，远期规划）
+
+### 12.1 背景与定位
+
+应用趋势是**轻前端**：逻辑全在后端，前端只是一个可替换的"显示终端"。本工程天然契合——Godot（MIT 开源，无授权费）在本架构中只承担 M4–M6（渲染/交互/UI），与后端唯一的耦合是 `.vxw` 数据契约（见 §1、§4 可替换性矩阵）。**本工程已经是轻前端结构**，本节规划的是把"文件契约"升级为"流式契约"，让 Godot 变成纯粹的"体素世界显示终端"：任何能产出 .vxw 流的后端都能直接接上。
+
+### 12.2 升级路径（分阶段，每阶段独立可用）
+
+| 阶段 | 内容 | 契约形态 | 触发条件 |
+|---|---|---|---|
+| **P0（现状）** | 离线 .vxw 目录加载 | 文件 | — |
+| **P1 热重载** | Godot 端监听 .vxw 目录 mtime/chunks.idx 变化，增量刷新已变 chunk | 文件 + 轮询 | 想要"adapter 重跑 → 视图自动更新"的迭代体验 |
+| **P2 在线写入** | `live_slam_to_vxw.py`（§3.2 已预留）：在线 SLAM/ROS2 节点边跑边写 .chunk + 更新 chunks.idx；与 P1 组合即得"边扫边看" | 文件（增量写） | 有实时 SLAM 数据源可接 |
+| **P3 流式协议** | Python 侧 WebSocket 服务推增量；Godot 订阅。消息类型：`world_meta` / `palette` / `chunk_update` / `entity_upsert` / `entity_delete` | WebSocket + JSON/二进制 | P2 的文件轮询成为瓶颈，或需要跨机器 |
+
+### 12.3 设计约束
+
+- **vxw_loader.gd 先抽象成 source 接口**（`FileSource` / `StreamSource`），renderer 只认 source，不认文件——这是 P1 动手前的唯一前置重构。
+- 流式消息的 payload 直接复用 spec §4 的 chunk 字节格式，**不发明第二种编码**；WebSocket 帧 = 「头 + 原样 .chunk 字节」。
+- spec.md 仍是唯一权威；P3 落地时在 spec 加"传输层"一节，文件形态与流形态共享同一 byte-level 定义。
+- 与 §10.6 同规矩：**不要提前做**。每阶段只在触发条件出现时启动。
+
