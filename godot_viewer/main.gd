@@ -9,6 +9,7 @@ const VxwLoader = preload("res://vxw_loader.gd")
 const VxwWriter = preload("res://vxw_writer.gd")
 const VxwLogger = preload("res://logger.gd")
 const BootConfig = preload("res://boot_config.gd")
+const EnvironmentControllerScript = preload("res://environment_controller.gd")
 
 var logger  # VxwLog instance, untyped to avoid class_name registration issues
 var _world  # loaded VxwLoader.VxwWorld
@@ -58,13 +59,16 @@ var entity_context_bar: CanvasLayer = null
 
 var _mouse_mode_before_pause: int = Input.MOUSE_MODE_VISIBLE
 var cfg  # BootConfig
-
-# Day/Night state. Default is Day to match the values baked into main.tscn.
-var _night_mode: bool = false
+var env_ctl: Node
 
 
 func _ready() -> void:
     logger = VxwLogger.new()
+
+    env_ctl = Node.new()
+    env_ctl.set_script(EnvironmentControllerScript)
+    env_ctl.name = "EnvironmentController"
+    add_child(env_ctl)
 
     cfg = BootConfig.new()
     cfg.parse_args(OS.get_cmdline_user_args())
@@ -175,6 +179,7 @@ func _ready() -> void:
     voxel_editor.voxel_destroyed.connect(_on_voxel_destroyed)
     voxel_editor.voxel_placed.connect(_on_voxel_placed)
     voxel_editor.set_edit_enabled(false)  # default OFF — opt-in via pause menu
+    env_ctl.init_controller(directional_light, world_env, pause_menu, logger)
     _wire_pause_menu()
     pause_menu.set_persistence_available(true)
     pause_menu.set_edit_mode_label(false)
@@ -289,8 +294,8 @@ func _ready() -> void:
     if cfg.test_toggle_day_night:
         # CLI hook: flip to Night so the next snapshot frame captures the
         # darker visuals. Logs the new DirectionalLight.light_energy so
-        # callers can grep for the value (0.12 = night, 1.6 = day).
-        _toggle_day_night()
+        # callers can grep for the value (0.55 = night, 1.6 = day).
+        env_ctl.toggle_day_night()
 
 
 func _set_rig_xform_deferred(xf: Transform3D) -> void:
@@ -409,7 +414,10 @@ func _wire_pause_menu() -> void:
     pause_menu.undo_requested.connect(undo_last_edit)
     pause_menu.material_picker_requested.connect(_on_material_picker_requested)
     pause_menu.import_litematic_requested.connect(_on_import_litematic_requested)
-    pause_menu.toggle_day_night_requested.connect(_on_toggle_day_night)
+    pause_menu.toggle_day_night_requested.connect(func():
+        env_ctl.toggle_day_night()
+        _close_pause()
+    )
     material_picker.material_selected.connect(_on_material_selected)
     pause_menu.quit_requested.connect(func():
         logger.info("session_end", {"reason": "menu_quit"})
@@ -437,104 +445,6 @@ func _close_pause() -> void:
     get_tree().paused = false
     Input.mouse_mode = _mouse_mode_before_pause
     logger.info("pause", {"opened": false})
-
-
-# ---- Day/Night ----
-#
-# Tweaks DirectionalLight3D + WorldEnvironment.environment (+ procedural sky
-# material) between two hardcoded palettes. The Day values mirror what
-# main.tscn bakes in so a fresh launch is visually identical to before this
-# feature. Lamp / computer emission_energy_multiplier on entity meshes keeps
-# them readable in Night mode.
-
-const _DAY_LIGHT_ENERGY: float = 1.6
-const _DAY_LIGHT_COLOR: Color = Color(1, 1, 1)
-const _DAY_AMBIENT_COLOR: Color = Color(0.4, 0.45, 0.55, 1)
-const _DAY_AMBIENT_ENERGY: float = 0.25
-const _DAY_SKY_TOP: Color = Color(0.4, 0.5, 0.65, 1)
-const _DAY_SKY_HORIZON: Color = Color(0.65, 0.7, 0.75, 1)
-const _DAY_GROUND_BOTTOM: Color = Color(0.1, 0.1, 0.1, 1)
-const _DAY_GROUND_HORIZON: Color = Color(0.45, 0.4, 0.35, 1)
-
-const _NIGHT_LIGHT_ENERGY: float = 0.55
-const _NIGHT_LIGHT_COLOR: Color = Color(0.82, 0.88, 1.0)
-const _NIGHT_AMBIENT_COLOR: Color = Color(0.20, 0.24, 0.34, 1)
-const _NIGHT_AMBIENT_ENERGY: float = 0.12
-const _NIGHT_SKY_TOP: Color = Color(0.05, 0.07, 0.16, 1)
-const _NIGHT_SKY_HORIZON: Color = Color(0.12, 0.16, 0.26, 1)
-const _NIGHT_GROUND_BOTTOM: Color = Color(0.02, 0.02, 0.05, 1)
-const _NIGHT_GROUND_HORIZON: Color = Color(0.08, 0.10, 0.16, 1)
-# Sharper shadows in moonlight — real moonlight casts harder edges than the
-# soft default. Day mode keeps the default blur.
-const _DAY_SHADOW_BLUR: float = 1.0
-const _NIGHT_SHADOW_BLUR: float = 0.5
-
-
-func _get_sky_material() -> ProceduralSkyMaterial:
-    if world_env == null or world_env.environment == null:
-        return null
-    var sky: Sky = world_env.environment.sky
-    if sky == null:
-        return null
-    var mat = sky.sky_material
-    if mat is ProceduralSkyMaterial:
-        return mat
-    return null
-
-
-func _apply_day_mode() -> void:
-    if directional_light != null:
-        directional_light.light_energy = _DAY_LIGHT_ENERGY
-        directional_light.light_color = _DAY_LIGHT_COLOR
-        directional_light.shadow_blur = _DAY_SHADOW_BLUR
-    if world_env != null and world_env.environment != null:
-        world_env.environment.ambient_light_color = _DAY_AMBIENT_COLOR
-        world_env.environment.ambient_light_energy = _DAY_AMBIENT_ENERGY
-    var sky_mat: ProceduralSkyMaterial = _get_sky_material()
-    if sky_mat != null:
-        sky_mat.sky_top_color = _DAY_SKY_TOP
-        sky_mat.sky_horizon_color = _DAY_SKY_HORIZON
-        sky_mat.ground_bottom_color = _DAY_GROUND_BOTTOM
-        sky_mat.ground_horizon_color = _DAY_GROUND_HORIZON
-
-
-func _apply_night_mode() -> void:
-    if directional_light != null:
-        directional_light.light_energy = _NIGHT_LIGHT_ENERGY
-        directional_light.light_color = _NIGHT_LIGHT_COLOR
-        directional_light.shadow_blur = _NIGHT_SHADOW_BLUR
-    if world_env != null and world_env.environment != null:
-        world_env.environment.ambient_light_color = _NIGHT_AMBIENT_COLOR
-        world_env.environment.ambient_light_energy = _NIGHT_AMBIENT_ENERGY
-    var sky_mat: ProceduralSkyMaterial = _get_sky_material()
-    if sky_mat != null:
-        sky_mat.sky_top_color = _NIGHT_SKY_TOP
-        sky_mat.sky_horizon_color = _NIGHT_SKY_HORIZON
-        sky_mat.ground_bottom_color = _NIGHT_GROUND_BOTTOM
-        sky_mat.ground_horizon_color = _NIGHT_GROUND_HORIZON
-
-
-func _toggle_day_night() -> void:
-    _night_mode = not _night_mode
-    if _night_mode:
-        _apply_night_mode()
-    else:
-        _apply_day_mode()
-    if pause_menu != null:
-        pause_menu.set_day_night_label(_night_mode)
-    if logger != null:
-        var le := 0.0
-        if directional_light != null:
-            le = directional_light.light_energy
-        logger.info("day_night_toggle", {
-            "night_mode": _night_mode,
-            "directional_light_energy": le,
-        })
-
-
-func _on_toggle_day_night() -> void:
-    _toggle_day_night()
-    _close_pause()
 
 
 # ---- R3: voxel editing + persistence ----
