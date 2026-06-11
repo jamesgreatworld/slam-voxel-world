@@ -5,15 +5,14 @@
 
 extends Node3D
 
-const VxwLoader = preload("res://vxw_loader.gd")
 const VxwWriter = preload("res://vxw_writer.gd")
 const VxwLogger = preload("res://logger.gd")
 const BootConfig = preload("res://boot_config.gd")
 const EnvironmentControllerScript = preload("res://environment_controller.gd")
+const WorldSessionScript = preload("res://world_session.gd")
 
 var logger  # VxwLog instance, untyped to avoid class_name registration issues
-var _world  # loaded VxwLoader.VxwWorld
-var _world_path_absolute: String = ""
+var ws: Node
 
 # Undo stack: each entry = {op: "destroy"|"place", vi: Vector3i, material_id: int}
 # - "destroy" entry: the voxel was destroyed; undo re-places it with material_id
@@ -79,28 +78,22 @@ func _ready() -> void:
         "rig_pose_spec": cfg.rig_pose_spec,
     })
 
-    _world_path_absolute = _resolve(cfg.world_path)
-    _world = VxwLoader.load_world(_world_path_absolute)
-    if _world.voxel_count() == 0:
+    ws = Node.new()
+    ws.set_script(WorldSessionScript)
+    ws.name = "WorldSession"
+    add_child(ws)
+    ws.init_session(renderer, logger)
+    if not ws.load_initial(cfg.world_path):
         status_label.text = "No voxels loaded. Path tried: " + cfg.world_path
-        logger.error("world", {"reason": "empty load", "path": cfg.world_path})
         return
 
-    logger.info("world_loaded", {
-        "voxels": _world.voxel_count(),
-        "voxel_size_m": _world.voxel_size_meters,
-        "chunk_extent": _world.chunk_extent,
-        "path": _world_path_absolute,
-    })
-
     # Wire everything up
-    renderer.build(_world)
     entity_renderer = Node3D.new()
     entity_renderer.set_script(EntityRendererScript)
     entity_renderer.name = "EntityRenderer"
     add_child(entity_renderer)
     entity_renderer.init_renderer(logger)
-    entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
+    entity_renderer.load_entities(ws.world_path, ws.world.palette_rgb)
 
     item_picker = CanvasLayer.new()
     item_picker.set_script(ItemPickerScript)
@@ -120,7 +113,7 @@ func _ready() -> void:
     entity_selector.name = "EntitySelector"
     add_child(entity_selector)
     entity_selector.init_selector(
-        main_cam, _world_path_absolute, entity_renderer,
+        main_cam, ws.world_path, entity_renderer,
         entity_placer, voxel_editor, logger
     )
 
@@ -129,7 +122,7 @@ func _ready() -> void:
     entity_edit.name = "EntityEditController"
     add_child(entity_edit)
     entity_edit.init_controller(
-        _world_path_absolute, _world,
+        ws.world_path, ws.world,
         entity_renderer, item_picker, entity_placer, entity_selector,
         stereo_rig, logger
     )
@@ -139,7 +132,7 @@ func _ready() -> void:
     entity_inspector.set_script(EntityInspectorScript)
     entity_inspector.name = "EntityInspector"
     add_child(entity_inspector)
-    entity_inspector.init_inspector(_world_path_absolute, logger)
+    entity_inspector.init_inspector(ws.world_path, logger)
     entity_inspector.entity_committed.connect(_on_entity_inspector_committed)
 
     top_toolbar = CanvasLayer.new()
@@ -147,7 +140,7 @@ func _ready() -> void:
     top_toolbar.name = "TopToolbar"
     add_child(top_toolbar)
     top_toolbar.items_pressed.connect(func(): item_picker.toggle())
-    top_toolbar.snapshot_pressed.connect(_save_world_snapshot)
+    top_toolbar.snapshot_pressed.connect(ws.save_snapshot)
     top_toolbar.menu_pressed.connect(_toggle_pause)
 
     entity_context_bar = CanvasLayer.new()
@@ -172,7 +165,7 @@ func _ready() -> void:
     stereo_rig.init_controller(left_cam, right_cam)
     stereo_rig.reset_pose()
     cam_ctl.init_controller(main_cam, stereo_rig, logger)
-    hud_ctl.init_controller(status_label, mode_label, pose_label, _world, stereo_rig, cam_ctl, logger)
+    hud_ctl.init_controller(status_label, mode_label, pose_label, ws.world, stereo_rig, cam_ctl, logger)
     snap_ctl.init_controller(stereo_rig, cam_ctl, logger)
     snap_ctl.configure_from_cli(cfg.raw_args)
     voxel_editor.init_editor(renderer, main_cam)
@@ -180,6 +173,7 @@ func _ready() -> void:
     voxel_editor.voxel_placed.connect(_on_voxel_placed)
     voxel_editor.set_edit_enabled(false)  # default OFF — opt-in via pause menu
     env_ctl.init_controller(directional_light, world_env, pause_menu, logger)
+    ws.world_loaded.connect(_on_world_loaded)
     _wire_pause_menu()
     pause_menu.set_persistence_available(true)
     pause_menu.set_edit_mode_label(false)
@@ -187,8 +181,8 @@ func _ready() -> void:
     # Apply manifest spawn_hint if present and no explicit --rig-pose was
     # given. The hint is [x_m, y_m, z_m, yaw_deg]: an adapter-picked open
     # floor cell so the user lands in the middle of a room facing inward.
-    if cfg.rig_pose_spec == "" and _world.spawn_hint.size() == 4:
-        var sh: Array = _world.spawn_hint
+    if cfg.rig_pose_spec == "" and ws.world.spawn_hint.size() == 4:
+        var sh: Array = ws.world.spawn_hint
         var basis_h := Basis().rotated(Vector3.UP, deg_to_rad(float(sh[3])))
         var xf_h := Transform3D(basis_h, Vector3(float(sh[0]), float(sh[1]), float(sh[2])))
         call_deferred("_set_rig_xform_deferred", xf_h)
@@ -207,7 +201,7 @@ func _ready() -> void:
             entity_edit.spawn_in_front_of_rig(String(sid))
 
     if cfg.test_delete_first or cfg.test_rotate_first_deg != 0.0 or cfg.test_grab_first_set:
-        var ent_path := _world_path_absolute + "/entities.json"
+        var ent_path: String = ws.world_path + "/entities.json"
         var rec_list: Array = []
         if FileAccess.file_exists(ent_path):
             var txt := FileAccess.get_file_as_string(ent_path)
@@ -228,7 +222,7 @@ func _ready() -> void:
         undo_last_edit()
 
     if cfg.test_duplicate_first:
-        var ent_path2 := _world_path_absolute + "/entities.json"
+        var ent_path2: String = ws.world_path + "/entities.json"
         var recs: Array = []
         if FileAccess.file_exists(ent_path2):
             var t := FileAccess.get_file_as_string(ent_path2)
@@ -242,13 +236,13 @@ func _ready() -> void:
             entity_edit.duplicate_selected()
 
     if cfg.test_snapshot_world:
-        _save_world_snapshot()
+        ws.save_snapshot()
 
     if cfg.test_toggle_behavior_on_first:
         # Find the first entity whose preset declares "switchable" and toggle
         # it. Logs the resulting state so the caller can assert
         # entities.json[<idx>].custom_meta.state == "on".
-        var ent_path3 := _world_path_absolute + "/entities.json"
+        var ent_path3: String = ws.world_path + "/entities.json"
         var recs3: Array = []
         if FileAccess.file_exists(ent_path3):
             var t3 := FileAccess.get_file_as_string(ent_path3)
@@ -302,11 +296,19 @@ func _set_rig_xform_deferred(xf: Transform3D) -> void:
     stereo_rig.set_pose(xf)
 
 
-func _resolve(p: String) -> String:
-    if p.is_absolute_path():
-        return p
-    var base := ProjectSettings.globalize_path("res://")
-    return base.path_join(p)
+func _on_world_loaded(world, path: String) -> void:
+    # In-place swap rebind: re-init editor with the new world, reset rig,
+    # refresh HUD, reload the entity layer.
+    entity_renderer.load_entities(path, world.palette_rgb)
+    if entity_selector != null:
+        entity_selector.set_world_path(path)
+    if entity_edit != null:
+        entity_edit.set_world(world, path)
+    if entity_inspector != null:
+        entity_inspector.set_world_path(path)
+    voxel_editor.init_editor(renderer, main_cam)
+    stereo_rig.reset_pose()
+    hud_ctl.init_controller(status_label, mode_label, pose_label, world, stereo_rig, cam_ctl, logger)
 
 
 func _input(event: InputEvent) -> void:
@@ -327,7 +329,7 @@ func _input(event: InputEvent) -> void:
             entity_edit.use_selected()
             get_viewport().set_input_as_handled()
         elif event.keycode == KEY_F5:
-            _save_world_snapshot()
+            ws.save_snapshot()
             get_viewport().set_input_as_handled()
 
 
@@ -339,7 +341,7 @@ func _open_inspector_for_selection() -> void:
         if logger != null:
             logger.info("entity_inspector_open", {"status": "no selection"})
         return
-    var path := _world_path_absolute + "/entities.json"
+    var path: String = ws.world_path + "/entities.json"
     if not FileAccess.file_exists(path):
         return
     var txt := FileAccess.get_file_as_string(path)
@@ -350,35 +352,14 @@ func _open_inspector_for_selection() -> void:
         return
     for e in d.entities:
         if String(e.get("id", "")) == sel_id:
-            entity_inspector.set_world_path(_world_path_absolute)
+            entity_inspector.set_world_path(ws.world_path)
             entity_inspector.open_for(e)
             return
 
 
 func _on_entity_inspector_committed(_updated: Dictionary) -> void:
-    if entity_renderer != null and _world != null:
-        entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
-
-
-func _save_world_snapshot() -> void:
-    # Snapshot the current world dir into out/snapshots/<base>_<ts>/
-    # Uses _copy_dir_recursive to grab manifest/palette/entities.json/chunks.
-    var src := _world_path_absolute
-    if src == "" or not DirAccess.dir_exists_absolute(src):
-        if logger != null:
-            logger.error("world_snapshot", {"reason": "src missing", "src": src})
-        return
-    var ts := Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
-    var base := src.get_file()
-    if base.ends_with(".vxw"):
-        base = base.substr(0, base.length() - 4)
-    var proj_root := ProjectSettings.globalize_path("res://..")
-    var dst_root := proj_root + "/out/snapshots"
-    DirAccess.make_dir_recursive_absolute(dst_root)
-    var dst := "%s/%s_%s" % [dst_root, base, ts]
-    var ok := _copy_dir_recursive(src, dst)
-    if logger != null:
-        logger.info("world_snapshot", {"src": src, "dst": dst, "ok": ok})
+    if entity_renderer != null and ws.world != null:
+        entity_renderer.load_entities(ws.world_path, ws.world.palette_rgb)
 
 
 # Entity-layer mutations live on entity_edit (see entity_edit_controller.gd).
@@ -407,13 +388,22 @@ func _wire_pause_menu() -> void:
         stereo_rig.reset_pose()
         _close_pause()
     )
-    pause_menu.save_world_requested.connect(_on_save_world_backup)
-    pause_menu.reload_world_requested.connect(_on_reload_world)
-    pause_menu.load_world_requested.connect(_on_load_world_requested)
+    pause_menu.save_world_requested.connect(ws.save_backup)
+    pause_menu.reload_world_requested.connect(func():
+        _close_pause()
+        ws.reload()
+    )
+    pause_menu.load_world_requested.connect(func(p: String):
+        _close_pause()
+        ws.request_load(p)
+    )
     pause_menu.toggle_edit_mode_requested.connect(_on_toggle_edit_mode)
     pause_menu.undo_requested.connect(undo_last_edit)
     pause_menu.material_picker_requested.connect(_on_material_picker_requested)
-    pause_menu.import_litematic_requested.connect(_on_import_litematic_requested)
+    pause_menu.import_litematic_requested.connect(func(p: String):
+        _close_pause()
+        ws.import_litematic(p)
+    )
     pause_menu.toggle_day_night_requested.connect(func():
         env_ctl.toggle_day_night()
         _close_pause()
@@ -490,38 +480,15 @@ func _refresh_undo_label() -> void:
 
 
 func _on_material_picker_requested() -> void:
-    if _world == null:
+    if ws.world == null:
         return
     material_picker.set_current(voxel_editor.get_current_material())
-    material_picker.open(_world)
+    material_picker.open(ws.world)
 
 
 func _on_material_selected(mid: int) -> void:
     voxel_editor.set_current_material(mid)
     logger.info("material_selected", {"material_id": mid})
-
-
-func _on_import_litematic_requested(path: String) -> void:
-    logger.info("import_litematic", {"src": path})
-    _close_pause()
-    var basename: String = path.get_file().get_basename()
-    var out_vxw: String = ProjectSettings.globalize_path("res://../out") + "/" + basename + ".vxw"
-    var proj_root: String = ProjectSettings.globalize_path("res://..")
-    var pixi_cmd := "pixi"
-    var args := [
-        "run", "python",
-        proj_root + "/m3_adapter/litematic_to_vxw.py",
-        path, out_vxw,
-        "--voxel-size", "1.0",
-        "--compression", "gzip",
-    ]
-    var output: Array = []
-    var exit_code: int = OS.execute(pixi_cmd, args, output, true, true)
-    if exit_code != 0:
-        logger.error("import_litematic", {"exit_code": exit_code, "output": output})
-        return
-    logger.info("import_litematic_ok", {"out": out_vxw})
-    _load_world_in_place(out_vxw)
 
 
 func undo_last_edit() -> bool:
@@ -548,16 +515,14 @@ func undo_last_edit() -> bool:
     return true
 
 
-
-
 # Map a world voxel index to its (chunk_coord, local_voxel) and patch the chunk
 # file with a single voxel cell. material_id=0 means clear to air.
 func _patch_voxel_on_disk(world_voxel_index: Vector3i, material_id: int, semantic_id: int) -> void:
-    var ce: int = _world.chunk_extent
+    var ce: int = ws.world.chunk_extent
     var fdiv := Vector3(world_voxel_index) / float(ce)
     var chunk_coord := Vector3i(int(floor(fdiv.x)), int(floor(fdiv.y)), int(floor(fdiv.z)))
     var local := world_voxel_index - chunk_coord * ce
-    var chunk_path: String = _world_path_absolute + "/chunks/%d_%d_%d.chunk" % [
+    var chunk_path: String = ws.world_path + "/chunks/%d_%d_%d.chunk" % [
         chunk_coord.x, chunk_coord.y, chunk_coord.z,
     ]
     var cell := PackedByteArray([material_id, semantic_id, 0, 0])
@@ -570,91 +535,3 @@ func _patch_voxel_on_disk(world_voxel_index: Vector3i, material_id: int, semanti
         VxwWriter.Encoding.RLE,
         VxwWriter.Compression.GZIP,
     )
-
-
-func _on_save_world_backup() -> void:
-    var ts := Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
-    var src := _world_path_absolute
-    var dir := src.get_base_dir()
-    var base := src.get_file()
-    if base.ends_with(".vxw"):
-        base = base.substr(0, base.length() - 4)
-    var dst := "%s/%s_backup_%s.vxw" % [dir, base, ts]
-    var ok := _copy_dir_recursive(src, dst)
-    logger.info("world_backup", {"src": src, "dst": dst, "ok": ok})
-
-
-func _on_reload_world() -> void:
-    logger.info("world_reload", {"path": _world_path_absolute})
-    _close_pause()
-    _load_world_in_place(_world_path_absolute)
-
-
-func _on_load_world_requested(new_path: String) -> void:
-    logger.info("world_load_requested", {"new_path": new_path, "old_path": _world_path_absolute})
-    _close_pause()
-    if not DirAccess.dir_exists_absolute(new_path):
-        logger.error("world_load_requested", {"reason": "dir missing", "path": new_path})
-        return
-    if not FileAccess.file_exists(new_path + "/manifest.json"):
-        logger.error("world_load_requested", {"reason": "manifest.json missing in selected dir", "path": new_path})
-        return
-    _load_world_in_place(new_path)
-
-
-func _load_world_in_place(world_path: String) -> void:
-    # In-place world swap: tear down renderer children + re-init controllers.
-    # No scene reload needed — keeps CanvasLayer / menu state intact.
-    var new_world = VxwLoader.load_world(world_path)
-    if new_world.voxel_count() == 0:
-        logger.error("world_load_in_place", {"reason": "empty world", "path": world_path})
-        return
-    _world = new_world
-    _world_path_absolute = world_path
-    # Tear down old renderer children (MMIs, plane, axes)
-    for child in renderer.get_children():
-        child.queue_free()
-    renderer.build(_world)
-    entity_renderer.load_entities(_world_path_absolute, _world.palette_rgb)
-    if entity_selector != null:
-        entity_selector.set_world_path(_world_path_absolute)
-    if entity_edit != null:
-        entity_edit.set_world(_world, _world_path_absolute)
-    if entity_inspector != null:
-        entity_inspector.set_world_path(_world_path_absolute)
-    # Re-init editor with new world
-    voxel_editor.init_editor(renderer, main_cam)
-    # Reset rig + reset stereo cams sync
-    stereo_rig.reset_pose()
-    # Refresh HUD with new world voxel count / size
-    hud_ctl.init_controller(status_label, mode_label, pose_label, _world, stereo_rig, cam_ctl, logger)
-    logger.info("world_loaded", {
-        "voxels": _world.voxel_count(),
-        "voxel_size_m": _world.voxel_size_meters,
-        "chunk_extent": _world.chunk_extent,
-        "path": _world_path_absolute,
-    })
-
-
-func _copy_dir_recursive(src: String, dst: String) -> bool:
-    if not DirAccess.dir_exists_absolute(src):
-        push_error("[main] copy_dir source missing: " + src)
-        return false
-    DirAccess.make_dir_recursive_absolute(dst)
-    var d := DirAccess.open(src)
-    if d == null:
-        return false
-    d.list_dir_begin()
-    var name := d.get_next()
-    while name != "":
-        if name == "." or name == "..":
-            name = d.get_next()
-            continue
-        var sp := src + "/" + name
-        var dp := dst + "/" + name
-        if d.current_is_dir():
-            _copy_dir_recursive(sp, dp)
-        else:
-            DirAccess.copy_absolute(sp, dp)
-        name = d.get_next()
-    return true
