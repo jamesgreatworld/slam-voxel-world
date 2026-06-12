@@ -5,20 +5,15 @@
 
 extends Node3D
 
-const VxwWriter = preload("res://vxw_writer.gd")
 const VxwLogger = preload("res://logger.gd")
 const BootConfig = preload("res://boot_config.gd")
 const EnvironmentControllerScript = preload("res://environment_controller.gd")
 const WorldSessionScript = preload("res://world_session.gd")
+const EditSessionScript = preload("res://edit_session.gd")
 
 var logger  # VxwLog instance, untyped to avoid class_name registration issues
 var ws: Node
-
-# Undo stack: each entry = {op: "destroy"|"place", vi: Vector3i, material_id: int}
-# - "destroy" entry: the voxel was destroyed; undo re-places it with material_id
-# - "place" entry: a new voxel was placed; undo destroys it
-const _UNDO_CAP: int = 50
-var _undo_stack: Array = []
+var es: Node
 
 @onready var renderer: Node3D = $VoxelRenderer
 @onready var directional_light: DirectionalLight3D = $DirectionalLight3D
@@ -87,6 +82,13 @@ func _ready() -> void:
         status_label.text = "No voxels loaded. Path tried: " + cfg.world_path
         return
 
+    es = Node.new()
+    es.set_script(EditSessionScript)
+    es.name = "EditSession"
+    add_child(es)
+    es.init_session(ws, renderer, voxel_editor, pause_menu, material_picker,
+        cam_ctl, edit_warning, logger)
+
     # Wire everything up
     entity_renderer = Node3D.new()
     entity_renderer.set_script(EntityRendererScript)
@@ -126,7 +128,8 @@ func _ready() -> void:
         entity_renderer, item_picker, entity_placer, entity_selector,
         stereo_rig, logger
     )
-    entity_edit.entity_undo_push.connect(_push_undo)
+    entity_edit.entity_undo_push.connect(es.push_undo)
+    es.set_entity_edit(entity_edit)
 
     entity_inspector = CanvasLayer.new()
     entity_inspector.set_script(EntityInspectorScript)
@@ -169,8 +172,6 @@ func _ready() -> void:
     snap_ctl.init_controller(stereo_rig, cam_ctl, logger)
     snap_ctl.configure_from_cli(cfg.raw_args)
     voxel_editor.init_editor(renderer, main_cam)
-    voxel_editor.voxel_destroyed.connect(_on_voxel_destroyed)
-    voxel_editor.voxel_placed.connect(_on_voxel_placed)
     voxel_editor.set_edit_enabled(false)  # default OFF — opt-in via pause menu
     env_ctl.init_controller(directional_light, world_env, pause_menu, logger)
     ws.world_loaded.connect(_on_world_loaded)
@@ -219,7 +220,7 @@ func _ready() -> void:
                 entity_selector.delete_by_id(first_id)
 
     for _i in cfg.test_undo_times:
-        undo_last_edit()
+        es.undo_last_edit()
 
     if cfg.test_duplicate_first:
         var ent_path2: String = ws.world_path + "/entities.json"
@@ -315,8 +316,8 @@ func _input(event: InputEvent) -> void:
     if event is InputEventKey and event.pressed:
         if event.keycode == KEY_ESCAPE:
             _toggle_pause()
-        elif event.keycode == KEY_Z and event.ctrl_pressed:
-            undo_last_edit()
+        elif event.keycode == KEY_Z and event.ctrl_pressed and es != null:
+            es.undo_last_edit()
         elif event.keycode == KEY_I and item_picker != null:
             item_picker.toggle()
         elif event.keycode == KEY_D and event.ctrl_pressed and entity_edit != null:
@@ -397,9 +398,9 @@ func _wire_pause_menu() -> void:
         _close_pause()
         ws.request_load(p)
     )
-    pause_menu.toggle_edit_mode_requested.connect(_on_toggle_edit_mode)
-    pause_menu.undo_requested.connect(undo_last_edit)
-    pause_menu.material_picker_requested.connect(_on_material_picker_requested)
+    pause_menu.toggle_edit_mode_requested.connect(es.toggle_edit_mode)
+    pause_menu.undo_requested.connect(es.undo_last_edit)
+    pause_menu.material_picker_requested.connect(es.open_material_picker)
     pause_menu.import_litematic_requested.connect(func(p: String):
         _close_pause()
         ws.import_litematic(p)
@@ -408,7 +409,6 @@ func _wire_pause_menu() -> void:
         env_ctl.toggle_day_night()
         _close_pause()
     )
-    material_picker.material_selected.connect(_on_material_selected)
     pause_menu.quit_requested.connect(func():
         logger.info("session_end", {"reason": "menu_quit"})
         get_tree().quit()
@@ -436,102 +436,3 @@ func _close_pause() -> void:
     Input.mouse_mode = _mouse_mode_before_pause
     logger.info("pause", {"opened": false})
 
-
-# ---- R3: voxel editing + persistence ----
-
-func _on_toggle_edit_mode() -> void:
-    var new_state: bool = not bool(voxel_editor.is_edit_enabled())
-    voxel_editor.set_edit_enabled(new_state)
-    cam_ctl.set_orbit_enabled(not new_state)
-    pause_menu.set_edit_mode_label(new_state)
-    edit_warning.visible = new_state
-    logger.info("edit_mode", {"enabled": new_state})
-
-
-func _on_voxel_destroyed(world_voxel_index: Vector3i, _world_position_m: Vector3) -> void:
-    # We don't know the material_id of the destroyed voxel from the signal,
-    # so for undo we restore as material=1 (stone) — pragmatic fallback.
-    # When voxel_editor tracks original material on hover we can pass it through.
-    _push_undo({"op": "destroy", "vi": world_voxel_index, "material_id": 1})
-    _patch_voxel_on_disk(world_voxel_index, 0, 0)
-    logger.info("voxel_destroyed", {
-        "world_voxel": [world_voxel_index.x, world_voxel_index.y, world_voxel_index.z],
-    })
-
-
-func _on_voxel_placed(world_voxel_index: Vector3i, _world_position_m: Vector3, material_id: int) -> void:
-    _push_undo({"op": "place", "vi": world_voxel_index, "material_id": material_id})
-    _patch_voxel_on_disk(world_voxel_index, material_id, 0)
-    logger.info("voxel_placed", {
-        "world_voxel": [world_voxel_index.x, world_voxel_index.y, world_voxel_index.z],
-        "material_id": material_id,
-    })
-
-
-func _push_undo(entry: Dictionary) -> void:
-    _undo_stack.append(entry)
-    if _undo_stack.size() > _UNDO_CAP:
-        _undo_stack.pop_front()
-    pause_menu.set_undo_count(_undo_stack.size())
-
-
-func _refresh_undo_label() -> void:
-    pause_menu.set_undo_count(_undo_stack.size())
-
-
-func _on_material_picker_requested() -> void:
-    if ws.world == null:
-        return
-    material_picker.set_current(voxel_editor.get_current_material())
-    material_picker.open(ws.world)
-
-
-func _on_material_selected(mid: int) -> void:
-    voxel_editor.set_current_material(mid)
-    logger.info("material_selected", {"material_id": mid})
-
-
-func undo_last_edit() -> bool:
-    if _undo_stack.is_empty():
-        logger.info("undo", {"status": "stack empty"})
-        return false
-    var entry: Dictionary = _undo_stack.pop_back()
-    var op: String = entry["op"]
-    if op == "destroy":
-        var vi: Vector3i = entry["vi"]
-        var mid: int = int(entry["material_id"])
-        if renderer.add_voxel(vi, mid):
-            voxel_editor._occupied[vi] = true
-            _patch_voxel_on_disk(vi, mid, 0)
-    elif op == "place":
-        var vi2: Vector3i = entry["vi"]
-        if renderer.hide_voxel(vi2):
-            voxel_editor._occupied.erase(vi2)
-            _patch_voxel_on_disk(vi2, 0, 0)
-    elif op.begins_with("entity_"):
-        entity_edit.apply_undo(entry)
-    pause_menu.set_undo_count(_undo_stack.size())
-    logger.info("undo", {"op": op, "stack_left": _undo_stack.size()})
-    return true
-
-
-# Map a world voxel index to its (chunk_coord, local_voxel) and patch the chunk
-# file with a single voxel cell. material_id=0 means clear to air.
-func _patch_voxel_on_disk(world_voxel_index: Vector3i, material_id: int, semantic_id: int) -> void:
-    var ce: int = ws.world.chunk_extent
-    var fdiv := Vector3(world_voxel_index) / float(ce)
-    var chunk_coord := Vector3i(int(floor(fdiv.x)), int(floor(fdiv.y)), int(floor(fdiv.z)))
-    var local := world_voxel_index - chunk_coord * ce
-    var chunk_path: String = ws.world_path + "/chunks/%d_%d_%d.chunk" % [
-        chunk_coord.x, chunk_coord.y, chunk_coord.z,
-    ]
-    var cell := PackedByteArray([material_id, semantic_id, 0, 0])
-    VxwWriter.patch_voxel(
-        chunk_path,
-        chunk_coord,
-        local,
-        cell,
-        ce,
-        VxwWriter.Encoding.RLE,
-        VxwWriter.Compression.GZIP,
-    )
