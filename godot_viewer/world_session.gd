@@ -20,7 +20,7 @@ func init_session(renderer: Node3D, logger) -> void:
     _logger = logger
 
 
-func resolve(p: String) -> String:
+func _resolve(p: String) -> String:
     if p.is_absolute_path():
         return p
     var base := ProjectSettings.globalize_path("res://")
@@ -31,7 +31,7 @@ func resolve(p: String) -> String:
 # decides what to show. Does NOT emit world_loaded — boot wiring in main._ready
 # runs in explicit order because the other controllers don't exist yet.
 func load_initial(world_path_raw: String) -> bool:
-    world_path = resolve(world_path_raw)
+    world_path = _resolve(world_path_raw)
     world = VxwLoader.load_world(world_path)
     if world.voxel_count() == 0:
         _logger.error("world", {"reason": "empty load", "path": world_path_raw})
