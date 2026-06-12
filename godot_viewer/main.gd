@@ -18,22 +18,8 @@ var es: Node
 @onready var renderer: Node3D = $VoxelRenderer
 @onready var directional_light: DirectionalLight3D = $DirectionalLight3D
 @onready var world_env: WorldEnvironment = $WorldEnvironment
-const EntityRendererScript = preload("res://entity_renderer.gd")
-const ItemPickerScript = preload("res://item_picker.gd")
-const EntityPlacerScript = preload("res://entity_placer.gd")
-const EntitySelectorScript = preload("res://entity_selector.gd")
-const EntityEditControllerScript = preload("res://entity_edit_controller.gd")
-const EntityInspectorScript = preload("res://entity_inspector.gd")
-const TopToolbarScript = preload("res://top_toolbar.gd")
-const EntityContextBarScript = preload("res://entity_context_bar.gd")
-var entity_renderer: Node3D = null
-var item_picker: CanvasLayer = null
-var entity_placer: Node3D = null
-var entity_selector: Node3D = null
-var entity_edit: Node = null
-var entity_inspector: CanvasLayer = null
-var top_toolbar: CanvasLayer = null
-var entity_context_bar: CanvasLayer = null
+const EntitySubsystemScript = preload("res://entity_subsystem.gd")
+var ents: Node
 @onready var stereo_rig: Node3D = $StereoRig  # has stereo_rig_controller.gd
 @onready var cam_ctl: Node = $CameraController
 @onready var hud_ctl: Node = $HudController
@@ -89,79 +75,12 @@ func _ready() -> void:
     es.init_session(ws, renderer, voxel_editor, pause_menu, material_picker,
         cam_ctl, edit_warning, logger)
 
-    # Wire everything up
-    entity_renderer = Node3D.new()
-    entity_renderer.set_script(EntityRendererScript)
-    entity_renderer.name = "EntityRenderer"
-    add_child(entity_renderer)
-    entity_renderer.init_renderer(logger)
-    entity_renderer.load_entities(ws.world_path, ws.world.palette_rgb)
-
-    item_picker = CanvasLayer.new()
-    item_picker.set_script(ItemPickerScript)
-    item_picker.name = "ItemPicker"
-    add_child(item_picker)
-    item_picker.init_picker(logger)
-    item_picker.set_presets(entity_renderer.get_item_presets())
-
-    entity_placer = Node3D.new()
-    entity_placer.set_script(EntityPlacerScript)
-    entity_placer.name = "EntityPlacer"
-    add_child(entity_placer)
-    entity_placer.init_placer(main_cam, voxel_editor, logger)
-
-    entity_selector = Node3D.new()
-    entity_selector.set_script(EntitySelectorScript)
-    entity_selector.name = "EntitySelector"
-    add_child(entity_selector)
-    entity_selector.init_selector(
-        main_cam, ws.world_path, entity_renderer,
-        entity_placer, voxel_editor, logger
-    )
-
-    entity_edit = Node.new()
-    entity_edit.set_script(EntityEditControllerScript)
-    entity_edit.name = "EntityEditController"
-    add_child(entity_edit)
-    entity_edit.init_controller(
-        ws.world_path, ws.world,
-        entity_renderer, item_picker, entity_placer, entity_selector,
-        stereo_rig, logger
-    )
-    entity_edit.entity_undo_push.connect(es.push_undo)
-    es.set_entity_edit(entity_edit)
-
-    entity_inspector = CanvasLayer.new()
-    entity_inspector.set_script(EntityInspectorScript)
-    entity_inspector.name = "EntityInspector"
-    add_child(entity_inspector)
-    entity_inspector.init_inspector(ws.world_path, logger)
-    entity_inspector.entity_committed.connect(_on_entity_inspector_committed)
-
-    top_toolbar = CanvasLayer.new()
-    top_toolbar.set_script(TopToolbarScript)
-    top_toolbar.name = "TopToolbar"
-    add_child(top_toolbar)
-    top_toolbar.items_pressed.connect(func(): item_picker.toggle())
-    top_toolbar.snapshot_pressed.connect(ws.save_snapshot)
-    top_toolbar.menu_pressed.connect(_toggle_pause)
-
-    entity_context_bar = CanvasLayer.new()
-    entity_context_bar.set_script(EntityContextBarScript)
-    entity_context_bar.name = "EntityContextBar"
-    add_child(entity_context_bar)
-    entity_context_bar.inspector_pressed.connect(_open_inspector_for_selection)
-    entity_context_bar.duplicate_pressed.connect(func(): entity_edit.duplicate_selected())
-    entity_context_bar.physics_toggle_pressed.connect(func(): entity_selector.toggle_physics_on_selected())
-    entity_context_bar.rotate_pressed.connect(_on_context_rotate)
-    entity_context_bar.delete_pressed.connect(_on_context_delete)
-    entity_context_bar.use_pressed.connect(func(): entity_edit.use_selected())
-    entity_selector.entity_selected.connect(func(id: String):
-        entity_context_bar.on_entity_selected(id, entity_selector.get_selected_label_name())
-    )
-    entity_selector.selection_cleared.connect(func():
-        entity_context_bar.on_selection_cleared()
-    )
+    ents = Node.new()
+    ents.set_script(EntitySubsystemScript)
+    ents.name = "EntitySubsystem"
+    add_child(ents)
+    ents.build(main_cam, voxel_editor, stereo_rig, ws, es, logger)
+    ents.menu_requested.connect(_toggle_pause)
 
     left_vp.world_3d = get_viewport().world_3d
     right_vp.world_3d = get_viewport().world_3d
@@ -195,11 +114,11 @@ func _ready() -> void:
     if cfg.rig_pose_spec != "":
         var xf := BootConfig.parse_rig_pose(cfg.rig_pose_spec)
         call_deferred("_set_rig_xform_deferred", xf)
-    if cfg.open_item_picker and item_picker != null:
-        item_picker.open()
+    if cfg.open_item_picker and ents.picker != null:
+        ents.picker.open()
     for sid in cfg.spawn_items:
         if sid != "":
-            entity_edit.spawn_in_front_of_rig(String(sid))
+            ents.edit.spawn_in_front_of_rig(String(sid))
 
     if cfg.test_delete_first or cfg.test_rotate_first_deg != 0.0 or cfg.test_grab_first_set:
         var ent_path: String = ws.world_path + "/entities.json"
@@ -213,11 +132,11 @@ func _ready() -> void:
         if rec_list.size() > 0:
             var first_id := String(rec_list[0].get("id", ""))
             if cfg.test_grab_first_set:
-                entity_selector.grab_to(first_id, cfg.test_grab_first_to)
+                ents.selector.grab_to(first_id, cfg.test_grab_first_to)
             if cfg.test_rotate_first_deg != 0.0:
-                entity_selector.rotate_by_id(first_id, deg_to_rad(cfg.test_rotate_first_deg))
+                ents.selector.rotate_by_id(first_id, deg_to_rad(cfg.test_rotate_first_deg))
             if cfg.test_delete_first:
-                entity_selector.delete_by_id(first_id)
+                ents.selector.delete_by_id(first_id)
 
     for _i in cfg.test_undo_times:
         es.undo_last_edit()
@@ -233,8 +152,8 @@ func _ready() -> void:
                     recs = dd.entities
         if recs.size() > 0:
             var fid := String(recs[0].get("id", ""))
-            entity_selector._selected_id = fid
-            entity_edit.duplicate_selected()
+            ents.selector._selected_id = fid
+            ents.edit.duplicate_selected()
 
     if cfg.test_snapshot_world:
         ws.save_snapshot()
@@ -251,7 +170,7 @@ func _ready() -> void:
                 var dd3 = JSON.parse_string(t3)
                 if dd3 != null and dd3.has("entities"):
                     recs3 = dd3.entities
-        var presets3: Dictionary = entity_renderer.get_item_presets()
+        var presets3: Dictionary = ents.ent_renderer.get_item_presets()
         var picked_id := ""
         var picked_idx := -1
         for i in recs3.size():
@@ -265,8 +184,8 @@ func _ready() -> void:
                 picked_idx = i
                 break
         if picked_id != "":
-            entity_selector._selected_id = picked_id
-            var ok3: bool = bool(entity_edit.use_selected())
+            ents.selector._selected_id = picked_id
+            var ok3: bool = bool(ents.edit.use_selected())
             logger.info("test_toggle_behavior_on_first",
                         {"id": picked_id, "index": picked_idx, "applied": ok3})
         else:
@@ -299,14 +218,7 @@ func _set_rig_xform_deferred(xf: Transform3D) -> void:
 
 func _on_world_loaded(world, path: String) -> void:
     # In-place swap rebind: re-init editor with the new world, reset rig,
-    # refresh HUD, reload the entity layer.
-    entity_renderer.load_entities(path, world.palette_rgb)
-    if entity_selector != null:
-        entity_selector.set_world_path(path)
-    if entity_edit != null:
-        entity_edit.set_world(world, path)
-    if entity_inspector != null:
-        entity_inspector.set_world_path(path)
+    # refresh HUD. Entity rebind lives in entity_subsystem.
     voxel_editor.init_editor(renderer, main_cam)
     stereo_rig.reset_pose()
     hud_ctl.init_controller(status_label, mode_label, pose_label, world, stereo_rig, cam_ctl, logger)
@@ -318,65 +230,20 @@ func _input(event: InputEvent) -> void:
             _toggle_pause()
         elif event.keycode == KEY_Z and event.ctrl_pressed and es != null:
             es.undo_last_edit()
-        elif event.keycode == KEY_I and item_picker != null:
-            item_picker.toggle()
-        elif event.keycode == KEY_D and event.ctrl_pressed and entity_edit != null:
-            entity_edit.duplicate_selected()
+        elif event.keycode == KEY_I and ents != null and ents.picker != null:
+            ents.picker.toggle()
+        elif event.keycode == KEY_D and event.ctrl_pressed and ents != null and ents.edit != null:
+            ents.edit.duplicate_selected()
             get_viewport().set_input_as_handled()
-        elif event.keycode == KEY_F2 and entity_inspector != null and entity_selector != null:
-            _open_inspector_for_selection()
+        elif event.keycode == KEY_F2 and ents != null:
+            ents.open_inspector_for_selection()
             get_viewport().set_input_as_handled()
-        elif event.keycode == KEY_U and entity_edit != null:
-            entity_edit.use_selected()
+        elif event.keycode == KEY_U and ents != null and ents.edit != null:
+            ents.edit.use_selected()
             get_viewport().set_input_as_handled()
         elif event.keycode == KEY_F5:
             ws.save_snapshot()
             get_viewport().set_input_as_handled()
-
-
-func _open_inspector_for_selection() -> void:
-    if entity_inspector == null or entity_selector == null:
-        return
-    var sel_id: String = String(entity_selector._selected_id)
-    if sel_id == "":
-        if logger != null:
-            logger.info("entity_inspector_open", {"status": "no selection"})
-        return
-    var path: String = ws.world_path + "/entities.json"
-    if not FileAccess.file_exists(path):
-        return
-    var txt := FileAccess.get_file_as_string(path)
-    if txt.is_empty():
-        return
-    var d = JSON.parse_string(txt)
-    if d == null or not d.has("entities"):
-        return
-    for e in d.entities:
-        if String(e.get("id", "")) == sel_id:
-            entity_inspector.set_world_path(ws.world_path)
-            entity_inspector.open_for(e)
-            return
-
-
-func _on_entity_inspector_committed(_updated: Dictionary) -> void:
-    if entity_renderer != null and ws.world != null:
-        entity_renderer.load_entities(ws.world_path, ws.world.palette_rgb)
-
-
-# Entity-layer mutations live on entity_edit (see entity_edit_controller.gd).
-# main.gd only routes undo entries through it.
-
-
-func _on_context_rotate(yaw_delta_rad: float) -> void:
-    var sid: String = entity_selector.get_selected_id()
-    if sid != "":
-        entity_selector.rotate_by_id(sid, yaw_delta_rad)
-
-
-func _on_context_delete() -> void:
-    var sid: String = entity_selector.get_selected_id()
-    if sid != "":
-        entity_selector.delete_by_id(sid)
 
 
 func _wire_pause_menu() -> void:
