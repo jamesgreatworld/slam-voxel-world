@@ -501,7 +501,7 @@ else                      → selector LMB 用于选中
 
 | # | 违规 | 模块 | 影响 |
 |---|---|---|---|
-| 8 | `main.gd` 又涨到 450+ 行（M2+wiring 全加进去） | main.gd | 跟 §6.1 同病复发，应拆 boot/world/edit 三个 controller |
+| 8 | ~~`main.gd` 又涨到 450+ 行（M2+wiring 全加进去）~~ **已修(2026-06-12)**：拆为 boot_config / world_session / edit_session / entity_subsystem / environment_controller / test_hooks_controller，main.gd 收缩为 217 行瘦壳；`world_session.world_loaded` 信号即 §12 P1 热重载的接缝 | main.gd | — |
 | 9 | entity 编辑没 undo/redo（voxel 有） | entity_selector | 误删/误移动无法恢复，应加 entity undo stack |
 | 10 | `entity_renderer.gd:ITEM_PACK_COMPILED` 路径硬编 `res://../m3_adapter/...` | entity_renderer | 项目移动会破；应在 ProjectSettings 加 setting key |
 | 11 | `entity_selector.ENTITY_META_KEY` 跟 `entity_renderer.ENTITY_META_KEY` 重复定义 | 两个文件 | 同步维护，应抽 common.gd 单点 |
