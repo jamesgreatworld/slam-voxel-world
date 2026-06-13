@@ -10,6 +10,7 @@ version = "0.1.0"
 [dependencies]
 python = "3.11.*"
 numpy = ">=2.4.6,<3"
+scipy = ">=1.11,<2"
 zstandard = ">=0.25.0,<0.26"
 pytest = ">=9.0.3,<10"
 pyyaml = ">=6.0.3,<7"
