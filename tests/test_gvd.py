@@ -61,3 +61,33 @@ def test_esdf_box_center_distance():
     pcoord = parent[:, center[0], center[1], center[2]]
     # nearest obstacle must actually BE an obstacle
     assert occ[pcoord[0], pcoord[1], pcoord[2]]
+
+
+from m3_adapter.voxel_gvd import extract_gvd
+
+
+def test_gvd_is_bisector_between_two_obstacles():
+    # two point obstacles along x; GVD = perpendicular bisector plane x=10
+    n = 21
+    occ = np.zeros((n, n, n), dtype=bool)
+    occ[2, 10, 10] = True
+    occ[18, 10, 10] = True
+    free = ~occ
+    dist_m, parent = compute_esdf(occ, voxel_size=1.0)
+    gvd = extract_gvd(free, dist_m, parent, voxel_size=1.0, d_min=1.0, theta_sep=2.0)
+    # midplane x=10 (equidistant to both) contains GVD voxels
+    assert gvd[10].any()
+    # a cell clearly nearer obstacle A is not on the GVD
+    assert not gvd[4, 10, 10]
+
+
+def test_gvd_respects_free_mask_and_dmin():
+    occ, center = _hollow_box(inner=21)
+    free = flood_free_space(occ, center)
+    dist_m, parent = compute_esdf(occ, voxel_size=0.5)
+    gvd = extract_gvd(free, dist_m, parent, voxel_size=0.5, d_min=0.20, theta_sep=0.40)
+    # every GVD voxel is free and at least d_min from any obstacle
+    assert gvd[~free].sum() == 0
+    assert (dist_m[gvd] >= 0.20 - 1e-9).all()
+    # the medial axis of a box room is non-empty
+    assert gvd.any()
