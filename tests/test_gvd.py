@@ -46,3 +46,18 @@ def test_flood_does_not_leak_through_sealed_wall():
     occ[6, 3, 3] = False
     free2 = flood_free_space(occ, (3, 3, 3))
     assert free2[9, 3, 3]
+
+
+from m3_adapter.voxel_gvd import compute_esdf
+
+
+def test_esdf_box_center_distance():
+    occ, center = _hollow_box(inner=21)   # interior 1..21, center at 11
+    dist_m, parent = compute_esdf(occ, voxel_size=0.5)
+    # centre is 11 voxels from the nearest wall (index 0 or 22) -> 11 * 0.5 m
+    assert dist_m[center] == pytest.approx(11 * 0.5, abs=1e-6)
+    # parent is the (3, nx,ny,nz) index of the nearest obstacle voxel
+    assert parent.shape == (3,) + occ.shape
+    pcoord = parent[:, center[0], center[1], center[2]]
+    # nearest obstacle must actually BE an obstacle
+    assert occ[pcoord[0], pcoord[1], pcoord[2]]

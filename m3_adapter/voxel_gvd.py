@@ -31,3 +31,28 @@ def flood_free_space(occupied: np.ndarray, seed: tuple[int, int, int]) -> np.nda
     structure = ndimage.generate_binary_structure(3, 1)  # 6-connectivity
     labels, _ = ndimage.label(free, structure=structure)
     return labels == labels[tuple(seed)]
+
+
+def compute_esdf(
+    occupied: np.ndarray, voxel_size: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Euclidean distance field to the nearest obstacle, + the obstacle index.
+
+    Computed over the WHOLE grid against the true obstacle set `occupied`
+    (not against the flooded free set — see plan's algorithm note). The
+    caller restricts to flooded free space in extract_gvd.
+
+    Args:
+        occupied: bool array (nx,ny,nz); True = obstacle.
+        voxel_size: metres per voxel.
+
+    Returns:
+        (dist_m, parent):
+            dist_m: float array (nx,ny,nz), metres to nearest obstacle.
+            parent: int array (3, nx,ny,nz), index of that nearest obstacle
+                    voxel ("basis point" in Hydra terms).
+    """
+    dist_vox, parent = ndimage.distance_transform_edt(
+        ~occupied, return_indices=True
+    )
+    return dist_vox * voxel_size, parent
