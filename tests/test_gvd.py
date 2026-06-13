@@ -150,3 +150,20 @@ def test_densify_and_overlay_roundtrip(tmp_path):
         (ch.voxels["material_id"] == gvd_mat.id).any() for ch in w2.chunks.values()
     )
     assert found
+
+
+def test_cli_end_to_end_on_box(tmp_path):
+    from m3_adapter.gvd_to_vxw import run_gvd
+    src = _make_box_vxw(tmp_path)
+    out = tmp_path / "box_gvd.vxw"
+    stats = run_gvd(
+        str(src), str(out), seed_metres=None,
+        d_min=0.20, theta_sep=0.40, pad=1,
+    )
+    # stats dict reports the run
+    assert stats["gvd_voxels"] > 0
+    assert 0.0 < stats["free_fraction"] <= 1.0
+    # output world loads and carries the glowing skeleton material
+    w = vxw.read_world(out)
+    names = [m.name for m in w.palette.materials]
+    assert "gvd_skeleton" in names

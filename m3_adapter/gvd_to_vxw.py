@@ -136,3 +136,101 @@ def overlay_gvd_into_world(world, gvd: np.ndarray, vmin: np.ndarray) -> None:
     keys = np.array(list(world.chunks.keys()))
     world.manifest.bounds_chunks_min = tuple(int(x) for x in keys.min(axis=0))
     world.manifest.bounds_chunks_max = tuple(int(x) + 1 for x in keys.max(axis=0))
+
+
+def run_gvd(
+    input_vxw: str,
+    output_vxw: str,
+    seed_metres=None,
+    d_min: float = 0.20,
+    theta_sep: float = 0.40,
+    pad: int = 1,
+) -> dict:
+    """Full batch GVD pipeline. Returns a stats dict (also printed by main)."""
+    t0 = time.perf_counter()
+    world = vxw.read_world(Path(input_vxw))
+    vsize = world.manifest.voxel_size_meters
+
+    occ, vmin = densify_occupancy(world, pad=pad)
+    t_dense = time.perf_counter()
+
+    seed = resolve_seed(
+        occ, vmin, vsize, seed_metres=seed_metres,
+        spawn_hint=world.manifest.spawn_hint,
+    )
+    free = flood_free_space(occ, seed)
+    free_fraction = float(free.sum()) / float(free.size)
+    t_flood = time.perf_counter()
+
+    dist_m, parent = compute_esdf(occ, vsize)
+    gvd = extract_gvd(free, dist_m, parent, vsize, d_min=d_min, theta_sep=theta_sep)
+    t_gvd = time.perf_counter()
+
+    overlay_gvd_into_world(world, gvd, vmin)
+    vxw.write_world(Path(output_vxw), world)
+    t_write = time.perf_counter()
+
+    stats = {
+        "voxel_size_m": vsize,
+        "bbox_dims": tuple(int(x) for x in occ.shape),
+        "seed_idx": tuple(int(x) for x in seed),
+        "free_cells": int(free.sum()),
+        "free_fraction": free_fraction,
+        "gvd_voxels": int(gvd.sum()),
+        "t_densify_s": round(t_dense - t0, 2),
+        "t_flood_s": round(t_flood - t_dense, 2),
+        "t_gvd_s": round(t_gvd - t_flood, 2),
+        "t_write_s": round(t_write - t_gvd, 2),
+        "t_total_s": round(t_write - t0, 2),
+        "leak_warning": free_fraction > 0.5,
+    }
+    print(f"[gvd] bbox {stats['bbox_dims']} voxel {vsize} m")
+    print(f"[gvd] seed (dense idx) {stats['seed_idx']}")
+    print(
+        f"[gvd] flood free: {stats['free_cells']} cells "
+        f"= {free_fraction:.1%} of bbox"
+    )
+    if stats["leak_warning"]:
+        print(
+            "[gvd] WARN: flood fills >50% of bbox — likely leaking through "
+            "wall/ceiling holes; inspect the result, consider --seed or the "
+            "2.5D fallback (design §4)."
+        )
+    print(f"[gvd] GVD skeleton voxels: {stats['gvd_voxels']}")
+    print(
+        f"[gvd] timing s: densify={stats['t_densify_s']} flood={stats['t_flood_s']} "
+        f"gvd={stats['t_gvd_s']} write={stats['t_write_s']} total={stats['t_total_s']}"
+    )
+    return stats
+
+
+def _parse_seed(s: str):
+    parts = s.split(",")
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError("--seed needs 'x,y,z' in metres")
+    return [float(p) for p in parts]
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("input_vxw", type=str)
+    ap.add_argument("output_vxw", type=str)
+    ap.add_argument(
+        "--seed", type=_parse_seed, default=None,
+        help="interior seed point 'x,y,z' in metres (overrides spawn_hint/auto)",
+    )
+    ap.add_argument("--d-min", type=float, default=0.20,
+                    help="min clearance (m) for a GVD voxel (drops surface noise)")
+    ap.add_argument("--theta-sep", type=float, default=0.40,
+                    help="min parent spacing (m) to count as different obstacles")
+    ap.add_argument("--pad", type=int, default=1,
+                    help="free-voxel margin around geometry for flooding")
+    args = ap.parse_args()
+    run_gvd(
+        args.input_vxw, args.output_vxw, seed_metres=args.seed,
+        d_min=args.d_min, theta_sep=args.theta_sep, pad=args.pad,
+    )
+
+
+if __name__ == "__main__":
+    main()
