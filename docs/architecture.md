@@ -635,3 +635,11 @@ pixi run python m3_adapter/voxel_postprocess.py out/14floor_raw.vxw out/14floor_
 - spec.md 仍是唯一权威；P3 落地时在 spec 加"传输层"一节，文件形态与流形态共享同一 byte-level 定义。
 - 与 §10.6 同规矩：**不要提前做**。每阶段只在触发条件出现时启动。
 
+---
+
+## 13. 远期愿景指针
+
+先验引导的智能建图（世界模型 + 几何/语义/物理先验 + MAP 优化）见 **`docs/vision.md`**（Phase ④）。
+对日常开发唯一有约束力的是其 §4 数据架构原则：**游戏世界层（.vxw chunks）与建图工作层（体积层 sidecar）永不混置**；
+核心 4 字节体素记录不加 surface 标志、不加概率字段（定论与理由见 vision.md §4.1）。
+
