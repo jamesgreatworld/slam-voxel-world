@@ -151,6 +151,7 @@ def run_gvd(
     d_min: float = 0.20,
     theta_sep: float = 0.40,
     pad: int = 1,
+    band_max: float | None = 1.0,
 ) -> dict:
     """Full batch GVD pipeline. Returns a stats dict (also printed by main)."""
     t0 = time.perf_counter()
@@ -165,10 +166,17 @@ def run_gvd(
         spawn_hint=world.manifest.spawn_hint,
     )
     free = flood_free_space(occ, seed)
-    free_fraction = float(free.sum()) / float(free.size)
+    flood_fraction = float(free.sum()) / float(free.size)
     t_flood = time.perf_counter()
 
     dist_m, parent = compute_esdf(occ, vsize)
+
+    # shell-band clip: restrict free to cells within band_max metres of a surface
+    if band_max is not None and band_max > 0:
+        free = free & (dist_m <= band_max)
+
+    free_fraction = float(free.sum()) / float(free.size)
+
     gvd = extract_gvd(free, dist_m, parent, vsize, d_min=d_min, theta_sep=theta_sep)
     t_gvd = time.perf_counter()
 
@@ -181,28 +189,26 @@ def run_gvd(
         "bbox_dims": tuple(int(x) for x in occ.shape),
         "seed_idx": tuple(int(x) for x in seed),
         "free_cells": int(free.sum()),
+        "flood_fraction": flood_fraction,
         "free_fraction": free_fraction,
+        "band_max": band_max,
         "gvd_voxels": int(gvd.sum()),
         "t_densify_s": round(t_dense - t0, 2),
         "t_flood_s": round(t_flood - t_dense, 2),
         "t_gvd_s": round(t_gvd - t_flood, 2),
         "t_write_s": round(t_write - t_gvd, 2),
         "t_total_s": round(t_write - t0, 2),
-        "leak_warning": free_fraction > 0.5,
+        "leak_warning": flood_fraction > 0.5,
     }
     print(f"[gvd] bbox {stats['bbox_dims']} voxel {vsize} m")
     print(f"[gvd] seed (dense idx) {stats['seed_idx']}")
-    print(
-        f"[gvd] flood free: {stats['free_cells']} cells "
-        f"= {free_fraction:.1%} of bbox"
-    )
+    print(f"[gvd] flood free: {flood_fraction:.1%} of bbox (pre-band)")
     if stats["leak_warning"]:
         print(
-            "[gvd] WARN: flood fills >50% of bbox — likely leaking through "
-            "wall/ceiling holes; inspect the result, consider --seed or the "
-            "2.5D fallback (design §4)."
+            f"[gvd] note: scan is open (flood >50%); shell-band clip bounds it. "
+            f"band_max={band_max} m -> {free_fraction * 100:.1f}% of bbox kept"
         )
-    print(f"[gvd] GVD skeleton voxels: {stats['gvd_voxels']}")
+    print(f"[gvd] GVD skeleton voxels: {stats['gvd_voxels']} (band_max={band_max} m)")
     print(
         f"[gvd] timing s: densify={stats['t_densify_s']} flood={stats['t_flood_s']} "
         f"gvd={stats['t_gvd_s']} write={stats['t_write_s']} total={stats['t_total_s']}"
@@ -231,10 +237,14 @@ def main() -> None:
                     help="min parent spacing (m) to count as different obstacles")
     ap.add_argument("--pad", type=int, default=1,
                     help="free-voxel margin around geometry for flooding")
+    ap.add_argument("--band-max", type=float, default=1.0,
+                    help="shell-band: keep only free cells within this many "
+                         "metres of a surface (<=0 disables the band)")
     args = ap.parse_args()
+    bmax = args.band_max if args.band_max and args.band_max > 0 else None
     run_gvd(
         args.input_vxw, args.output_vxw, seed_metres=args.seed,
-        d_min=args.d_min, theta_sep=args.theta_sep, pad=args.pad,
+        d_min=args.d_min, theta_sep=args.theta_sep, pad=args.pad, band_max=bmax,
     )
 
 

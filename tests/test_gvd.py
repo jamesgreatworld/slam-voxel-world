@@ -167,3 +167,32 @@ def test_cli_end_to_end_on_box(tmp_path):
     w = vxw.read_world(out)
     names = [m.name for m in w.palette.materials]
     assert "gvd_skeleton" in names
+
+
+def test_band_restricts_free_to_shell():
+    # the band invariant: with a band, every GVD voxel is within band_max of a
+    # surface; without a band, the GVD reaches deeper (into the room centre).
+    occ, center = _hollow_box(inner=21)
+    free = flood_free_space(occ, center)
+    dist_m, parent = compute_esdf(occ, voxel_size=0.5)
+    band = 1.0
+    free_band = free & (dist_m <= band)
+    gvd_band = extract_gvd(free_band, dist_m, parent, 0.5, d_min=0.20, theta_sep=0.40)
+    assert gvd_band.any()
+    assert (dist_m[gvd_band] <= band + 1e-9).all()
+    gvd_full = extract_gvd(free, dist_m, parent, 0.5, d_min=0.20, theta_sep=0.40)
+    assert (dist_m[gvd_full] > band).any()   # unbanded reaches deeper
+
+
+def test_run_gvd_band_reduces_and_records(tmp_path):
+    from m3_adapter.gvd_to_vxw import run_gvd
+    src = _make_box_vxw(tmp_path)
+    banded = run_gvd(str(src), str(tmp_path / "b.vxw"), seed_metres=None,
+                     d_min=0.20, theta_sep=0.40, pad=1, band_max=1.0)
+    unbanded = run_gvd(str(src), str(tmp_path / "n.vxw"), seed_metres=None,
+                       d_min=0.20, theta_sep=0.40, pad=1, band_max=None)
+    assert banded["band_max"] == 1.0
+    assert banded["gvd_voxels"] <= unbanded["gvd_voxels"]
+    # stats expose both the (leaky) flood fraction and the post-band free fraction
+    assert "flood_fraction" in banded and "free_fraction" in banded
+    assert banded["free_fraction"] <= banded["flood_fraction"] + 1e-9
