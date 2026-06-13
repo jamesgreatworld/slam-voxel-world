@@ -11,14 +11,20 @@ ESDF/parent are transient (numpy only); the core .vxw format is untouched
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from pathlib import Path
 
 import numpy as np
 from scipy import ndimage
 
-import vxw_format as vxw
-from m3_adapter.voxel_gvd import flood_free_space, compute_esdf, extract_gvd
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import vxw_format as vxw  # noqa: E402
+from m3_adapter.voxel_gvd import (  # noqa: E402
+    flood_free_space,
+    compute_esdf,
+    extract_gvd,
+)
 
 GVD_MATERIAL_NAME = "gvd_skeleton"
 GVD_COLOR = (0, 255, 255)  # cyan
