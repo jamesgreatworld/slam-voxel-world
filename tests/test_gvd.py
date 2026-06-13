@@ -91,3 +91,62 @@ def test_gvd_respects_free_mask_and_dmin():
     assert (dist_m[gvd] >= 0.20 - 1e-9).all()
     # the medial axis of a box room is non-empty
     assert gvd.any()
+
+
+import vxw_format as vxw
+from m3_adapter.common import build_concrete_palette
+from m3_adapter.gvd_to_vxw import densify_occupancy, resolve_seed, overlay_gvd_into_world
+
+
+def _make_box_vxw(tmp_path, extent=32, vsize=0.5):
+    """A hollow box room in chunk (0,0,0): walls at the 0 and 20 faces."""
+    pal = build_concrete_palette()
+    arr = np.zeros((extent,) * 3, dtype=vxw.VOXEL_DTYPE)
+    occ = np.zeros((21, 21, 21), dtype=bool)
+    occ[0] = occ[20] = True
+    occ[:, 0] = occ[:, 20] = True
+    occ[:, :, 0] = occ[:, :, 20] = True
+    ii = np.argwhere(occ)
+    arr["material_id"][ii[:, 0], ii[:, 1], ii[:, 2]] = 1
+    arr["semantic_id"][ii[:, 0], ii[:, 1], ii[:, 2]] = 1
+    chunks = {(0, 0, 0): vxw.Chunk(coord=(0, 0, 0), voxels=arr)}
+    man = vxw.Manifest(
+        world_id="test", voxel_size_meters=vsize, chunk_extent=extent,
+        bounds_chunks_min=(0, 0, 0), bounds_chunks_max=(1, 1, 1),
+    )
+    w = vxw.World(manifest=man, palette=pal, chunks=chunks)
+    p = tmp_path / "box.vxw"
+    vxw.write_world(p, w)
+    return p
+
+
+def test_densify_and_overlay_roundtrip(tmp_path):
+    p = _make_box_vxw(tmp_path)
+    world = vxw.read_world(p)
+    occ, vmin = densify_occupancy(world, pad=1)
+    # box walls span world-voxels 0..20 -> with pad=1, vmin = (-1,-1,-1)
+    assert tuple(int(x) for x in vmin) == (-1, -1, -1)
+    assert occ.dtype == bool and occ.any()
+
+    seed = resolve_seed(occ, vmin, voxel_size=0.5)  # auto: deepest interior point
+    assert not occ[seed]
+
+    free = flood_free_space(occ, seed)
+    dist_m, parent = compute_esdf(occ, 0.5)
+    gvd = extract_gvd(free, dist_m, parent, 0.5, d_min=0.20, theta_sep=0.40)
+    assert gvd.any()
+
+    n_mat_before = len(world.palette.materials)
+    overlay_gvd_into_world(world, gvd, vmin)
+    # a new glowing material was appended
+    assert len(world.palette.materials) == n_mat_before + 1
+    gvd_mat = world.palette.materials[-1]
+    assert gvd_mat.emission_energy > 0
+    # the overlaid world round-trips and the gvd material id appears in chunks
+    out = tmp_path / "box_gvd.vxw"
+    vxw.write_world(out, world)
+    w2 = vxw.read_world(out)
+    found = any(
+        (ch.voxels["material_id"] == gvd_mat.id).any() for ch in w2.chunks.values()
+    )
+    assert found
