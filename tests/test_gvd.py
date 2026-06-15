@@ -196,3 +196,31 @@ def test_run_gvd_band_reduces_and_records(tmp_path):
     # stats expose both the (leaky) flood fraction and the post-band free fraction
     assert "flood_fraction" in banded and "free_fraction" in banded
     assert banded["free_fraction"] <= banded["flood_fraction"] + 1e-9
+
+
+from m3_adapter.voxel_gvd import denoise_occupancy, thin_gvd
+
+
+def test_denoise_drops_small_components():
+    occ = np.zeros((30, 30, 30), dtype=bool)
+    occ[5:15, 5:15, 5:15] = True       # a 10^3 = 1000-voxel blob (keep)
+    occ[25, 25, 25] = True             # a lone speck (drop)
+    cleaned = denoise_occupancy(occ, min_component_size=50)
+    assert cleaned[10, 10, 10]         # blob survives
+    assert not cleaned[25, 25, 25]     # speck removed
+    assert cleaned.sum() == 1000
+
+
+def test_denoise_noop_when_threshold_trivial():
+    occ = np.zeros((10, 10, 10), dtype=bool)
+    occ[5, 5, 5] = True
+    assert denoise_occupancy(occ, min_component_size=1).sum() == 1
+
+
+def test_thin_gvd_reduces_to_subset_and_thinner():
+    gvd = np.zeros((20, 20, 20), dtype=bool)
+    gvd[5:15, 5:15, 9:12] = True        # a thick slab (300 voxels)
+    thinned = thin_gvd(gvd)
+    assert thinned.sum() < gvd.sum()    # fewer voxels after thinning
+    assert thinned.sum() > 0
+    assert np.all(gvd[thinned])         # skeleton is a subset of the input

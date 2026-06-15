@@ -14,6 +14,7 @@ scipy = ">=1.11,<2"
 zstandard = ">=0.25.0,<0.26"
 pytest = ">=9.0.3,<10"
 pyyaml = ">=6.0.3,<7"
+scikit-image = ">=0.26.0,<0.27"
 
 [pypi-dependencies]
 pypcd4 = ">=1.4.3, <2"

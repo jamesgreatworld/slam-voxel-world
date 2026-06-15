@@ -24,6 +24,8 @@ from m3_adapter.voxel_gvd import (  # noqa: E402
     flood_free_space,
     compute_esdf,
     extract_gvd,
+    denoise_occupancy,
+    thin_gvd,
 )
 
 GVD_MATERIAL_NAME = "gvd_skeleton"
@@ -152,6 +154,8 @@ def run_gvd(
     theta_sep: float = 0.40,
     pad: int = 1,
     band_max: float | None = 1.0,
+    min_component: int = 0,
+    thin: bool = False,
 ) -> dict:
     """Full batch GVD pipeline. Returns a stats dict (also printed by main)."""
     t0 = time.perf_counter()
@@ -159,6 +163,10 @@ def run_gvd(
     vsize = world.manifest.voxel_size_meters
 
     occ, vmin = densify_occupancy(world, pad=pad)
+    occ_raw = int(occ.sum())
+    if min_component and min_component > 1:
+        occ = denoise_occupancy(occ, min_component)
+    occ_clean = int(occ.sum())
     t_dense = time.perf_counter()
 
     seed = resolve_seed(
@@ -178,6 +186,9 @@ def run_gvd(
     free_fraction = float(free.sum()) / float(free.size)
 
     gvd = extract_gvd(free, dist_m, parent, vsize, d_min=d_min, theta_sep=theta_sep)
+    gvd_thick = int(gvd.sum())
+    if thin:
+        gvd = thin_gvd(gvd)
     t_gvd = time.perf_counter()
 
     overlay_gvd_into_world(world, gvd, vmin)
@@ -192,6 +203,11 @@ def run_gvd(
         "flood_fraction": flood_fraction,
         "free_fraction": free_fraction,
         "band_max": band_max,
+        "occ_voxels_raw": occ_raw,
+        "occ_voxels_clean": occ_clean,
+        "min_component": min_component,
+        "gvd_thick": gvd_thick,
+        "thin": thin,
         "gvd_voxels": int(gvd.sum()),
         "t_densify_s": round(t_dense - t0, 2),
         "t_flood_s": round(t_flood - t_dense, 2),
@@ -209,6 +225,10 @@ def run_gvd(
             f"band_max={band_max} m -> {free_fraction * 100:.1f}% of bbox kept"
         )
     print(f"[gvd] GVD skeleton voxels: {stats['gvd_voxels']} (band_max={band_max} m)")
+    if min_component and min_component > 1:
+        print(f"[gvd] denoise: occ {occ_raw} -> {occ_clean} (dropped {occ_raw - occ_clean}, min_component={min_component})")
+    if thin:
+        print(f"[gvd] thin: GVD {gvd_thick} -> {stats['gvd_voxels']} voxels (skeletonized)")
     print(
         f"[gvd] timing s: densify={stats['t_densify_s']} flood={stats['t_flood_s']} "
         f"gvd={stats['t_gvd_s']} write={stats['t_write_s']} total={stats['t_total_s']}"
@@ -240,11 +260,16 @@ def main() -> None:
     ap.add_argument("--band-max", type=float, default=1.0,
                     help="shell-band: keep only free cells within this many "
                          "metres of a surface (<=0 disables the band)")
+    ap.add_argument("--min-component", type=int, default=0,
+                    help="drop obstacle components smaller than N voxels (0=off)")
+    ap.add_argument("--thin", action="store_true",
+                    help="skeletonize the GVD voxel set to ~1-voxel curves")
     args = ap.parse_args()
     bmax = args.band_max if args.band_max and args.band_max > 0 else None
     run_gvd(
         args.input_vxw, args.output_vxw, seed_metres=args.seed,
         d_min=args.d_min, theta_sep=args.theta_sep, pad=args.pad, band_max=bmax,
+        min_component=args.min_component, thin=args.thin,
     )
 
 

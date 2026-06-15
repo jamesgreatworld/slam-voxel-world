@@ -106,3 +106,40 @@ def extract_gvd(
         gvd[lo] |= cand[lo] & sep
         gvd[hi] |= cand[hi] & sep
     return gvd
+
+
+def denoise_occupancy(
+    occupied: np.ndarray, min_component_size: int, connectivity: int = 3
+) -> np.ndarray:
+    """Drop connected obstacle components smaller than `min_component_size`
+    voxels — removes isolated scan noise / small fragments before GVD.
+
+    Args:
+        occupied: bool array (nx,ny,nz); True = obstacle.
+        min_component_size: components with fewer voxels than this are removed.
+        connectivity: ndimage structuring rank (3 = 26-connectivity).
+
+    Returns:
+        cleaned bool array (a no-op copy if min_component_size <= 1).
+    """
+    if min_component_size <= 1:
+        return occupied
+    structure = ndimage.generate_binary_structure(3, connectivity)
+    labels, n = ndimage.label(occupied, structure=structure)
+    if n == 0:
+        return occupied
+    sizes = np.bincount(labels.ravel())
+    keep = sizes >= min_component_size
+    keep[0] = False  # background label is never an obstacle
+    return keep[labels]
+
+
+def thin_gvd(gvd: np.ndarray) -> np.ndarray:
+    """3D morphological skeletonisation of the GVD voxel set -> ~1-voxel-wide
+    curves (skimage Lee's method). Returns a bool subset of `gvd`.
+    """
+    from skimage.morphology import skeletonize
+
+    if not gvd.any():
+        return gvd
+    return np.asarray(skeletonize(gvd), dtype=bool)
