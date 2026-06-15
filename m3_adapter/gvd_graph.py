@@ -81,31 +81,43 @@ def skeleton_to_graph(gvd, dist_m, voxel_size, merge_radius_m=0.15):
             edge_len[e] = length_m
 
     struct26 = ndimage.generate_binary_structure(3, 3)
-
-    chain = gvd & ~key
-    clab, ncomp = ndimage.label(chain, structure=struct26)
-    for comp in range(1, ncomp + 1):
-        comp_mask = clab == comp
-        size = int(comp_mask.sum())
-        dil = ndimage.binary_dilation(comp_mask, structure=struct26)
-        tc = np.argwhere(dil & key)
-        clusters = {key_to_cluster[(int(t[0]), int(t[1]), int(t[2]))] for t in tc}
-        if len(clusters) == 2:
-            a, b = sorted(clusters)
-            _add_edge(a, b, size * voxel_size)
-
     offsets = [(dx, dy, dz)
                for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
                if not (dx == 0 and dy == 0 and dz == 0)]
-    shape = gvd.shape
+
+    # 4a. chain edges. Label the degree-2 chain voxels into components, then for
+    # each component find which key clusters its 26-neighbourhood touches via a
+    # LOCAL lookup (bounded by chain length). The earlier full-array
+    # binary_dilation-per-component was O(ncomp * grid) and hung on real data.
+    chain = gvd & ~key
+    clab, ncomp = ndimage.label(chain, structure=struct26)
+    if ncomp > 0:
+        chain_coords = np.argwhere(chain)
+        comp_ids = clab[chain_coords[:, 0], chain_coords[:, 1], chain_coords[:, 2]]
+        comp_clusters: dict[int, set] = {}
+        comp_size: dict[int, int] = {}
+        for coord, cid in zip(chain_coords, comp_ids):
+            cid = int(cid)
+            x, y, z = int(coord[0]), int(coord[1]), int(coord[2])
+            comp_size[cid] = comp_size.get(cid, 0) + 1
+            cset = comp_clusters.setdefault(cid, set())
+            for dx, dy, dz in offsets:
+                lab = key_to_cluster.get((x + dx, y + dy, z + dz))
+                if lab is not None:
+                    cset.add(lab)
+        for cid, clusters in comp_clusters.items():
+            if len(clusters) == 2:
+                a, b = sorted(clusters)
+                _add_edge(a, b, comp_size[cid] * voxel_size)
+
+    # 4b. direct key-key adjacency across clusters (get() returns None out of
+    # bounds / off-skeleton, so no explicit bounds check is needed).
     for coord, lab in zip(key_coords, labels):
         x, y, z = int(coord[0]), int(coord[1]), int(coord[2])
         for dx, dy, dz in offsets:
-            nx, ny, nz = x + dx, y + dy, z + dz
-            if 0 <= nx < shape[0] and 0 <= ny < shape[1] and 0 <= nz < shape[2]:
-                nlab = key_to_cluster.get((nx, ny, nz))
-                if nlab is not None and nlab != int(lab):
-                    _add_edge(int(lab), nlab, voxel_size)
+            nlab = key_to_cluster.get((x + dx, y + dy, z + dz))
+            if nlab is not None and nlab != int(lab):
+                _add_edge(int(lab), nlab, voxel_size)
 
     edges = [(a, b, edge_len[(a, b)]) for (a, b) in sorted(edge_len)]
     return nodes, edges
