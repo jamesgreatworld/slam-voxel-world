@@ -37,6 +37,13 @@ PLACE_NODE_NAME = "place_node"
 PLACE_NODE_COLOR = (255, 0, 255)  # magenta
 PLACE_NODE_EMISSION = 4.0
 
+ROOM_COLORS = [
+    (255, 80, 80), (80, 255, 80), (80, 80, 255), (255, 255, 80),
+    (255, 80, 255), (80, 255, 255), (255, 160, 40), (160, 80, 255),
+    (40, 255, 160), (255, 120, 160), (160, 255, 80), (120, 160, 255),
+]
+ROOM_EMISSION = 4.0
+
 
 def densify_occupancy(world, pad: int = 1) -> tuple[np.ndarray, np.ndarray]:
     """Dense bool occupancy grid over the world's tight bbox, with `pad`
@@ -151,21 +158,26 @@ def overlay_gvd_into_world(world, gvd: np.ndarray, vmin: np.ndarray) -> None:
     world.manifest.bounds_chunks_max = tuple(int(x) + 1 for x in keys.max(axis=0))
 
 
-def _write_graph_json(path: Path, nodes, edges, vmin, voxel_size) -> None:
+def _write_graph_json(path: Path, nodes, edges, vmin, voxel_size, room_of=None) -> None:
     out_nodes = []
     for i, nd in enumerate(nodes):
         wv = np.asarray(nd["idx"], dtype=np.int64) + vmin
         pos = (wv.astype(float) * voxel_size)
-        out_nodes.append({
+        nd_dict = {
             "id": i,
             "pos_m": [float(pos[0]), float(pos[1]), float(pos[2])],
             "clearance_m": float(nd["clearance_m"]),
             "degree": int(nd["degree"]),
             "type": nd["type"],
-        })
+        }
+        if room_of is not None:
+            nd_dict["room"] = int(room_of[i])
+        out_nodes.append(nd_dict)
     out_edges = [{"a": int(a), "b": int(b), "length_m": float(ln)}
                  for (a, b, ln) in edges]
-    path.write_text(json.dumps({"nodes": out_nodes, "edges": out_edges}, indent=2))
+    num_rooms = len(set(room_of)) if room_of is not None else 0
+    path.write_text(json.dumps({"nodes": out_nodes, "edges": out_edges,
+                                "num_rooms": num_rooms}, indent=2))
 
 
 def overlay_nodes_into_world(world, nodes, vmin, marker_radius: int = 1) -> None:
@@ -215,6 +227,56 @@ def overlay_nodes_into_world(world, nodes, vmin, marker_radius: int = 1) -> None
     world.manifest.bounds_chunks_max = tuple(int(x) + 1 for x in keys.max(axis=0))
 
 
+def overlay_room_nodes_into_world(world, nodes, room_of, vmin, marker_radius: int = 1):
+    """Draw each place node as a (2r+1)^3 cube coloured by room (room_id % 12)."""
+    if not nodes:
+        return
+    extent = world.manifest.chunk_extent
+    pal = world.palette
+    base_mat = max(m.id for m in pal.materials) + 1
+    k = len(ROOM_COLORS)
+    if base_mat + k - 1 > 255:
+        raise ValueError("palette can't fit room materials")
+    base_col = len(pal.color_lut)
+    for j, col in enumerate(ROOM_COLORS):
+        pal.materials.append(vxw.Material(
+            id=base_mat + j, name=f"room_{j}", color_rgb=col,
+            flags=("room", "emit"), emission_rgb=col, emission_energy=ROOM_EMISSION))
+        pal.color_lut.append(col)
+    r = marker_radius
+    coords, mats, cols = [], [], []
+    for nd, rid in zip(nodes, room_of):
+        j = int(rid) % k
+        cx, cy, cz = nd["idx"]
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                for dz in range(-r, r + 1):
+                    coords.append((cx + dx, cy + dy, cz + dz))
+                    mats.append(base_mat + j)
+                    cols.append(base_col + j)
+    mc = np.array(coords, dtype=np.int64) + vmin
+    mats = np.array(mats, dtype=np.uint8)
+    cols = np.array(cols, dtype=np.uint8)
+    cc = np.floor_divide(mc, extent)
+    local = (mc - cc * extent).astype(np.uint8)
+    for ck in np.unique(cc, axis=0):
+        m = np.all(cc == ck, axis=1)
+        ckey = tuple(int(x) for x in ck)
+        if ckey in world.chunks:
+            arr = world.chunks[ckey].voxels
+        else:
+            arr = np.zeros((extent,) * 3, dtype=vxw.VOXEL_DTYPE)
+            world.chunks[ckey] = vxw.Chunk(coord=ckey, voxels=arr,
+                encoding=vxw.Encoding.RLE, compression=vxw.Compression.GZIP)
+        loc = local[m]
+        arr["material_id"][loc[:, 0], loc[:, 1], loc[:, 2]] = mats[m]
+        arr["semantic_id"][loc[:, 0], loc[:, 1], loc[:, 2]] = 0
+        arr["color_palette_idx"][loc[:, 0], loc[:, 1], loc[:, 2]] = cols[m]
+    keys = np.array(list(world.chunks.keys()))
+    world.manifest.bounds_chunks_min = tuple(int(x) for x in keys.min(axis=0))
+    world.manifest.bounds_chunks_max = tuple(int(x) + 1 for x in keys.max(axis=0))
+
+
 def run_gvd(
     input_vxw: str,
     output_vxw: str,
@@ -227,8 +289,12 @@ def run_gvd(
     thin: bool = False,
     graph: bool = False,
     merge_radius_m: float = 0.15,
+    rooms: bool = False,
+    room_resolution: float = 1.0,
 ) -> dict:
     """Full batch GVD pipeline. Returns a stats dict (also printed by main)."""
+    if rooms:
+        graph = True
     t0 = time.perf_counter()
     world = vxw.read_world(Path(input_vxw))
     vsize = world.manifest.voxel_size_meters
@@ -267,12 +333,19 @@ def run_gvd(
         from m3_adapter.gvd_graph import skeleton_to_graph
         nodes, edges = skeleton_to_graph(gvd, dist_m, vsize, merge_radius_m=merge_radius_m)
 
+    room_of = []
+    if rooms:
+        from m3_adapter.gvd_rooms import partition_rooms
+        room_of = partition_rooms(len(nodes), edges, resolution=room_resolution)
+
     overlay_gvd_into_world(world, gvd, vmin)
     if graph:
-        overlay_nodes_into_world(world, nodes, vmin)
-        _write_graph_json(
-            Path(output_vxw).with_suffix(".graph.json"), nodes, edges, vmin, vsize
-        )
+        if rooms:
+            overlay_room_nodes_into_world(world, nodes, room_of, vmin)
+        else:
+            overlay_nodes_into_world(world, nodes, vmin)
+        _write_graph_json(Path(output_vxw).with_suffix(".graph.json"),
+                          nodes, edges, vmin, vsize, room_of=room_of if rooms else None)
     vxw.write_world(Path(output_vxw), world)
     t_write = time.perf_counter()
 
@@ -292,6 +365,7 @@ def run_gvd(
         "gvd_voxels": int(gvd.sum()),
         "graph_nodes": len(nodes),
         "graph_edges": len(edges),
+        "num_rooms": len(set(room_of)) if room_of else 0,
         "t_densify_s": round(t_dense - t0, 2),
         "t_flood_s": round(t_flood - t_dense, 2),
         "t_gvd_s": round(t_gvd - t_flood, 2),
@@ -315,6 +389,8 @@ def run_gvd(
     if graph:
         print(f"[gvd] places graph: {len(nodes)} nodes, {len(edges)} edges "
               f"-> {Path(output_vxw).with_suffix('.graph.json').name}")
+    if rooms:
+        print(f"[gvd] rooms: {stats['num_rooms']} communities")
     print(
         f"[gvd] timing s: densify={stats['t_densify_s']} flood={stats['t_flood_s']} "
         f"gvd={stats['t_gvd_s']} write={stats['t_write_s']} total={stats['t_total_s']}"
@@ -355,6 +431,11 @@ def main() -> None:
                          "(.graph.json + magenta node markers)")
     ap.add_argument("--merge-radius", type=float, default=0.15,
                     help="merge graph nodes within this many metres")
+    ap.add_argument("--rooms", action="store_true",
+                    help="partition the places graph into rooms (Louvain) and "
+                         "colour node markers by room (implies --graph)")
+    ap.add_argument("--room-resolution", type=float, default=1.0,
+                    help="Louvain resolution: higher = more, smaller rooms")
     args = ap.parse_args()
     bmax = args.band_max if args.band_max and args.band_max > 0 else None
     run_gvd(
@@ -362,6 +443,7 @@ def main() -> None:
         d_min=args.d_min, theta_sep=args.theta_sep, pad=args.pad, band_max=bmax,
         min_component=args.min_component, thin=args.thin,
         graph=args.graph, merge_radius_m=args.merge_radius,
+        rooms=args.rooms, room_resolution=args.room_resolution,
     )
 
 
