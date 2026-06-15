@@ -224,3 +224,21 @@ def test_thin_gvd_reduces_to_subset_and_thinner():
     assert thinned.sum() < gvd.sum()    # fewer voxels after thinning
     assert thinned.sum() > 0
     assert np.all(gvd[thinned])         # skeleton is a subset of the input
+
+
+def test_run_gvd_graph_emits_json_and_markers(tmp_path):
+    import json
+    from m3_adapter.gvd_to_vxw import run_gvd
+    src = _make_box_vxw(tmp_path)
+    out = tmp_path / "box_g.vxw"
+    stats = run_gvd(str(src), str(out), seed_metres=None, d_min=0.20,
+                    theta_sep=0.40, pad=1, band_max=1.0, thin=True, graph=True)
+    assert stats["graph_nodes"] >= 1
+    assert "graph_edges" in stats
+    gjson = tmp_path / "box_g.graph.json"
+    assert gjson.exists()
+    g = json.loads(gjson.read_text())
+    assert "nodes" in g and "edges" in g
+    assert all("pos_m" in n and "clearance_m" in n for n in g["nodes"])
+    w = vxw.read_world(out)
+    assert "place_node" in [m.name for m in w.palette.materials]
