@@ -1,0 +1,12 @@
+Godot Engine v4.6.3.stable.official.7d41c59c4 - https://godotengine.org
+Vulkan 1.4.312 - Forward+ - Using Device #0: NVIDIA - NVIDIA GeForce GTX 1060
+
+[   0.000s] INFO  session      {"godot_version":"4.6.3-stable (official)","log_path":"F:/slam-voxel-world/godot_viewer/../out/logs/godot_2026-06-11_15-30-11.log"}
+[   0.003s] INFO  config       {"rig_pose_spec":"","view_override":"","world_path":"F:/slam-voxel-world/out/baseline_20cm.vxw"}
+[vxw] loaded 190 chunks, 39843 voxels, voxel_size=0.200m
+[   1.375s] INFO  world_loaded {"chunk_extent":32,"path":"F:/slam-voxel-world/out/baseline_20cm.vxw","voxel_size_m":0.2,"voxels":39843}
+[renderer] built greedy mesh: 39843 voxels, 190 chunks, 167512 tris, 190 mesh instances, 1865.9ms (bucket=132.1 greedy+commit=1733.8)
+[renderer] built collision mesh: 39843 voxels → 272324 triangles
+[   4.049s] INFO  item_presets_loaded {"count":6,"path":"F:/slam-voxel-world/godot_viewer/../m3_adapter/mc_item_pack/_compiled.json"}
+[   4.051s] INFO  entities     {"path":"F:/slam-voxel-world/out/baseline_20cm.vxw/entities.json","present":false}
+[   4.153s] INFO  rig_pose     {"pos_m":[0.0,1.0,0.0],"rot_deg":[0.0,0.0,0.0]}
