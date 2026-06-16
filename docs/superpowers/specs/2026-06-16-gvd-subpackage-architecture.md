@@ -135,3 +135,17 @@ apt(band1.0+denoise30+thin)当前 3486 节点 / 234 房。加 `--prune-spurs 0.3
 
 ## 6. 范围外(未来变换,架构已为其留位)
 contract_degree2(链收缩)、loop 处理、语义注入节点、增量更新——都是未来的 `PlacesGraph->PlacesGraph` 变换或 pipeline 阶段,不在本次。
+**最重要的留位**:**observed-free(正道 TSDF ray-carve)= field 阶段的一个新自由空间来源**,替换 `flood_free_space`,下游 esdf→gvd→graph→清洗→rooms 全不动。rosbag 已确认在 `F:\hydra_ws\datasets\uhumans2\apartment_scene\...`。
+
+## 7. 重构 + 清洗结果(2026-06-16)
+
+**重构完成 ✅**:`gvd_to_vxw.py` 451 行(13 参 god-function)→ 74 行 CLI 壳 + `gvd/` 子包(field 200 / graph 252 / rooms 28 / render 122 / pipeline 122)。5 个阶段模块互不横向 import,清洗=可组合 `PlacesGraph→PlacesGraph` 变换。63 测试绿。
+
+**清洗 pass 生效(prune_spurs + merge_close + Louvain resolution):**
+| 配置 | 节点 | 房间 | 视觉 |
+|---|---|---|---|
+| 无清洗(原) | 3486 | 234 | 密 |
+| 保守 prune0.3/merge0.2/res0.3 | 2587 | 179 | 略疏 |
+| 激进 prune1.0/merge0.5/res0.1 | **714** | **124** | 明显干净(out/apt_clean2.png) |
+
+**判读:清洗有效(激进降 80% 节点),架构干净可组合 ✅。但 124 房仍过分割(应 ~10)——清洗有天花板,因骨架噪声是结构性的、不只是毛刺,再剪会吃真结构。** 第四次确认:**根治在 observed-free(正道),已被 rosbag 解锁,且架构已为其留好 field 阶段插槽。**
