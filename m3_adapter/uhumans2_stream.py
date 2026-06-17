@@ -41,18 +41,26 @@ from m3_adapter.uhumans2_to_vxw import (  # noqa: E402
     unproject_depth,
     _interp_T_world_body,
     _chain_tf,
+    _resolve_hydra_paths,
+    load_label_space,
+    load_color_to_super_id,
+    build_palette,
+    seg_pixels_to_labels,
 )
 
 log = logging.getLogger("uhumans2_stream")
 
 
-def _live_snapshot(obs, batch_idx, frames_so_far, out_vxw: Path, vxw_dir: Path) -> None:
+def _live_snapshot(obs, batch_idx, frames_so_far, out_vxw: Path, vxw_dir: Path,
+                   sem_palette=None) -> None:
     """Write a renderable GVD .vxw from the current ObsMap state.
 
     Grid alignment: occupancy_to_vxw covers only the occupied subset of the obsmap
     grid. densify_occupancy(pad=1) inside the pipeline re-derives its own vmin/shape
     from that tight bbox. We resample observed_free onto that derived grid so shapes
     and vmins align exactly when the pipeline calls load_observed_free.
+
+    When sem_palette is provided the temp geometric .vxw is semantic-coloured.
     """
     temp_geom = vxw_dir / "_live_geom.vxw"
 
@@ -65,8 +73,12 @@ def _live_snapshot(obs, batch_idx, frames_so_far, out_vxw: Path, vxw_dir: Path) 
                  batch_idx, frames_so_far)
         return
 
-    # 1. Write temp geometric .vxw
-    occupancy_to_vxw(occ_mask, obs.vmin, obs.voxel_size, temp_geom)
+    # 1. Write temp geometric .vxw (semantic-coloured if palette provided)
+    if sem_palette is not None:
+        occupancy_to_vxw(occ_mask, obs.vmin, obs.voxel_size, temp_geom,
+                         semantic_grid=obs.semantic_grid(), palette=sem_palette)
+    else:
+        occupancy_to_vxw(occ_mask, obs.vmin, obs.voxel_size, temp_geom)
 
     # 2. Derive densify grid that pipeline will use (pad=1 matches GvdConfig default)
     world2 = vxw.read_world(temp_geom)
@@ -214,9 +226,30 @@ def main() -> None:
     ap.add_argument("--incremental", action="store_true",
                     help="only meaningful with --live: recompute GVD only in the "
                          "dirty box each batch (fast incremental path, skips rooms)")
+    ap.add_argument("--semantic", action="store_true",
+                    help="read seg frames in lockstep with depth, feed per-point "
+                         "labels into ObsMap, and export semantic-coloured .vxw")
+    ap.add_argument("--hydra-cfg", type=Path, default=None,
+                    help="Hydra workspace root for label space / colour CSV "
+                         "(default: E:/aros_slam_ws/hydra_ws)")
+    ap.add_argument("--scene", default="apartment",
+                    choices=["apartment", "office", "subway"],
+                    help="uHumans2 scene name (default: apartment)")
     args = ap.parse_args()
 
     live_out_vxw = Path(args.out_vxw) if args.out_vxw else None
+
+    # ---- semantic setup (only when --semantic) ----
+    sem_palette = None
+    color_to_id = None
+    if args.semantic:
+        hydra_root = args.hydra_cfg if args.hydra_cfg is not None else Path("E:/aros_slam_ws/hydra_ws")
+        yaml_path, csv_path = _resolve_hydra_paths(hydra_root, args.scene)
+        label_names = load_label_space(yaml_path)
+        color_to_id = load_color_to_super_id(csv_path)
+        sem_palette = build_palette(label_names)
+        log.info("[sem] loaded label space: %d names, %d colour rows",
+                 len(label_names), len(color_to_id))
 
     S = args.start_frame
     E = args.end_frame  # may be None
@@ -315,79 +348,174 @@ def main() -> None:
         dconn = [c for c in reader.connections
                  if c.topic == "/tesse/depth_cam/mono/image_raw"][0]
 
-        for _c, _t, draw in reader.messages(connections=[dconn]):
-            # Early-exit: if we've passed E there's nothing more to integrate
-            if E is not None and fi >= E:
-                break
+        if args.semantic:
+            sconn = [c for c in reader.connections
+                     if c.topic == "/tesse/seg_cam/rgb/image_raw"][0]
+            depth_iter = reader.messages(connections=[dconn])
+            seg_iter = reader.messages(connections=[sconn])
 
-            dm = ts.deserialize_cdr(draw, dconn.msgtype)
+            while True:
+                # Early-exit: if we've passed E there's nothing more to integrate
+                if E is not None and fi >= E:
+                    break
 
-            if dm.encoding != "32FC1":
-                log.error("unexpected depth encoding: %s", dm.encoding)
-                sys.exit(2)
+                try:
+                    _dc, _dt, draw = next(depth_iter)
+                    _sc, _st, sraw = next(seg_iter)
+                except StopIteration:
+                    break
 
-            # fi is counted for every depth message, whether in range or not
-            fi_current = fi
-            fi += 1
+                dm = ts.deserialize_cdr(draw, dconn.msgtype)
+                sm = ts.deserialize_cdr(sraw, sconn.msgtype)
 
-            # Skip frames outside [S, E)
-            if fi_current < S:
-                continue
+                if dm.encoding != "32FC1":
+                    log.error("unexpected depth encoding: %s", dm.encoding)
+                    sys.exit(2)
+                if sm.encoding != "rgb8":
+                    log.error("unexpected seg encoding: %s", sm.encoding)
+                    sys.exit(2)
 
-            # fi_current is in [S, E) — attempt to integrate
-            depth = np.frombuffer(dm.data, dtype=np.float32).reshape(
-                dm.height, dm.width)
-            if stride > 1:
-                depth = depth[::stride, ::stride]
+                fi_current = fi
+                fi += 1
 
-            t_frame = dm.header.stamp.sec + dm.header.stamp.nanosec * 1e-9
-            T_world_body = _interp_T_world_body(t_frame, odom_t, odom_p, odom_q)
-            if T_world_body is None:
-                frames_skipped += 1
-                continue
+                if fi_current < S:
+                    continue
 
-            T_world_cam = T_world_body @ T_body_cam
+                depth = np.frombuffer(dm.data, dtype=np.float32).reshape(
+                    dm.height, dm.width)
+                seg = np.frombuffer(sm.data, dtype=np.uint8).reshape(
+                    sm.height, sm.width, 3)
+                if stride > 1:
+                    depth = depth[::stride, ::stride]
+                    seg = seg[::stride, ::stride]
 
-            xyz_cam, _valid = unproject_depth(
-                depth,
-                fx / stride, fy / stride,
-                cx / stride, cy / stride,
-                z_min=args.depth_min, z_max=args.depth_max,
-            )
-            if xyz_cam.shape[0] == 0:
-                frames_skipped += 1
-                continue
+                t_frame = dm.header.stamp.sec + dm.header.stamp.nanosec * 1e-9
+                T_world_body = _interp_T_world_body(t_frame, odom_t, odom_p, odom_q)
+                if T_world_body is None:
+                    frames_skipped += 1
+                    continue
 
-            # Transform points to world frame (homogeneous multiply)
-            xyz_h = np.concatenate(
-                [xyz_cam, np.ones((xyz_cam.shape[0], 1), dtype=np.float32)], axis=1
-            )
-            xyz_world = (xyz_h @ T_world_cam.T.astype(np.float32))[:, :3]
-            P_m = ros_zup_to_vxw_yup(xyz_world.astype(np.float64))
+                T_world_cam = T_world_body @ T_body_cam
 
-            # Camera origin: same coordinate swap as points
-            origin_ros = T_world_cam[:3, 3:4].T  # (1, 3)
-            O_m = ros_zup_to_vxw_yup(origin_ros)[0]  # (3,)
+                xyz_cam, valid = unproject_depth(
+                    depth,
+                    fx / stride, fy / stride,
+                    cx / stride, cy / stride,
+                    z_min=args.depth_min, z_max=args.depth_max,
+                )
+                if xyz_cam.shape[0] == 0:
+                    frames_skipped += 1
+                    continue
 
-            obs.integrate_frame(O_m, P_m, free_margin_m=args.free_margin)
-            frames_integrated += 1
+                # Align seg labels to unprojected points via the valid mask
+                seg_labels = seg_pixels_to_labels(seg, color_to_id, valid)
 
-            if frames_integrated % 50 == 0:
-                occ_now = int(obs.occupancy_mask().sum())
-                free_now = int(obs.observed_free_mask().sum())
-                log.info("  fi=%d  integrated=%d skipped=%d  occ=%d free=%d",
-                         fi_current, frames_integrated, frames_skipped,
-                         occ_now, free_now)
-            if args.live and frames_integrated % args.batch == 0:
-                if args.incremental:
-                    persistent_gvd = _incremental_snapshot(
-                        obs, frames_integrated // args.batch,
-                        frames_integrated, live_out_vxw, args.vxw_dir,
-                        persistent_gvd,
-                    )
-                else:
-                    _live_snapshot(obs, frames_integrated // args.batch,
-                                   frames_integrated, live_out_vxw, args.vxw_dir)
+                xyz_h = np.concatenate(
+                    [xyz_cam, np.ones((xyz_cam.shape[0], 1), dtype=np.float32)], axis=1
+                )
+                xyz_world = (xyz_h @ T_world_cam.T.astype(np.float32))[:, :3]
+                P_m = ros_zup_to_vxw_yup(xyz_world.astype(np.float64))
+
+                origin_ros = T_world_cam[:3, 3:4].T
+                O_m = ros_zup_to_vxw_yup(origin_ros)[0]
+
+                obs.integrate_frame(O_m, P_m, point_labels=seg_labels,
+                                    free_margin_m=args.free_margin)
+                frames_integrated += 1
+
+                if frames_integrated % 50 == 0:
+                    occ_now = int(obs.occupancy_mask().sum())
+                    free_now = int(obs.observed_free_mask().sum())
+                    log.info("  fi=%d  integrated=%d skipped=%d  occ=%d free=%d",
+                             fi_current, frames_integrated, frames_skipped,
+                             occ_now, free_now)
+                if args.live and frames_integrated % args.batch == 0:
+                    if args.incremental:
+                        persistent_gvd = _incremental_snapshot(
+                            obs, frames_integrated // args.batch,
+                            frames_integrated, live_out_vxw, args.vxw_dir,
+                            persistent_gvd,
+                        )
+                    else:
+                        _live_snapshot(obs, frames_integrated // args.batch,
+                                       frames_integrated, live_out_vxw, args.vxw_dir,
+                                       sem_palette=sem_palette)
+
+        else:
+            # Non-semantic path: depth-only (original behaviour)
+            for _c, _t, draw in reader.messages(connections=[dconn]):
+                # Early-exit: if we've passed E there's nothing more to integrate
+                if E is not None and fi >= E:
+                    break
+
+                dm = ts.deserialize_cdr(draw, dconn.msgtype)
+
+                if dm.encoding != "32FC1":
+                    log.error("unexpected depth encoding: %s", dm.encoding)
+                    sys.exit(2)
+
+                # fi is counted for every depth message, whether in range or not
+                fi_current = fi
+                fi += 1
+
+                # Skip frames outside [S, E)
+                if fi_current < S:
+                    continue
+
+                # fi_current is in [S, E) — attempt to integrate
+                depth = np.frombuffer(dm.data, dtype=np.float32).reshape(
+                    dm.height, dm.width)
+                if stride > 1:
+                    depth = depth[::stride, ::stride]
+
+                t_frame = dm.header.stamp.sec + dm.header.stamp.nanosec * 1e-9
+                T_world_body = _interp_T_world_body(t_frame, odom_t, odom_p, odom_q)
+                if T_world_body is None:
+                    frames_skipped += 1
+                    continue
+
+                T_world_cam = T_world_body @ T_body_cam
+
+                xyz_cam, _valid = unproject_depth(
+                    depth,
+                    fx / stride, fy / stride,
+                    cx / stride, cy / stride,
+                    z_min=args.depth_min, z_max=args.depth_max,
+                )
+                if xyz_cam.shape[0] == 0:
+                    frames_skipped += 1
+                    continue
+
+                # Transform points to world frame (homogeneous multiply)
+                xyz_h = np.concatenate(
+                    [xyz_cam, np.ones((xyz_cam.shape[0], 1), dtype=np.float32)], axis=1
+                )
+                xyz_world = (xyz_h @ T_world_cam.T.astype(np.float32))[:, :3]
+                P_m = ros_zup_to_vxw_yup(xyz_world.astype(np.float64))
+
+                # Camera origin: same coordinate swap as points
+                origin_ros = T_world_cam[:3, 3:4].T  # (1, 3)
+                O_m = ros_zup_to_vxw_yup(origin_ros)[0]  # (3,)
+
+                obs.integrate_frame(O_m, P_m, free_margin_m=args.free_margin)
+                frames_integrated += 1
+
+                if frames_integrated % 50 == 0:
+                    occ_now = int(obs.occupancy_mask().sum())
+                    free_now = int(obs.observed_free_mask().sum())
+                    log.info("  fi=%d  integrated=%d skipped=%d  occ=%d free=%d",
+                             fi_current, frames_integrated, frames_skipped,
+                             occ_now, free_now)
+                if args.live and frames_integrated % args.batch == 0:
+                    if args.incremental:
+                        persistent_gvd = _incremental_snapshot(
+                            obs, frames_integrated // args.batch,
+                            frames_integrated, live_out_vxw, args.vxw_dir,
+                            persistent_gvd,
+                        )
+                    else:
+                        _live_snapshot(obs, frames_integrated // args.batch,
+                                       frames_integrated, live_out_vxw, args.vxw_dir)
 
     log.info("      frame loop done: fi_total=%d  integrated=%d  skipped=%d  in %.2fs",
              fi, frames_integrated, frames_skipped, time.perf_counter() - t0)
@@ -406,6 +534,31 @@ def main() -> None:
         voxel_size=np.float64(obs.voxel_size),
     )
     log.info("      observed_free exported: %s", free_out)
+
+    # Export final geometric .vxw (semantic-coloured when --semantic)
+    if not args.live:
+        # Non-live: we write a final geometric vxw from the full map
+        occ_mask = obs.occupancy_mask()
+        if int(occ_mask.sum()) > 0:
+            final_geom = args.vxw_dir / "obsmap_geom.vxw"
+            if args.semantic:
+                occupancy_to_vxw(
+                    occ_mask, obs.vmin, obs.voxel_size, final_geom,
+                    semantic_grid=obs.semantic_grid(), palette=sem_palette,
+                )
+            else:
+                occupancy_to_vxw(occ_mask, obs.vmin, obs.voxel_size, final_geom)
+            log.info("      geometric vxw exported: %s", final_geom)
+    elif args.semantic:
+        # Live path: emit one final semantic snapshot
+        occ_mask = obs.occupancy_mask()
+        if int(occ_mask.sum()) > 0:
+            final_sem = live_out_vxw if live_out_vxw else args.vxw_dir / "live.vxw"
+            occupancy_to_vxw(
+                occ_mask, obs.vmin, obs.voxel_size, final_sem,
+                semantic_grid=obs.semantic_grid(), palette=sem_palette,
+            )
+            log.info("      semantic geometric vxw exported: %s", final_sem)
 
     # Final stats
     occN = int(obs.occupancy_mask().sum())
