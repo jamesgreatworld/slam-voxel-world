@@ -83,6 +83,8 @@ func _ready() -> void:
     voxel_editor.init_editor(renderer, main_cam)
     voxel_editor.set_edit_enabled(false)  # default OFF — opt-in via pause menu
     ws.world_loaded.connect(_on_world_loaded)
+    if cfg.watch:
+        ws.enable_watch()
     _wire_pause_menu()
     pause_menu.set_persistence_available(true)
     pause_menu.set_edit_mode_label(false)

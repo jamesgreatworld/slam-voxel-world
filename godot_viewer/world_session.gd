@@ -14,6 +14,9 @@ var world_path: String = ""
 var _renderer: Node3D
 var _logger
 
+var _watch_timer: Timer = null
+var _watch_mtime: int = 0
+
 
 func init_session(renderer: Node3D, logger) -> void:
     _renderer = renderer
@@ -126,6 +129,36 @@ func import_litematic(path: String) -> void:
         return
     _logger.info("import_litematic_ok", {"out": out_vxw})
     load_in_place(out_vxw)
+
+
+func enable_watch(poll_seconds: float = 0.5) -> void:
+    # Poll the world dir's chunks.idx mtime; reload in place when it changes.
+    _watch_mtime = _file_mtime()
+    _watch_timer = Timer.new()
+    _watch_timer.wait_time = poll_seconds
+    _watch_timer.one_shot = false
+    _watch_timer.process_mode = Node.PROCESS_MODE_ALWAYS
+    add_child(_watch_timer)
+    _watch_timer.timeout.connect(_on_watch_tick)
+    _watch_timer.start()
+    if _logger != null:
+        _logger.info("world_watch_enabled", {"path": world_path, "poll_s": poll_seconds})
+
+
+func _file_mtime() -> int:
+    var f := world_path + "/chunks.idx"
+    if not FileAccess.file_exists(f):
+        return 0
+    return FileAccess.get_modified_time(f)
+
+
+func _on_watch_tick() -> void:
+    var m := _file_mtime()
+    if m != 0 and m != _watch_mtime:
+        _watch_mtime = m
+        if _logger != null:
+            _logger.info("world_watch_reload", {"mtime": m})
+        load_in_place(world_path)
 
 
 func _log_loaded() -> void:

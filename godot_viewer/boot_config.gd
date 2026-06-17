@@ -11,6 +11,8 @@ var rig_pose_spec: String = ""        # "x,y,z,yaw,pitch,roll"
 var open_item_picker: bool = false
 var spawn_items: Array = []
 
+var watch: bool = false
+
 var test_delete_first: bool = false
 var test_rotate_first_deg: float = 0.0
 var test_grab_first_to: Vector3 = Vector3.ZERO
@@ -67,6 +69,8 @@ func parse_args(args: PackedStringArray) -> void:
                 test_hide_voxel_set = true
         elif arg == "--test-toggle-day-night":
             test_toggle_day_night = true
+        elif arg == "--watch":
+            watch = true
 
 
 static func parse_rig_pose(spec: String) -> Transform3D:
