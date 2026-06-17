@@ -39,3 +39,7 @@ render → live.vxw
 
 ## 6. 范围外(更远期)
 真 Voxblox 波前 raise/lower 队列(逐帧常数时间)、局部图打补丁(v2.1)、并行。本期只做"局部重算 EDT + 整体重跑图",这是性价比最高的一刀。
+
+## 7. v2 达成结果(2026-06-17,commits d0a2d78/f39b5b5)
+`field.extract_gvd_local`(脏盒+margin 局部 EDT/GVD,parent 相对性证明无需偏移)+ `field.replace_region`(持久 GVD 打补丁)+ `obsmap.pop_dirty_bbox`(脏盒追踪)+ stream `--incremental`(live 循环用局部更新,持久骨架,跳 rooms)+ `bench_incremental.py`。75 测试绿。
+**真实数据 benchmark(out/uhumans2_apt_full.vxw,grid 547×483×185,box 60³,margin 25):full ESDF+GVD 13815ms → local 265ms = 52× 提速。** v2 达成 ✅。
