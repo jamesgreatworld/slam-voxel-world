@@ -31,6 +31,8 @@ import vxw_format as vxw  # noqa: E402
 from m3_adapter.common import ros_zup_to_vxw_yup  # noqa: E402
 from m3_adapter.gvd.field import densify_occupancy  # noqa: E402
 from m3_adapter.obsmap import ObsMap  # noqa: E402
+from m3_adapter.gvd.pipeline import GvdConfig, run as gvd_run  # noqa: E402
+from m3_adapter.obsmap_export import occupancy_to_vxw  # noqa: E402
 from m3_adapter.uhumans2_to_vxw import (  # noqa: E402
     collect_odom,
     collect_tf_static,
@@ -40,6 +42,69 @@ from m3_adapter.uhumans2_to_vxw import (  # noqa: E402
 )
 
 log = logging.getLogger("uhumans2_stream")
+
+
+def _live_snapshot(obs, batch_idx, frames_so_far, out_vxw: Path, vxw_dir: Path) -> None:
+    """Write a renderable GVD .vxw from the current ObsMap state.
+
+    Grid alignment: occupancy_to_vxw covers only the occupied subset of the obsmap
+    grid. densify_occupancy(pad=1) inside the pipeline re-derives its own vmin/shape
+    from that tight bbox. We resample observed_free onto that derived grid so shapes
+    and vmins align exactly when the pipeline calls load_observed_free.
+    """
+    temp_geom = vxw_dir / "_live_geom.vxw"
+
+    occ_mask = obs.occupancy_mask()
+    occ_count = int(occ_mask.sum())
+    free_count = int(obs.observed_free_mask().sum())
+
+    if occ_count == 0:
+        log.info("  [live] batch=%d  fi=%d  occ=0 — skipping (no occupied voxels yet)",
+                 batch_idx, frames_so_far)
+        return
+
+    # 1. Write temp geometric .vxw
+    occupancy_to_vxw(occ_mask, obs.vmin, obs.voxel_size, temp_geom)
+
+    # 2. Derive densify grid that pipeline will use (pad=1 matches GvdConfig default)
+    world2 = vxw.read_world(temp_geom)
+    occ2, vmin2 = densify_occupancy(world2, pad=1)
+
+    # 3. Resample obsmap observed_free onto the densify grid
+    of_world = np.argwhere(obs.observed_free_mask()).astype(np.int64) + obs.vmin  # (N,3) world-voxel coords
+    of2 = np.zeros(occ2.shape, dtype=bool)
+    if len(of_world) > 0:
+        of_idx2 = of_world - vmin2  # shift into densify-grid indices
+        inb = (
+            (of_idx2[:, 0] >= 0) & (of_idx2[:, 0] < occ2.shape[0]) &
+            (of_idx2[:, 1] >= 0) & (of_idx2[:, 1] < occ2.shape[1]) &
+            (of_idx2[:, 2] >= 0) & (of_idx2[:, 2] < occ2.shape[2])
+        )
+        idx = of_idx2[inb]
+        of2[idx[:, 0], idx[:, 1], idx[:, 2]] = True
+
+    # 4. Save aligned observed_free next to temp_geom
+    temp_free = vxw_dir / "_live_observed_free.npz"
+    np.savez_compressed(temp_free, mask=of2, vmin=vmin2,
+                        voxel_size=np.float64(obs.voxel_size))
+
+    # 5. Run GVD pipeline → out_vxw
+    cfg = GvdConfig(
+        input_vxw=str(temp_geom),
+        output_vxw=str(out_vxw),
+        observed_free_path=str(temp_free),
+        band_max=None,
+        min_component=0,
+        thin=True,
+        rooms=True,
+        prune_spurs_m=0.3,
+        merge_close_m=0.2,
+        drop_small_nodes=5,
+        room_resolution=0.3,
+    )
+    gvd_run(cfg)
+
+    print(f"[live] batch={batch_idx}  fi={frames_so_far}  occ={occ_count}  free={free_count}  -> {out_vxw}")
 
 
 def main() -> None:
@@ -70,7 +135,15 @@ def main() -> None:
                     help="minimum valid depth in metres (default 0.2)")
     ap.add_argument("--depth-max", type=float, default=15.0,
                     help="maximum valid depth in metres (default 15.0)")
+    ap.add_argument("--live", action="store_true",
+                    help="write a renderable .vxw after each --batch frames")
+    ap.add_argument("--batch", type=int, default=50,
+                    help="frames per live snapshot batch (default 50)")
+    ap.add_argument("--out-vxw", type=str, default=None,
+                    help="output .vxw for live snapshots (default: <vxw_dir>/live.vxw)")
     args = ap.parse_args()
+
+    live_out_vxw = Path(args.out_vxw) if args.out_vxw else None
 
     S = args.start_frame
     E = args.end_frame  # may be None
@@ -115,6 +188,9 @@ def main() -> None:
     occ0 = int(obs.occupancy_mask().sum())
     free0 = int(obs.observed_free_mask().sum())
     log.info("      state before run: occupied=%d  observed_free=%d", occ0, free0)
+
+    if args.live and live_out_vxw is None:
+        live_out_vxw = args.vxw_dir / "live.vxw"
 
     # ---- [3/5] scan bag: odom + tf_static + camera_info ----
     from rosbags.rosbag2 import Reader
@@ -226,6 +302,9 @@ def main() -> None:
                 log.info("  fi=%d  integrated=%d skipped=%d  occ=%d free=%d",
                          fi_current, frames_integrated, frames_skipped,
                          occ_now, free_now)
+            if args.live and frames_integrated % args.batch == 0:
+                _live_snapshot(obs, frames_integrated // args.batch,
+                               frames_integrated, live_out_vxw, args.vxw_dir)
 
     log.info("      frame loop done: fi_total=%d  integrated=%d  skipped=%d  in %.2fs",
              fi, frames_integrated, frames_skipped, time.perf_counter() - t0)
