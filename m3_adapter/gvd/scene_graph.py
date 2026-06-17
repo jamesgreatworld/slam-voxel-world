@@ -208,6 +208,7 @@ def build_scene_graph(places_graph, objects, world_id="apartment",
                 "bbox_min": list(o.bbox_min),
                 "bbox_max": list(o.bbox_max),
                 "place_id": o.place_id,
+                "shape": list(getattr(o, "shape_sig", ())),
                 "misses": 0,
             },
         )
@@ -258,7 +259,7 @@ def build_scene_graph(places_graph, objects, world_id="apartment",
 
 def merge_observation(existing: SceneGraph, fresh_places_graph, fresh_objects,
                       world_id="apartment", support_gap_m=0.20,
-                      match_radius_m=0.5, max_misses=3):
+                      match_radius_m=0.5, max_misses=3, shape_weight: float = 2.0):
     """Incrementally update ``existing`` from a freshly-derived places graph +
     objects. Object identity persists via class+proximity data association;
     unmatched existing objects accrue a 'misses' count and are removed past
@@ -296,31 +297,64 @@ def merge_observation(existing: SceneGraph, fresh_places_graph, fresh_objects,
             "misses": int(n.attrs.get("misses", 0)),
         }
 
-    # -- Step 2: data association (greedy nearest per class) ------------------
-    # Group existing objects by class for fast lookup
+    # -- Step 2: data association (class-internal Hungarian + shape) ----------
+    from scipy.optimize import linear_sum_assignment
+
+    # Group existing objects by class
     ex_by_class: dict = {}
     for info in ex_by_id.values():
         cls = info["class"]
         ex_by_class.setdefault(cls, []).append(info)
 
-    matched: dict[int, str] = {}     # fresh index -> existing id
-    used_existing: set[str] = set()  # existing ids already matched
-
+    # Group fresh objects by class, tracking their original indices
+    fresh_by_class: dict = {}
     for j, o in enumerate(fresh_objects):
-        fresh_pos = (np.asarray(o.idx, dtype=float) + vmin) * vs
-        candidates = ex_by_class.get(o.label, [])
-        best_id = None
-        best_dist = match_radius_m
-        for info in candidates:
-            if info["id"] in used_existing:
-                continue
-            d = float(np.linalg.norm(info["pos_m"] - fresh_pos))
-            if d <= best_dist:
-                best_dist = d
-                best_id = info["id"]
-        if best_id is not None:
-            matched[j] = best_id
-            used_existing.add(best_id)
+        fresh_by_class.setdefault(o.label, []).append((j, o))
+
+    matched: dict[int, str] = {}     # fresh index -> existing id
+
+    # Collect all classes present in either side
+    all_classes = set(ex_by_class.keys()) | set(fresh_by_class.keys())
+
+    def _shape_dist(ex_info, fresh_obj):
+        """Euclidean distance between shape signatures (padded to length 3)."""
+        ex_shape = ex_info["attrs"].get("shape", [])
+        fr_shape = list(getattr(fresh_obj, "shape_sig", ()))
+        if not ex_shape:
+            return 0.0  # no existing shape — fall back to distance-only
+        # pad/truncate both to length 3
+        ex3 = [float(ex_shape[i]) if i < len(ex_shape) else 0.0 for i in range(3)]
+        fr3 = [float(fr_shape[i]) if i < len(fr_shape) else 0.0 for i in range(3)]
+        return float(np.linalg.norm(np.array(ex3) - np.array(fr3)))
+
+    for cls in all_classes:
+        existing_C = ex_by_class.get(cls, [])
+        fresh_C = fresh_by_class.get(cls, [])
+
+        if not existing_C or not fresh_C:
+            # Nothing to match — unmatched fresh become new ids later
+            continue
+
+        # Build cost matrix: rows = existing_C, cols = fresh_C
+        n_ex = len(existing_C)
+        n_fr = len(fresh_C)
+        cost = np.empty((n_ex, n_fr), dtype=float)
+        for i, ex_info in enumerate(existing_C):
+            for jj, (_, fo) in enumerate(fresh_C):
+                fo_pos = (np.asarray(fo.idx, dtype=float) + vmin) * vs
+                dist = float(np.linalg.norm(ex_info["pos_m"] - fo_pos))
+                sdist = _shape_dist(ex_info, fo)
+                cost[i, jj] = dist + shape_weight * sdist
+
+        ri, cj = linear_sum_assignment(cost)
+
+        for k in range(len(ri)):
+            ex_info = existing_C[ri[k]]
+            fresh_idx, fresh_obj = fresh_C[cj[k]]
+            fresh_pos = (np.asarray(fresh_obj.idx, dtype=float) + vmin) * vs
+            dist_m = float(np.linalg.norm(ex_info["pos_m"] - fresh_pos))
+            if dist_m <= match_radius_m:
+                matched[fresh_idx] = ex_info["id"]
 
     # -- Step 3: build obj_ids list aligned to fresh_objects ------------------
     obj_ids = []

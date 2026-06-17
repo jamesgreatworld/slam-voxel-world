@@ -19,6 +19,7 @@ class ObjectNode:
     bbox_min: tuple       # dense voxel
     bbox_max: tuple       # dense voxel (inclusive)
     place_id: int = -1    # nearest place node id (-1 = unassigned)
+    shape_sig: tuple = ()  # principal-axis extents (std-devs) in metres, descending
 
 
 def extract_objects(occ, sem, voxel_size, vmin, label_names=None,
@@ -51,12 +52,23 @@ def extract_objects(occ, sem, voxel_size, vmin, label_names=None,
             cells = local + base
             centroid = cells.mean(axis=0).round().astype(int)
             bmin = cells.min(axis=0); bmax = cells.max(axis=0)
+            # shape signature: principal-axis extents (std-devs) in metres, descending
+            c = cells.astype(np.float64)
+            c = c - c.mean(axis=0)
+            if len(c) >= 3:
+                cov = (c.T @ c) / len(c)
+                ev = np.linalg.eigvalsh(cov)   # ascending, >=0
+                ev = np.clip(ev, 0, None)
+                sig = tuple(float(np.sqrt(e) * voxel_size) for e in ev[::-1])  # descending, metres
+            else:
+                sig = (0.0, 0.0, 0.0)
             objects.append(ObjectNode(
                 idx=tuple(int(x) for x in centroid),
                 label=L, label_name=label_names.get(L, str(L)),
                 voxel_count=cnt,
                 bbox_min=tuple(int(x) for x in bmin),
-                bbox_max=tuple(int(x) for x in bmax)))
+                bbox_max=tuple(int(x) for x in bmax),
+                shape_sig=sig))
     return objects
 
 
