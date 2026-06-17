@@ -197,6 +197,7 @@ def build_scene_graph(places_graph, objects, world_id="apartment",
             oid = obj_ids[j]
         else:
             oid = f"object:{uuid4().hex[:8]}"
+        bmin_m, bmax_m = _bbox_m(o)
         node = SceneNode(
             id=oid,
             layer="object",
@@ -207,10 +208,13 @@ def build_scene_graph(places_graph, objects, world_id="apartment",
                 "voxel_count": o.voxel_count,
                 "bbox_min": list(o.bbox_min),
                 "bbox_max": list(o.bbox_max),
+                "bbox_min_m": list(bmin_m),
+                "bbox_max_m": list(bmax_m),
                 "place_id": o.place_id,
                 "features": dict(getattr(o, "features", {}) or {}),
                 "shape": list((getattr(o, "features", {}) or {}).get("shape", ())),
                 "misses": 0,
+                "seen_count": 1,
             },
         )
         sg.add_node(node)  # no parent yet
@@ -360,10 +364,17 @@ def merge_observation(existing: SceneGraph, fresh_places_graph, fresh_objects,
     # -- Step 4: build the fresh scene graph ----------------------------------
     new_sg = build_scene_graph(fresh_places_graph, fresh_objects, world_id,
                                support_gap_m, obj_ids=obj_ids)
-    # Ensure misses=0 on all freshly-placed objects
-    for nid in obj_ids:
-        if nid in new_sg.nodes:
-            new_sg.nodes[nid].attrs["misses"] = 0
+    # Ensure misses=0 on all freshly-placed objects; update seen_count
+    for j, nid in enumerate(obj_ids):
+        if nid not in new_sg.nodes:
+            continue
+        node = new_sg.nodes[nid]
+        node.attrs["misses"] = 0
+        if j in matched:
+            # matched: carry forward existing seen_count + 1
+            ex_seen = ex_by_id[nid]["attrs"].get("seen_count", 1)
+            node.attrs["seen_count"] = ex_seen + 1
+        # else: newly added — seen_count=1 already set by build_scene_graph
 
     # -- Step 5: carry-overs (existing objects NOT seen in fresh) -------------
     seen_existing = set(matched.values())
@@ -412,3 +423,108 @@ def merge_observation(existing: SceneGraph, fresh_places_graph, fresh_objects,
         "objects_total": n_objects_total,
     }
     return new_sg, stats
+
+
+# ---------------------------------------------------------------------------
+# Temporal fragment consolidation
+# ---------------------------------------------------------------------------
+
+def _bbox_gap_m(amin, amax, bmin, bmax):
+    """Axis-aligned bbox gap in metres between two boxes (all numpy arrays).
+    Returns the max per-axis gap; negative means overlap on that axis.
+    We use max-of-axis-gaps: if ANY axis has positive separation the boxes
+    do not touch on that axis."""
+    gaps = np.maximum(np.asarray(amin) - np.asarray(bmax),
+                      np.asarray(bmin) - np.asarray(amax))
+    return float(np.max(gaps))
+
+
+def consolidate_fragments(sg: SceneGraph, gap_m: float = 0.15, min_persist: int = 2):
+    """Merge same-class object nodes whose axis-aligned bboxes (world metres) are
+    within gap_m AND both have seen_count >= min_persist — persistent co-located
+    fragments of one real object. The surviving node keeps the larger
+    voxel_count's id; bbox is unioned, voxel_count summed, seen_count = max.
+    Children of the absorbed node are reparented to the survivor. Mutates sg.
+    Returns the number of merges performed."""
+    candidates = [
+        n for n in sg.nodes_by_layer("object")
+        if n.attrs.get("seen_count", 0) >= min_persist
+        and "bbox_min_m" in n.attrs and "bbox_max_m" in n.attrs
+    ]
+
+    # Union-Find helpers (operating on node ids)
+    parent_uf: dict[str, str] = {n.id: n.id for n in candidates}
+
+    def _find(x):
+        while parent_uf[x] != x:
+            parent_uf[x] = parent_uf[parent_uf[x]]
+            x = parent_uf[x]
+        return x
+
+    def _union(a, b):
+        parent_uf[_find(a)] = _find(b)
+
+    # Pair-wise check (O(n²) — candidate list is small in practice)
+    n = len(candidates)
+    merges_found = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            ni, nj = candidates[i], candidates[j]
+            if ni.attrs.get("class") != nj.attrs.get("class"):
+                continue
+            gap = _bbox_gap_m(
+                ni.attrs["bbox_min_m"], ni.attrs["bbox_max_m"],
+                nj.attrs["bbox_min_m"], nj.attrs["bbox_max_m"],
+            )
+            if gap <= gap_m:
+                _union(ni.id, nj.id)
+
+    # Group by root
+    groups: dict[str, list] = {}
+    for n in candidates:
+        root = _find(n.id)
+        groups.setdefault(root, []).append(n)
+
+    merges_done = 0
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        # Survivor = node with largest voxel_count
+        survivor = max(group, key=lambda n: n.attrs.get("voxel_count", 0))
+        absorbed_list = [n for n in group if n.id != survivor.id]
+
+        for absorbed in absorbed_list:
+            # Union bbox_*_m
+            s_bmin = np.minimum(survivor.attrs["bbox_min_m"], absorbed.attrs["bbox_min_m"])
+            s_bmax = np.maximum(survivor.attrs["bbox_max_m"], absorbed.attrs["bbox_max_m"])
+            # Union bbox voxel coords too
+            s_vmin = [min(a, b) for a, b in zip(survivor.attrs["bbox_min"], absorbed.attrs["bbox_min"])]
+            s_vmax = [max(a, b) for a, b in zip(survivor.attrs["bbox_max"], absorbed.attrs["bbox_max"])]
+            # Weighted average pos_m by voxel_count
+            vc_s = survivor.attrs.get("voxel_count", 1)
+            vc_a = absorbed.attrs.get("voxel_count", 1)
+            total_vc = vc_s + vc_a
+            s_pos = tuple(
+                float((vc_s * ps + vc_a * pa) / total_vc)
+                for ps, pa in zip(survivor.pos_m, absorbed.pos_m)
+            )
+            # Apply to survivor
+            survivor.attrs["bbox_min_m"] = list(s_bmin)
+            survivor.attrs["bbox_max_m"] = list(s_bmax)
+            survivor.attrs["bbox_min"] = s_vmin
+            survivor.attrs["bbox_max"] = s_vmax
+            survivor.attrs["voxel_count"] = total_vc
+            survivor.attrs["seen_count"] = max(
+                survivor.attrs.get("seen_count", 0),
+                absorbed.attrs.get("seen_count", 0),
+            )
+            survivor.pos_m = s_pos
+
+            # Reparent absorbed's children to survivor
+            for child_id in list(absorbed.children):
+                sg.set_parent(child_id, survivor.id)
+
+            sg.remove_node(absorbed.id, reparent_children=False)
+            merges_done += 1
+
+    return merges_done
