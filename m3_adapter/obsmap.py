@@ -28,6 +28,11 @@ class ObsMap:
     occ_thr: float = OCC_THR
     free_thr: float = FREE_THR
 
+    def __post_init__(self):
+        # Transient dirty-region state; not persisted by save/load.
+        self._dirty_min = None
+        self._dirty_max = None
+
     @classmethod
     def new(cls, shape, vmin, voxel_size):
         return cls(np.zeros(tuple(int(s) for s in shape), dtype=np.float32),
@@ -86,14 +91,40 @@ class ObsMap:
                 (hvc[:, 2] >= 0) & (hvc[:, 2] < nz))
         hit_idx = hvc[hinb]
         # apply: one miss-step and one hit per unique cell per frame
+        touched_parts = []
         if miss_idx_list:
             miss = np.concatenate(miss_idx_list, axis=0)
             miss = np.unique(miss, axis=0)
             self.logodds[miss[:, 0], miss[:, 1], miss[:, 2]] += self.l_miss
+            touched_parts.append(miss)
         if len(hit_idx):
             hit = np.unique(hit_idx, axis=0)
             self.logodds[hit[:, 0], hit[:, 1], hit[:, 2]] += self.l_hit
+            touched_parts.append(hit)
         np.clip(self.logodds, self.l_min, self.l_max, out=self.logodds)
+        # --- dirty-box tracking ---
+        if touched_parts:
+            touched = np.concatenate(touched_parts, axis=0)
+            t_min = touched.min(axis=0)
+            t_max = touched.max(axis=0) + 1  # max is exclusive
+            if self._dirty_min is None:
+                self._dirty_min = t_min.copy()
+                self._dirty_max = t_max.copy()
+            else:
+                np.minimum(self._dirty_min, t_min, out=self._dirty_min)
+                np.maximum(self._dirty_max, t_max, out=self._dirty_max)
+
+    def pop_dirty_bbox(self):
+        """Return (min_idx, max_idx) int arrays covering all voxels touched since
+        the last call (max_idx is exclusive), then clear the dirty state.
+        Returns None if nothing has been touched since the last call."""
+        if self._dirty_min is None:
+            return None
+        lo = self._dirty_min.copy()
+        hi = self._dirty_max.copy()
+        self._dirty_min = None
+        self._dirty_max = None
+        return lo, hi
 
     def occupancy_mask(self):
         return self.logodds >= self.occ_thr

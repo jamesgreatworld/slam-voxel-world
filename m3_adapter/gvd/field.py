@@ -163,6 +163,48 @@ def extract_gvd(
     return gvd
 
 
+def extract_gvd_local(
+    occ: np.ndarray,
+    free: np.ndarray,
+    voxel_size: float,
+    bbox_min,
+    bbox_max,
+    margin_vox: int,
+    d_min: float = 0.20,
+    theta_sep: float = 0.40,
+) -> np.ndarray:
+    """Recompute the GVD only inside the core box [bbox_min, bbox_max) (dense
+    indices into the full grid), using `margin_vox` extra cells on each side so
+    boundary cells see nearby obstacles.  occ, free: full-grid bool arrays.
+
+    Returns a full-grid bool array that is True only for GVD cells inside the
+    CORE box (margin region is used for context but not returned).
+
+    Parent-index relativity note: compute_esdf returns parent as indices into
+    the sub-array.  extract_gvd only uses the DIFFERENCE between neighbouring
+    cells' parent vectors (squared distance between two parent voxels in the
+    same coordinate frame).  Since both parents live in the same sub-array
+    frame, the difference — and hence the theta_sep test — is identical to
+    what the global computation would produce.  No offset adjustment is needed.
+    """
+    shape = occ.shape
+    lo = [max(0, int(bbox_min[a]) - margin_vox) for a in range(3)]
+    hi = [min(shape[a], int(bbox_max[a]) + margin_vox) for a in range(3)]
+    sl = tuple(slice(lo[a], hi[a]) for a in range(3))
+    occ_sub = occ[sl]
+    free_sub = free[sl]
+    dist_sub, parent_sub = compute_esdf(occ_sub, voxel_size)
+    gvd_sub = extract_gvd(free_sub, dist_sub, parent_sub, voxel_size,
+                          d_min=d_min, theta_sep=theta_sep)
+    out = np.zeros(shape, dtype=bool)
+    core_lo = [int(bbox_min[a]) for a in range(3)]
+    core_hi = [int(bbox_max[a]) for a in range(3)]
+    csl_full = tuple(slice(core_lo[a], core_hi[a]) for a in range(3))
+    csl_sub = tuple(slice(core_lo[a] - lo[a], core_hi[a] - lo[a]) for a in range(3))
+    out[csl_full] = gvd_sub[csl_sub]
+    return out
+
+
 def load_observed_free(path):
     """Load an observed-free mask sidecar. Returns (mask_bool, vmin_int, voxel_size)."""
     d = np.load(path)
