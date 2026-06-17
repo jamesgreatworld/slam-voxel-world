@@ -1,5 +1,21 @@
 import numpy as np
-from m3_adapter.gvd.graph import skeleton_to_graph, prune_spurs, merge_close, PlacesGraph
+from m3_adapter.gvd.graph import (
+    skeleton_to_graph, prune_spurs, merge_close, drop_small_components,
+    PlaceNode, PlacesGraph,
+)
+
+
+def test_drop_small_components_removes_tiny_islands():
+    # one 4-node chain (kept at min 3) + two isolated singletons (dropped)
+    nodes = [PlaceNode(idx=(i, 0, 0), clearance_m=1.0, degree=0, type="x")
+             for i in range(6)]
+    edges = [(0, 1, 1.0), (1, 2, 1.0), (2, 3, 1.0)]  # 4,5 are singletons
+    g = PlacesGraph(nodes, edges, 1.0, np.zeros(3))
+    d = drop_small_components(g, min_nodes=3)
+    assert len(d.nodes) == 4          # the chain survives
+    assert len(d.edges) == 3
+    # min_nodes<=1 is a no-op
+    assert len(drop_small_components(g, 1).nodes) == 6
 
 
 def _vmin():

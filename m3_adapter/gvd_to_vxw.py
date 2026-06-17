@@ -52,6 +52,9 @@ def main() -> None:
                     help="prune dead-end (degree-1) edges shorter than N m (0=off)")
     ap.add_argument("--merge-close", type=float, default=0.0,
                     help="merge graph nodes within N m of each other (0=off)")
+    ap.add_argument("--drop-small", type=int, default=0,
+                    help="drop connected components smaller than N nodes "
+                         "(isolated carve specks; 0=off)")
     ap.add_argument("--rooms", action="store_true",
                     help="partition the places graph into rooms (implies --graph)")
     ap.add_argument("--room-resolution", type=float, default=1.0,
@@ -68,6 +71,7 @@ def main() -> None:
         min_component=args.min_component, d_min=args.d_min, theta_sep=args.theta_sep,
         thin=args.thin, graph=args.graph, merge_radius_m=args.merge_radius,
         prune_spurs_m=args.prune_spurs, merge_close_m=args.merge_close,
+        drop_small_nodes=args.drop_small,
         rooms=args.rooms, room_resolution=args.room_resolution,
         observed_free_path=args.observed_free,
     )

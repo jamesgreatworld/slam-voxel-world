@@ -191,6 +191,36 @@ def _rebuild(nodes, adj, voxel_size, vmin):
     return PlacesGraph(rebuilt, new_edges, voxel_size, np.asarray(vmin))
 
 
+def drop_small_components(g: PlacesGraph, min_nodes: int) -> PlacesGraph:
+    """Remove whole connected components with fewer than min_nodes nodes —
+    isolated carve specks / tiny disconnected free-space pockets. Keeps the
+    real (large) structure. Returns a PlacesGraph."""
+    if min_nodes <= 1 or not g.nodes:
+        return g
+    adj = g.adjacency()
+    seen = set()
+    keep = set()
+    for s in range(len(g.nodes)):
+        if s in seen:
+            continue
+        stack = [s]
+        seen.add(s)
+        comp = [s]
+        while stack:
+            u = stack.pop()
+            for v in adj[u]:
+                if v not in seen:
+                    seen.add(v)
+                    stack.append(v)
+                    comp.append(v)
+        if len(comp) >= min_nodes:
+            keep.update(comp)
+    if not keep:
+        return g
+    sub = {n: {b: ln for b, ln in adj[n].items() if b in keep} for n in keep}
+    return _rebuild(g.nodes, sub, g.voxel_size, g.vmin)
+
+
 def prune_spurs(g: PlacesGraph, max_len_m: float) -> PlacesGraph:
     """Iteratively remove degree-1 nodes whose single edge is shorter than
     max_len_m (skeleton hairs from voxel noise). Long-edge endpoints (real

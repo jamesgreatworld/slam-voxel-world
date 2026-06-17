@@ -10,7 +10,9 @@ import numpy as np
 
 import vxw_format as vxw
 from m3_adapter.gvd import field, render
-from m3_adapter.gvd.graph import skeleton_to_graph, prune_spurs, merge_close
+from m3_adapter.gvd.graph import (
+    skeleton_to_graph, prune_spurs, merge_close, drop_small_components,
+)
 from m3_adapter.gvd.rooms import partition_rooms
 
 
@@ -29,6 +31,7 @@ class GvdConfig:
     merge_radius_m: float = 0.15
     prune_spurs_m: float = 0.0
     merge_close_m: float = 0.0
+    drop_small_nodes: int = 0
     rooms: bool = False
     room_resolution: float = 1.0
     observed_free_path: str | None = None
@@ -84,6 +87,8 @@ def run(cfg: GvdConfig) -> dict:
             graph_obj = prune_spurs(graph_obj, cfg.prune_spurs_m)
         if cfg.merge_close_m and cfg.merge_close_m > 0:
             graph_obj = merge_close(graph_obj, cfg.merge_close_m)
+        if cfg.drop_small_nodes and cfg.drop_small_nodes > 1:
+            graph_obj = drop_small_components(graph_obj, cfg.drop_small_nodes)
     num_rooms = 0
     if cfg.rooms and graph_obj is not None:
         labels = partition_rooms(graph_obj, resolution=cfg.room_resolution)
