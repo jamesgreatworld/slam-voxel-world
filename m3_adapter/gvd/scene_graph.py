@@ -1,8 +1,13 @@
 """scene_graph.py — hierarchical Dynamic Scene Graph (DSG): Building > Rooms >
 {Places, Objects}, with object support-parenting (e.g. cup-on-table). Supports
-CRUD + query. (Hydra-style scene graph.)"""
+CRUD + query + JSON persistence + incremental merge_observation. (Hydra-style
+scene graph.)"""
 from __future__ import annotations
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
+from uuid import uuid4
+
 import numpy as np
 
 
@@ -93,7 +98,7 @@ class SceneGraph:
         """All object-layer descendants of a room node."""
         return [n for n in self.descendants(room_id) if n.layer == "object"]
 
-    # ---- JSON ----
+    # ---- JSON / persistence ----
     def to_dict(self):
         return {"root": self.root_id,
                 "nodes": [{"id": n.id, "layer": n.layer, "label": n.label,
@@ -103,6 +108,9 @@ class SceneGraph:
 
     @classmethod
     def from_dict(cls, d):
+        """Reconstruct in-memory SceneGraph with live parent/children pointers.
+        After this call, queries (parent/children/ancestors/descendants) traverse
+        the in-memory node dict — not the JSON."""
         g = cls(); g.root_id = d.get("root")
         for nd in d["nodes"]:
             g.nodes[nd["id"]] = SceneNode(
@@ -111,11 +119,28 @@ class SceneGraph:
                 parent=nd.get("parent"), children=list(nd.get("children", [])))
         return g
 
+    def save(self, path):
+        """Serialise to a JSON file. Restores fully via SceneGraph.load()."""
+        Path(path).write_text(json.dumps(self.to_dict(), indent=2))
+
+    @classmethod
+    def load(cls, path):
+        """Load from a JSON file; returns a SceneGraph with live pointer structure."""
+        return cls.from_dict(json.loads(Path(path).read_text()))
+
 
 def build_scene_graph(places_graph, objects, world_id="apartment",
-                      support_gap_m=0.20):
+                      support_gap_m=0.20, obj_ids=None):
     """Assemble Building > Rooms > {Places, Objects}. Object parent = supporting
-    object if it rests on one (bbox geometry, y up), else the room it's in."""
+    object if it rests on one (bbox geometry, y up), else the room it's in.
+
+    Parameters
+    ----------
+    obj_ids : list[str] | None
+        Stable ids to use for each object in ``objects`` (same length).  If
+        None, a uuid-based id is generated per object.  Passing stable ids from
+        a prior graph is how merge_observation preserves object identity.
+    """
     sg = SceneGraph()
     vs = places_graph.voxel_size
     vmin = np.asarray(places_graph.vmin, dtype=float)
@@ -167,8 +192,13 @@ def build_scene_graph(places_graph, objects, world_id="apartment",
     obj_bboxes = []  # list of (bmin_m, bmax_m) in world metres
     for j, o in enumerate(objects):
         opos_m = (np.asarray(o.idx, dtype=float) + vmin) * vs
+        # Stable id: use caller-supplied list if provided, else generate uuid-based
+        if obj_ids is not None:
+            oid = obj_ids[j]
+        else:
+            oid = f"object:{uuid4().hex[:8]}"
         node = SceneNode(
-            id=f"object:{j}",
+            id=oid,
             layer="object",
             label=o.label_name,
             pos_m=tuple(float(x) for x in opos_m),
@@ -178,6 +208,7 @@ def build_scene_graph(places_graph, objects, world_id="apartment",
                 "bbox_min": list(o.bbox_min),
                 "bbox_max": list(o.bbox_max),
                 "place_id": o.place_id,
+                "misses": 0,
             },
         )
         sg.add_node(node)  # no parent yet
@@ -207,7 +238,7 @@ def build_scene_graph(places_graph, objects, world_id="apartment",
             # candidate — pick highest top (closest support)
             if k_top_y > best_top_y:
                 best_top_y = k_top_y
-                best_support = f"object:{k}"
+                best_support = obj_nodes[k].id
 
         if best_support is not None:
             sg.set_parent(node.id, best_support)
@@ -223,3 +254,134 @@ def build_scene_graph(places_graph, objects, world_id="apartment",
             sg.set_parent(node.id, room_parent)
 
     return sg
+
+
+def merge_observation(existing: SceneGraph, fresh_places_graph, fresh_objects,
+                      world_id="apartment", support_gap_m=0.20,
+                      match_radius_m=0.5, max_misses=3):
+    """Incrementally update ``existing`` from a freshly-derived places graph +
+    objects. Object identity persists via class+proximity data association;
+    unmatched existing objects accrue a 'misses' count and are removed past
+    max_misses; new objects are added with fresh stable ids; the room/place
+    scaffold is rebuilt from the fresh graph; all surviving objects are
+    re-parented (room/support). Returns ``(new_scene_graph, stats)``.
+
+    Algorithm
+    ---------
+    1. Pull existing object nodes (layer=="object") from `existing`.
+    2. Data association: for each fresh object find the nearest existing object
+       of the same class within match_radius_m (greedy, one-to-one).
+    3. Build obj_ids aligned to fresh_objects (matched=reuse id, new=uuid).
+    4. Build a fresh scene graph with those ids.
+    5. Inject surviving carry-overs (unseen existing objects whose misses <=
+       max_misses) by attaching them to their last-known room if it still exists
+       in the new graph, otherwise to the building root.
+    6. Return (new_sg, stats).
+    """
+    vs = fresh_places_graph.voxel_size
+    vmin = np.asarray(fresh_places_graph.vmin, dtype=float)
+
+    # -- Step 1: gather existing object nodes ---------------------------------
+    existing_objs = existing.nodes_by_layer("object")
+    # Build a dict: id -> {id, class, pos_m (np array), attrs, misses}
+    ex_by_id = {}
+    for n in existing_objs:
+        pos = np.asarray(n.pos_m, dtype=float)
+        ex_by_id[n.id] = {
+            "id": n.id,
+            "class": n.attrs.get("class"),
+            "pos_m": pos,
+            "attrs": dict(n.attrs),
+            "label": n.label,
+            "misses": int(n.attrs.get("misses", 0)),
+        }
+
+    # -- Step 2: data association (greedy nearest per class) ------------------
+    # Group existing objects by class for fast lookup
+    ex_by_class: dict = {}
+    for info in ex_by_id.values():
+        cls = info["class"]
+        ex_by_class.setdefault(cls, []).append(info)
+
+    matched: dict[int, str] = {}     # fresh index -> existing id
+    used_existing: set[str] = set()  # existing ids already matched
+
+    for j, o in enumerate(fresh_objects):
+        fresh_pos = (np.asarray(o.idx, dtype=float) + vmin) * vs
+        candidates = ex_by_class.get(o.label, [])
+        best_id = None
+        best_dist = match_radius_m
+        for info in candidates:
+            if info["id"] in used_existing:
+                continue
+            d = float(np.linalg.norm(info["pos_m"] - fresh_pos))
+            if d <= best_dist:
+                best_dist = d
+                best_id = info["id"]
+        if best_id is not None:
+            matched[j] = best_id
+            used_existing.add(best_id)
+
+    # -- Step 3: build obj_ids list aligned to fresh_objects ------------------
+    obj_ids = []
+    for j in range(len(fresh_objects)):
+        if j in matched:
+            obj_ids.append(matched[j])
+        else:
+            obj_ids.append(f"object:{uuid4().hex[:8]}")
+
+    # -- Step 4: build the fresh scene graph ----------------------------------
+    new_sg = build_scene_graph(fresh_places_graph, fresh_objects, world_id,
+                               support_gap_m, obj_ids=obj_ids)
+    # Ensure misses=0 on all freshly-placed objects
+    for nid in obj_ids:
+        if nid in new_sg.nodes:
+            new_sg.nodes[nid].attrs["misses"] = 0
+
+    # -- Step 5: carry-overs (existing objects NOT seen in fresh) -------------
+    seen_existing = set(matched.values())
+    removed = 0
+    carried = 0
+
+    for eid, info in ex_by_id.items():
+        if eid in seen_existing:
+            continue  # already in new graph as a matched fresh object
+        new_misses = info["misses"] + 1
+        if new_misses > max_misses:
+            removed += 1
+            continue  # drop it
+        # Carry over: re-inject into new graph
+        carried += 1
+        carry_attrs = dict(info["attrs"])
+        carry_attrs["misses"] = new_misses
+        # Determine parent: use last-known room if it still exists, else building
+        # We infer the last-known room from the existing graph's parent chain
+        ex_node = existing.get(eid)
+        carry_parent = "building:0"
+        if ex_node is not None:
+            # Walk ancestors of the existing node to find its room
+            for anc in existing.ancestors(eid):
+                if anc.layer == "room" and anc.id in new_sg.nodes:
+                    carry_parent = anc.id
+                    break
+        carry_node = SceneNode(
+            id=eid,
+            layer="object",
+            label=info["label"],
+            pos_m=tuple(float(x) for x in info["pos_m"]),
+            attrs=carry_attrs,
+        )
+        new_sg.add_node(carry_node, parent_id=carry_parent)
+
+    # -- Step 6: stats --------------------------------------------------------
+    n_matched = len(matched)
+    n_added = len(obj_ids) - n_matched
+    n_objects_total = len(new_sg.nodes_by_layer("object"))
+    stats = {
+        "matched": n_matched,
+        "added": n_added,
+        "removed": removed,
+        "carried": carried,
+        "objects_total": n_objects_total,
+    }
+    return new_sg, stats
