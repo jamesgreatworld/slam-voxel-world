@@ -66,7 +66,15 @@ def main() -> None:
                     help="extract semantic object instances and link to place nodes")
     ap.add_argument("--object-min-voxels", type=int, default=20,
                     help="minimum voxels for an object cluster to be kept (default 20)")
+    ap.add_argument("--scene-graph", action="store_true",
+                    help="build hierarchical Dynamic Scene Graph (implies --objects --graph --rooms)")
     args = ap.parse_args()
+
+    # --scene-graph implies --objects, --graph, --rooms
+    if args.scene_graph:
+        args.objects = True
+        args.graph = True
+        args.rooms = True
 
     bmax = args.band_max if args.band_max and args.band_max > 0 else None
     cfg = GvdConfig(
@@ -79,6 +87,7 @@ def main() -> None:
         rooms=args.rooms, room_resolution=args.room_resolution,
         observed_free_path=args.observed_free,
         objects=args.objects, object_min_voxels=args.object_min_voxels,
+        scene_graph=args.scene_graph,
     )
     run(cfg)
 

@@ -37,9 +37,15 @@ class GvdConfig:
     observed_free_path: str | None = None
     objects: bool = False
     object_min_voxels: int = 20
+    scene_graph: bool = False
 
 
 def run(cfg: GvdConfig) -> dict:
+    # scene_graph implies objects + graph + rooms
+    if cfg.scene_graph:
+        cfg.objects = True
+        cfg.graph = True
+        cfg.rooms = True
     t0 = time.perf_counter()
     world = vxw.read_world(Path(cfg.input_vxw))
     vsize = world.manifest.voxel_size_meters
@@ -112,6 +118,22 @@ def run(cfg: GvdConfig) -> dict:
     else:
         objs = []
 
+    sg = None
+    if cfg.scene_graph:
+        from m3_adapter.gvd.scene_graph import build_scene_graph
+        import json
+        sg = build_scene_graph(graph_obj, objs)
+        Path(cfg.output_vxw).with_suffix(".scene_graph.json").write_text(
+            json.dumps(sg.to_dict(), indent=2))
+        layer_counts = {layer: sum(1 for n in sg.nodes.values() if n.layer == layer)
+                        for layer in ("building", "room", "place", "object")}
+        print(f"[gvd] scene_graph: {len(sg.nodes)} nodes {layer_counts}")
+        # print a couple example parentings
+        for obj_node in list(sg.nodes_by_layer("object"))[:2]:
+            par = sg.parent(obj_node.id)
+            par_str = f"{par.id} ({par.layer})" if par else "None"
+            print(f"[gvd]   {obj_node.id} '{obj_node.label}' -> parent: {par_str}")
+
     render.stamp_skeleton(world, gvd, vmin)
     if do_graph and graph_obj is not None:
         if cfg.rooms:
@@ -138,6 +160,7 @@ def run(cfg: GvdConfig) -> dict:
         "graph_edges": (len(graph_obj.edges) if graph_obj is not None else 0),
         "num_rooms": num_rooms,
         "num_objects": len(objs),
+        "scene_graph_nodes": len(sg.nodes) if sg is not None else 0,
         "observed_free": bool(cfg.observed_free_path),
         "leak_warning": flood_fraction > 0.5,
         "t_field_s": round(t_field - t0, 2),
