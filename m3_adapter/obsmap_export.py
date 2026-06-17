@@ -21,6 +21,16 @@ import vxw_format as vxw  # noqa: E402
 from m3_adapter.common import build_concrete_palette  # noqa: E402
 
 
+# uHumans2 super_id -> mc_item preset id (only confident, present-in-pack mappings).
+# Extend as more presets / label matches are added.
+SUPER_ID_TO_MC_ITEM = {
+    5: "chair",
+    16: "table",
+    11: "lamp",
+    # 7 (couch) has no preset yet; 9 (furniture) is ambiguous -> left as generic box.
+}
+
+
 def occupancy_to_vxw(
     occ_mask,
     vmin,
@@ -111,6 +121,7 @@ def obsmap_to_world(
     find_spawn_fn=None,
     dbscan_eps_voxels=2.0,
     min_samples=10,
+    mc_item_map: dict | None = None,
 ):
     """Derive a complete game-ready vxw_format.World from an ObsMap:
     semantic occupancy voxels + furniture entities + spawn_hint.
@@ -131,6 +142,11 @@ def obsmap_to_world(
                               None, spawn_hint is left as None.
         dbscan_eps_voxels:    forwarded to extract_entities_fn.
         min_samples:          forwarded to extract_entities_fn.
+        mc_item_map:          super_id -> mc_item preset id; entities whose
+                              .label is in the map get custom_meta["mc_item"]
+                              set so entity_renderer.gd renders the pre-built
+                              model instead of a generic OBB box.  Defaults to
+                              SUPER_ID_TO_MC_ITEM when None.
 
     Returns:
         (world, entities) — vxw.World and the list of vxw.Entity objects.
@@ -162,6 +178,13 @@ def obsmap_to_world(
         entities, keep_mask = extract_entities_fn(
             final_vc, final_lbl, vs, label_names, dbscan_eps_voxels, min_samples,
         )
+
+    # --- Step 4b: assign mc_item preset to entities whose class has a mapping ---
+    _item_map = SUPER_ID_TO_MC_ITEM if mc_item_map is None else mc_item_map
+    for entity in entities:
+        preset = _item_map.get(entity.label)
+        if preset is not None:
+            entity.custom_meta["mc_item"] = preset
 
     # Structure voxels = those NOT claimed by an entity.
     struct_vc = final_vc[keep_mask]
