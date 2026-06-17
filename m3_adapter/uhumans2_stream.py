@@ -1,0 +1,262 @@
+"""uhumans2_stream.py — resume-capable streaming ObsMap driver for uHumans2.
+
+Integrates rosbag depth frames into a persistent ObsMap. Supports incremental
+continue/resume: run once, save map, run again with --start-frame to pick up
+where you left off. Each run appends to the same obsmap.npz.
+
+Usage:
+  pixi run python m3_adapter/uhumans2_stream.py \\
+    F:/hydra_ws/datasets/uhumans2/apartment_scene/uHumans2_apartment_s1_00h_ros2 \\
+    out/uhumans2_apt.vxw \\
+    --start-frame 0 --end-frame 500 --pixel-stride 4
+
+Output:
+  <vxw_dir>/obsmap.npz          — persistent log-odds map (save/resume)
+  <vxw_dir>/observed_free.npz   — observed-free mask (same format as uhumans2_carve)
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import vxw_format as vxw  # noqa: E402
+from m3_adapter.common import ros_zup_to_vxw_yup  # noqa: E402
+from m3_adapter.gvd.field import densify_occupancy  # noqa: E402
+from m3_adapter.obsmap import ObsMap  # noqa: E402
+from m3_adapter.uhumans2_to_vxw import (  # noqa: E402
+    collect_odom,
+    collect_tf_static,
+    unproject_depth,
+    _interp_T_world_body,
+    _chain_tf,
+)
+
+log = logging.getLogger("uhumans2_stream")
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(levelname)-5s %(name)s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("bag_dir", type=Path,
+                    help="rosbag2 directory (must contain metadata.yaml)")
+    ap.add_argument("vxw_dir", type=Path,
+                    help="path to .vxw directory — grid alignment source; "
+                         "obsmap.npz and observed_free.npz are written here")
+    ap.add_argument("--start-frame", type=int, default=0,
+                    help="absolute depth-frame index to start integrating (default 0)")
+    ap.add_argument("--end-frame", type=int, default=None,
+                    help="absolute depth-frame index to stop (exclusive, default: all)")
+    ap.add_argument("--pixel-stride", type=int, default=4,
+                    help="downsample depth pixels by this factor (default 4)")
+    ap.add_argument("--free-margin", type=float, default=0.10,
+                    help="metres to stop short of surface (default 0.10)")
+    ap.add_argument("--depth-min", type=float, default=0.2,
+                    help="minimum valid depth in metres (default 0.2)")
+    ap.add_argument("--depth-max", type=float, default=15.0,
+                    help="maximum valid depth in metres (default 15.0)")
+    args = ap.parse_args()
+
+    S = args.start_frame
+    E = args.end_frame  # may be None
+
+    if not (args.bag_dir / "metadata.yaml").is_file():
+        log.error("not a rosbag2 directory: %s", args.bag_dir)
+        sys.exit(1)
+
+    # ---- [1/5] load .vxw for grid alignment ----
+    log.info("[1/5] loading .vxw for grid alignment: %s", args.vxw_dir)
+    world = vxw.read_world(args.vxw_dir)
+    occ, vmin = densify_occupancy(world, pad=1)
+    voxel_size = float(world.manifest.voxel_size_meters)
+    shape = occ.shape
+    log.info("      grid shape=%s  vmin=%s  voxel_size=%.4fm",
+             shape, vmin.tolist(), voxel_size)
+
+    # ---- [2/5] load or create ObsMap ----
+    obsmap_path = args.vxw_dir / "obsmap.npz"
+    if obsmap_path.exists():
+        log.info("[2/5] resuming: loading existing obsmap from %s", obsmap_path)
+        obs = ObsMap.load(obsmap_path)
+        # Verify compatibility with current grid
+        if obs.logodds.shape != tuple(shape):
+            raise ValueError(
+                f"Stale obsmap: shape mismatch. "
+                f"obsmap has {obs.logodds.shape}, grid requires {tuple(shape)}. "
+                f"Delete {obsmap_path} to start fresh."
+            )
+        if not np.array_equal(obs.vmin, vmin):
+            raise ValueError(
+                f"Stale obsmap: vmin mismatch. "
+                f"obsmap has vmin={obs.vmin.tolist()}, grid requires vmin={vmin.tolist()}. "
+                f"Delete {obsmap_path} to start fresh."
+            )
+        log.info("      resumed: obsmap shape=%s vmin=%s", obs.logodds.shape, obs.vmin.tolist())
+    else:
+        log.info("[2/5] creating new obsmap (shape=%s)", shape)
+        obs = ObsMap.new(shape, vmin, voxel_size)
+
+    # Record state before this run
+    occ0 = int(obs.occupancy_mask().sum())
+    free0 = int(obs.observed_free_mask().sum())
+    log.info("      state before run: occupied=%d  observed_free=%d", occ0, free0)
+
+    # ---- [3/5] scan bag: odom + tf_static + camera_info ----
+    from rosbags.rosbag2 import Reader
+    from rosbags.typesys import Stores, get_typestore
+    ts = get_typestore(Stores.ROS2_HUMBLE)
+
+    log.info("[3/5] scanning bag for odom + tf_static + depth camera_info")
+    t0 = time.perf_counter()
+    with Reader(str(args.bag_dir)) as reader:
+        odom_t, odom_p, odom_q, world_frame, body_frame = collect_odom(reader, ts)
+        tf_static = collect_tf_static(reader, ts)
+        dci_conn = [c for c in reader.connections
+                    if c.topic == "/tesse/depth_cam/camera_info"][0]
+        for _, _, raw in reader.messages(connections=[dci_conn]):
+            dci = ts.deserialize_cdr(raw, dci_conn.msgtype)
+            fx, fy = float(dci.k[0]), float(dci.k[4])
+            cx, cy = float(dci.k[2]), float(dci.k[5])
+            cam_frame = dci.header.frame_id
+            break
+
+    T_body_cam = _chain_tf(tf_static, body_frame, cam_frame)
+    if T_body_cam is None:
+        log.warning("could not resolve %s -> %s via tf_static; using identity",
+                    body_frame, cam_frame)
+        T_body_cam = np.eye(4)
+
+    log.info("      odom %d kfr  t=[%.3f,%.3f]  body=%s  cam=%s",
+             len(odom_t), odom_t[0], odom_t[-1], body_frame, cam_frame)
+    log.info("      tf_static entries: %d  T_body_cam t=%s",
+             len(tf_static), T_body_cam[:3, 3].tolist())
+    log.info("      depth K  fx=%.2f fy=%.2f cx=%.2f cy=%.2f", fx, fy, cx, cy)
+    log.info("      bag scan done in %.2fs", time.perf_counter() - t0)
+
+    # ---- [4/5] frame loop — depth + pose, integrate into ObsMap ----
+    range_desc = f"[{S}, {E})" if E is not None else f"[{S}, end)"
+    log.info("[4/5] integrating depth frames  frame range=%s  stride=%d",
+             range_desc, args.pixel_stride)
+    t0 = time.perf_counter()
+
+    fi = 0                  # absolute depth-frame counter (counts ALL depth messages)
+    frames_integrated = 0   # frames actually integrated this run
+    frames_skipped = 0      # pose-invalid or out-of-range
+    stride = args.pixel_stride
+
+    with Reader(str(args.bag_dir)) as reader:
+        dconn = [c for c in reader.connections
+                 if c.topic == "/tesse/depth_cam/mono/image_raw"][0]
+
+        for _c, _t, draw in reader.messages(connections=[dconn]):
+            # Early-exit: if we've passed E there's nothing more to integrate
+            if E is not None and fi >= E:
+                break
+
+            dm = ts.deserialize_cdr(draw, dconn.msgtype)
+
+            if dm.encoding != "32FC1":
+                log.error("unexpected depth encoding: %s", dm.encoding)
+                sys.exit(2)
+
+            # fi is counted for every depth message, whether in range or not
+            fi_current = fi
+            fi += 1
+
+            # Skip frames outside [S, E)
+            if fi_current < S:
+                continue
+
+            # fi_current is in [S, E) — attempt to integrate
+            depth = np.frombuffer(dm.data, dtype=np.float32).reshape(
+                dm.height, dm.width)
+            if stride > 1:
+                depth = depth[::stride, ::stride]
+
+            t_frame = dm.header.stamp.sec + dm.header.stamp.nanosec * 1e-9
+            T_world_body = _interp_T_world_body(t_frame, odom_t, odom_p, odom_q)
+            if T_world_body is None:
+                frames_skipped += 1
+                continue
+
+            T_world_cam = T_world_body @ T_body_cam
+
+            xyz_cam, _valid = unproject_depth(
+                depth,
+                fx / stride, fy / stride,
+                cx / stride, cy / stride,
+                z_min=args.depth_min, z_max=args.depth_max,
+            )
+            if xyz_cam.shape[0] == 0:
+                frames_skipped += 1
+                continue
+
+            # Transform points to world frame (homogeneous multiply)
+            xyz_h = np.concatenate(
+                [xyz_cam, np.ones((xyz_cam.shape[0], 1), dtype=np.float32)], axis=1
+            )
+            xyz_world = (xyz_h @ T_world_cam.T.astype(np.float32))[:, :3]
+            P_m = ros_zup_to_vxw_yup(xyz_world.astype(np.float64))
+
+            # Camera origin: same coordinate swap as points
+            origin_ros = T_world_cam[:3, 3:4].T  # (1, 3)
+            O_m = ros_zup_to_vxw_yup(origin_ros)[0]  # (3,)
+
+            obs.integrate_frame(O_m, P_m, free_margin_m=args.free_margin)
+            frames_integrated += 1
+
+            if frames_integrated % 50 == 0:
+                occ_now = int(obs.occupancy_mask().sum())
+                free_now = int(obs.observed_free_mask().sum())
+                log.info("  fi=%d  integrated=%d skipped=%d  occ=%d free=%d",
+                         fi_current, frames_integrated, frames_skipped,
+                         occ_now, free_now)
+
+    log.info("      frame loop done: fi_total=%d  integrated=%d  skipped=%d  in %.2fs",
+             fi, frames_integrated, frames_skipped, time.perf_counter() - t0)
+
+    # ---- [5/5] save obsmap + observed_free export ----
+    log.info("[5/5] saving obsmap and observed_free")
+    obs.save(obsmap_path)
+    log.info("      obsmap saved: %s", obsmap_path)
+
+    # Export observed-free mask for GVD pipeline (same format as uhumans2_carve)
+    free_out = args.vxw_dir / "observed_free.npz"
+    np.savez_compressed(
+        free_out,
+        mask=obs.observed_free_mask(),
+        vmin=obs.vmin,
+        voxel_size=np.float64(obs.voxel_size),
+    )
+    log.info("      observed_free exported: %s", free_out)
+
+    # Final stats
+    occN = int(obs.occupancy_mask().sum())
+    freeN = int(obs.observed_free_mask().sum())
+    print(
+        f"\nRESULT"
+        f"  frames_integrated={frames_integrated}"
+        f"  frame_range={range_desc}"
+        f"  occupied={occ0}->{occN}"
+        f"  observed_free={free0}->{freeN}"
+        f"  obsmap={obsmap_path}"
+    )
+
+
+if __name__ == "__main__":
+    main()
