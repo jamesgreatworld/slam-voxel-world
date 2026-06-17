@@ -27,11 +27,18 @@ class ObsMap:
     l_max: float = L_MAX
     occ_thr: float = OCC_THR
     free_thr: float = FREE_THR
+    sem_label: np.ndarray = field(default=None)   # uint8 winning super_id per cell (0=unknown)
+    sem_count: np.ndarray = field(default=None)   # uint16 winner's running vote count
 
     def __post_init__(self):
         # Transient dirty-region state; not persisted by save/load.
         self._dirty_min = None
         self._dirty_max = None
+        # Allocate semantic grids if not provided (covers new() and fresh load()).
+        if self.sem_label is None:
+            self.sem_label = np.zeros(self.logodds.shape, dtype=np.uint8)
+        if self.sem_count is None:
+            self.sem_count = np.zeros(self.logodds.shape, dtype=np.uint16)
 
     @classmethod
     def new(cls, shape, vmin, voxel_size):
@@ -41,26 +48,48 @@ class ObsMap:
     @classmethod
     def load(cls, path):
         d = np.load(path)
-        return cls(d["logodds"].astype(np.float32), d["vmin"].astype(np.int64),
-                   float(d["voxel_size"]),
-                   float(d["l_hit"]), float(d["l_miss"]), float(d["l_min"]),
-                   float(d["l_max"]), float(d["occ_thr"]), float(d["free_thr"]))
+        obj = cls(d["logodds"].astype(np.float32), d["vmin"].astype(np.int64),
+                  float(d["voxel_size"]),
+                  float(d["l_hit"]), float(d["l_miss"]), float(d["l_min"]),
+                  float(d["l_max"]), float(d["occ_thr"]), float(d["free_thr"]))
+        # Restore semantic grids if present (back-compat: old npz files without them
+        # keep the freshly-allocated zero arrays from __post_init__).
+        if "sem_label" in d:
+            obj.sem_label = d["sem_label"].astype(np.uint8)
+            obj.sem_count = d["sem_count"].astype(np.uint16)
+        return obj
 
     def save(self, path):
         np.savez_compressed(
             path, logodds=self.logodds, vmin=self.vmin, voxel_size=self.voxel_size,
             l_hit=self.l_hit, l_miss=self.l_miss, l_min=self.l_min, l_max=self.l_max,
-            occ_thr=self.occ_thr, free_thr=self.free_thr)
+            occ_thr=self.occ_thr, free_thr=self.free_thr,
+            sem_label=self.sem_label, sem_count=self.sem_count)
 
-    def integrate_frame(self, origin_m, points_m, free_margin_m=0.10):
+    def integrate_frame(self, origin_m, points_m, point_labels=None, free_margin_m=0.10):
         """Update log-odds from one frame: traversed cells get l_miss, the
-        surface endpoint cell gets l_hit, clamped to [l_min, l_max]."""
+        surface endpoint cell gets l_hit, clamped to [l_min, l_max].
+
+        Args:
+            origin_m: sensor origin in metres (3,).
+            points_m: hit points in metres (N, 3).
+            point_labels: optional uint array (N,) of super_id labels per hit
+                point.  When provided, the semantic grids are updated via a
+                Boyer-Moore streaming majority-vote per cell.  Label 0 means
+                unknown and is skipped.  Must be aligned with rows of points_m
+                BEFORE the keep-filter (the same keep mask is applied).
+            free_margin_m: rays shorter than this are discarded.
+        """
         origin_m = np.asarray(origin_m, dtype=np.float64)
         pts = np.asarray(points_m, dtype=np.float64)
         dirs = pts - origin_m[None, :]
         lens = np.linalg.norm(dirs, axis=1)
         keep = lens > free_margin_m
         dirs, lens, pts = dirs[keep], lens[keep], pts[keep]
+        # Apply the same keep-filter to labels so they remain aligned with pts.
+        lab = None
+        if point_labels is not None:
+            lab = np.asarray(point_labels)[keep].astype(np.uint8)
         if len(lens) == 0:
             return
         units = dirs / lens[:, None]
@@ -102,6 +131,23 @@ class ObsMap:
             self.logodds[hit[:, 0], hit[:, 1], hit[:, 2]] += self.l_hit
             touched_parts.append(hit)
         np.clip(self.logodds, self.l_min, self.l_max, out=self.logodds)
+        # --- semantic update (Boyer-Moore streaming majority vote) ---
+        if lab is not None:
+            hit_cells = hvc[hinb]        # (M,3) in-bounds hit voxel indices
+            hit_labels = lab[hinb]       # (M,) aligned labels after keep+hinb
+            for (x, y, z), L in zip(hit_cells, hit_labels):
+                if L == 0:
+                    continue
+                cur = self.sem_label[x, y, z]
+                cnt = self.sem_count[x, y, z]
+                if cur == L:
+                    if cnt < 65535:
+                        self.sem_count[x, y, z] = cnt + 1
+                elif cnt == 0:
+                    self.sem_label[x, y, z] = L
+                    self.sem_count[x, y, z] = 1
+                else:
+                    self.sem_count[x, y, z] = cnt - 1   # Boyer-Moore: opposing vote
         # --- dirty-box tracking ---
         if touched_parts:
             touched = np.concatenate(touched_parts, axis=0)
@@ -131,3 +177,7 @@ class ObsMap:
 
     def observed_free_mask(self):
         return self.logodds <= self.free_thr
+
+    def semantic_grid(self):
+        """uint8 super_id per cell (winning label); meaningful only where occupied."""
+        return self.sem_label
