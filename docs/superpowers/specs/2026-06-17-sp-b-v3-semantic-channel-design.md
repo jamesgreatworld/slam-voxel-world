@@ -26,3 +26,9 @@ ObsMap 加两个 uint16 通道(与 logodds 同形状,稀疏占据所以压缩后
 
 ## 5. 范围外
 语义 places 节点(图节点带 dominant 语义)、语义先验约束(Phase ④)、实例分割——后续。本期只把"每格语义"加进增量地图 + 语义着色导出。
+
+## 6. v3 达成结果(2026-06-17,commits 2efc1a2/c232dbb)
+- ObsMap 加 `sem_label`(uint8)+`sem_count`(uint16),`integrate_frame(point_labels=)` 做 Boyer-Moore 流式多数表决,`semantic_grid()`,save/load 含语义(旧 npz 向后兼容)。
+- `obsmap_export.occupancy_to_vxw(semantic_grid=, palette=)` 语义着色导出;`uhumans2_stream --semantic` 读 seg(复用 uhumans2_to_vxw 全套 seg 机械)→ 传 labels → 导出语义色 live.vxw。
+- 82 测试绿。注:hydra cfg yaml/csv 在外部工作区,单测用内联 palette;真实 `--semantic` 跑用 uhumans2 原配置(已存在)。
+**v3 达成 ✅。SP-B 1-2-3 全部完成。**
