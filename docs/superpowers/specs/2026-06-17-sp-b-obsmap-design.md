@@ -61,3 +61,11 @@ seg2 加载 seg1 存的 obsmap.npz(761KB,baseline 精确=73417),续 integrate,�
 **SP-B 地基达成 ✅**:可持久化、可恢复、可增量增删改的 log-odds 观测地图。一份 log-odds 网格统一了占据+自由(用户"二为一"),per-cell 置信度(用户"weight 属性"),支持删除(二值做不到)。
 
 **下一步**:v1 流式实时循环(边收边推 Godot,§12)| v2 波前增量 ESDF(逐帧实时,FIESTA/Voxblox)| 语义通道(ObsMap 加 semantic 层)。
+
+## 7. SP-B v1 流式实时循环达成(2026-06-17,commits 55a16b9/92e0140)
+
+- **Python**:`m3_adapter/obsmap_export.occupancy_to_vxw`(ObsMap 占据 → 几何 .vxw)+ `uhumans2_stream --live --batch N`:每 N 帧 integrate 后导出几何 .vxw + observed_free(重采样对齐)+ 跑 GVD pipeline → 覆盖写 `<vxw_dir>/live.vxw`。72 测试绿。
+- **Godot**:`world_session.enable_watch()` 轮询 `chunks.idx` mtime,变则 `load_in_place`(复用 world_loaded 接缝);`--watch` flag。headless 验证 `world_watch_enabled`。
+- **演示**:`--live` 续建 600→700 帧,batch50,live.vxw 每批更新(occ 115137→123094),最终渲染 = 几何地图+骨架+房间(out/live_demo.png)。**两进程并跑 = 边走边看(§12 P1/P2)。**
+
+**v1 达成 ✅**。下一步 **v2 波前增量 ESDF**(逐帧实时更新 GVD,本项目最硬算法,抄 FIESTA/Voxblox 的 raise/lower 队列 + parent 追踪),再 **v3 语义通道**。
