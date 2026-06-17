@@ -14,7 +14,7 @@ def test_shape_sig_distinguishes_tall_vs_flat():
     assert len(objs) == 2
     # each shape_sig has a dominant axis (largest principal extent) > the others
     for o in objs:
-        s = o.shape_sig
+        s = o.features["shape"]
         assert len(s) == 3 and s[0] >= s[1] >= s[2] and s[0] > 0.2
 
 
@@ -26,7 +26,7 @@ def _pg():
 def _obj(cx, label, name, sig, pid=0):
     o = ObjectNode(idx=(cx,5,10), label=label, label_name=name, voxel_count=100,
                    bbox_min=(cx-2,3,8), bbox_max=(cx+2,7,12), place_id=pid)
-    o.shape_sig = sig
+    o.features = {"shape": sig}
     return o
 
 
@@ -41,7 +41,8 @@ def test_shape_disambiguates_same_class_assignment():
     # grab ids by shape
     def id_by_shape(sg, sig):
         for n in sg.nodes_by_layer("object"):
-            if [round(x,3) for x in n.attrs["shape"]] == [round(x,3) for x in sig]:
+            feat_shape = n.attrs.get("features", {}).get("shape", n.attrs.get("shape", ()))
+            if [round(x,3) for x in feat_shape] == [round(x,3) for x in sig]:
                 return n.id
         raise AssertionError("not found")
     small_id = id_by_shape(sg1, (0.2,0.15,0.1))
@@ -59,3 +60,17 @@ def test_shape_disambiguates_same_class_assignment():
     assert bid == big_id
     # and the small one is now at x=13 (1.3 m)
     assert sg2.get(sid).pos_m[0] > 1.2
+
+
+def test_feature_cost_composes_and_is_extensible():
+    from m3_adapter.gvd.features import ShapeFeature, feature_cost, extract_features
+    import numpy as np
+    # a line of voxels along x -> shape sig dominant axis
+    cells = np.array([[i, 0, 0] for i in range(10)])
+    f = extract_features(cells, 0.1, ctx={})
+    assert "shape" in f and f["shape"][0] > f["shape"][1]
+    # identical features -> zero cost; different -> positive
+    assert feature_cost({"shape": f["shape"]}, {"shape": f["shape"]}) == 0.0
+    assert feature_cost({"shape": (0.5,0.1,0.1)}, {"shape": (0.1,0.1,0.1)}) > 0
+    # a descriptor missing a feature contributes nothing (graceful)
+    assert feature_cost({}, {"shape": f["shape"]}) == 0.0

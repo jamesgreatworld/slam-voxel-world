@@ -208,7 +208,8 @@ def build_scene_graph(places_graph, objects, world_id="apartment",
                 "bbox_min": list(o.bbox_min),
                 "bbox_max": list(o.bbox_max),
                 "place_id": o.place_id,
-                "shape": list(getattr(o, "shape_sig", ())),
+                "features": dict(getattr(o, "features", {}) or {}),
+                "shape": list((getattr(o, "features", {}) or {}).get("shape", ())),
                 "misses": 0,
             },
         )
@@ -316,16 +317,7 @@ def merge_observation(existing: SceneGraph, fresh_places_graph, fresh_objects,
     # Collect all classes present in either side
     all_classes = set(ex_by_class.keys()) | set(fresh_by_class.keys())
 
-    def _shape_dist(ex_info, fresh_obj):
-        """Euclidean distance between shape signatures (padded to length 3)."""
-        ex_shape = ex_info["attrs"].get("shape", [])
-        fr_shape = list(getattr(fresh_obj, "shape_sig", ()))
-        if not ex_shape:
-            return 0.0  # no existing shape — fall back to distance-only
-        # pad/truncate both to length 3
-        ex3 = [float(ex_shape[i]) if i < len(ex_shape) else 0.0 for i in range(3)]
-        fr3 = [float(fr_shape[i]) if i < len(fr_shape) else 0.0 for i in range(3)]
-        return float(np.linalg.norm(np.array(ex3) - np.array(fr3)))
+    from m3_adapter.gvd.features import feature_cost
 
     for cls in all_classes:
         existing_C = ex_by_class.get(cls, [])
@@ -343,8 +335,9 @@ def merge_observation(existing: SceneGraph, fresh_places_graph, fresh_objects,
             for jj, (_, fo) in enumerate(fresh_C):
                 fo_pos = (np.asarray(fo.idx, dtype=float) + vmin) * vs
                 dist = float(np.linalg.norm(ex_info["pos_m"] - fo_pos))
-                sdist = _shape_dist(ex_info, fo)
-                cost[i, jj] = dist + shape_weight * sdist
+                fresh_feats = getattr(fo, "features", {}) or {}
+                ex_feats = ex_info["attrs"].get("features", {})
+                cost[i, jj] = dist + feature_cost(ex_feats, fresh_feats)
 
         ri, cj = linear_sum_assignment(cost)
 
