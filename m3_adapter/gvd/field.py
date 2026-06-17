@@ -163,6 +163,12 @@ def extract_gvd(
     return gvd
 
 
+def load_observed_free(path):
+    """Load an observed-free mask sidecar. Returns (mask_bool, vmin_int, voxel_size)."""
+    d = np.load(path)
+    return d["mask"].astype(bool), d["vmin"].astype(np.int64), float(d["voxel_size"])
+
+
 def denoise_occupancy(
     occupied: np.ndarray, min_component_size: int, connectivity: int = 3
 ) -> np.ndarray:

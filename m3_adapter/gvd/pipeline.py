@@ -31,6 +31,7 @@ class GvdConfig:
     merge_close_m: float = 0.0
     rooms: bool = False
     room_resolution: float = 1.0
+    observed_free_path: str | None = None
 
 
 def run(cfg: GvdConfig) -> dict:
@@ -44,12 +45,25 @@ def run(cfg: GvdConfig) -> dict:
         occ = field.denoise_occupancy(occ, cfg.min_component)
     occ_clean = int(occ.sum())
 
-    seed = field.resolve_seed(occ, vmin, vsize, seed_metres=cfg.seed_metres,
-                              spawn_hint=world.manifest.spawn_hint)
-    free = field.flood_free_space(occ, seed)
-    flood_fraction = float(free.sum()) / float(free.size)
-
     dist_m, parent = field.compute_esdf(occ, vsize)
+
+    if cfg.observed_free_path:
+        mask, mvmin, mvs = field.load_observed_free(cfg.observed_free_path)
+        if mask.shape != occ.shape or not np.array_equal(np.asarray(mvmin), np.asarray(vmin)):
+            raise ValueError(
+                f"observed_free grid mismatch: mask shape {mask.shape} vmin {tuple(int(x) for x in mvmin)} "
+                f"vs occ shape {occ.shape} vmin {tuple(int(x) for x in vmin)} — "
+                f"regenerate the mask against this .vxw with pad={cfg.pad}")
+        free = mask & ~occ
+        flood_fraction = float(free.sum()) / float(free.size)  # here = observed-free fraction
+        seed_idx = (-1, -1, -1)  # not used in this path
+    else:
+        seed = field.resolve_seed(occ, vmin, vsize, seed_metres=cfg.seed_metres,
+                                  spawn_hint=world.manifest.spawn_hint)
+        seed_idx = tuple(int(x) for x in seed)
+        free = field.flood_free_space(occ, seed)
+        flood_fraction = float(free.sum()) / float(free.size)
+
     if cfg.band_max is not None and cfg.band_max > 0:
         free = free & (dist_m <= cfg.band_max)
     free_fraction = float(free.sum()) / float(free.size)
@@ -91,7 +105,7 @@ def run(cfg: GvdConfig) -> dict:
     stats = {
         "voxel_size_m": vsize,
         "bbox_dims": tuple(int(x) for x in occ.shape),
-        "seed_idx": tuple(int(x) for x in seed),
+        "seed_idx": seed_idx,
         "occ_raw": occ_raw, "occ_clean": occ_clean,
         "flood_fraction": flood_fraction, "free_fraction": free_fraction,
         "band_max": cfg.band_max,
@@ -100,13 +114,14 @@ def run(cfg: GvdConfig) -> dict:
         "graph_nodes": (len(graph_obj.nodes) if graph_obj is not None else 0),
         "graph_edges": (len(graph_obj.edges) if graph_obj is not None else 0),
         "num_rooms": num_rooms,
+        "observed_free": bool(cfg.observed_free_path),
         "leak_warning": flood_fraction > 0.5,
         "t_field_s": round(t_field - t0, 2),
         "t_graph_s": round(t_graph - t_field, 2),
         "t_write_s": round(t_write - t_graph, 2),
         "t_total_s": round(t_write - t0, 2),
     }
-    print(f"[gvd] bbox {stats['bbox_dims']} voxel {vsize} m  seed {stats['seed_idx']}")
+    print(f"[gvd] bbox {stats['bbox_dims']} voxel {vsize} m  seed {seed_idx}")
     if cfg.min_component and cfg.min_component > 1:
         print(f"[gvd] denoise: occ {occ_raw} -> {occ_clean}")
     print(f"[gvd] flood {flood_fraction:.1%} (pre-band) -> band {cfg.band_max} m kept {free_fraction:.1%}")

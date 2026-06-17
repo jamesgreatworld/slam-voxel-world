@@ -56,6 +56,9 @@ def main() -> None:
                     help="partition the places graph into rooms (implies --graph)")
     ap.add_argument("--room-resolution", type=float, default=1.0,
                     help="Louvain resolution: higher = more, smaller rooms")
+    ap.add_argument("--observed-free", type=str, default=None,
+                    help="path to observed_free.npz; use it as the free-space "
+                         "source instead of flood (ray-carved, bounds the leak)")
     args = ap.parse_args()
 
     bmax = args.band_max if args.band_max and args.band_max > 0 else None
@@ -66,6 +69,7 @@ def main() -> None:
         thin=args.thin, graph=args.graph, merge_radius_m=args.merge_radius,
         prune_spurs_m=args.prune_spurs, merge_close_m=args.merge_close,
         rooms=args.rooms, room_resolution=args.room_resolution,
+        observed_free_path=args.observed_free,
     )
     run(cfg)
 

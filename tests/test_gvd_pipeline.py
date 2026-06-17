@@ -46,3 +46,32 @@ def test_pipeline_graph_rooms_cleanup(tmp_path):
     assert "num_rooms" in g and all("room" in n for n in g["nodes"])
     w = vxw.read_world(out)
     assert any(m.name.startswith("room_") for m in w.palette.materials)
+
+
+def test_pipeline_observed_free_source(tmp_path):
+    import numpy as np
+    import vxw_format as vxw
+    from m3_adapter.gvd.field import densify_occupancy
+    from m3_adapter.gvd.pipeline import GvdConfig, run
+    # reuse the module's _make_box_vxw
+    src = _make_box_vxw(tmp_path)
+    world = vxw.read_world(src)
+    occ, vmin = densify_occupancy(world, pad=1)
+    # a mask that marks only a small interior region as observed-free
+    mask = np.zeros(occ.shape, dtype=bool)
+    mask[8:13, 8:13, 8:13] = True
+    np.savez_compressed(tmp_path / "of.npz", mask=mask, vmin=np.asarray(vmin), voxel_size=0.5)
+    out = tmp_path / "o.vxw"
+    stats = run(GvdConfig(str(src), str(out), band_max=None, thin=True,
+                          observed_free_path=str(tmp_path / "of.npz")))
+    assert stats["observed_free"] is True
+    # free fraction reflects the small mask, NOT a flood
+    assert stats["free_fraction"] <= float(mask.sum()) / mask.size + 1e-9
+    # mismatched grid raises
+    bad = tmp_path / "bad.npz"
+    np.savez_compressed(bad, mask=np.zeros((3,3,3), bool), vmin=np.zeros(3, np.int64), voxel_size=0.5)
+    try:
+        run(GvdConfig(str(src), str(tmp_path/"o2.vxw"), observed_free_path=str(bad)))
+        assert False, "expected grid-mismatch ValueError"
+    except ValueError:
+        pass
