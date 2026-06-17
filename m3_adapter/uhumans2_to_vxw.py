@@ -1,4 +1,10 @@
-"""uhumans2_to_vxw — convert a uHumans2 / TESSE rosbag2 directly into .vxw.
+"""[DEPRECATED for new use] Batch uHumans2 -> .vxw adapter. The ObsMap +
+uhumans2_stream + obsmap_to_vxw path is now the single source of truth
+(occupancy/free/semantic in one persistent incremental map). This module is
+kept for its reusable seg/entity/spawn helpers (imported by obsmap_export) and
+as the reference batch implementation. See docs SP-B + the unification spec.
+
+uhumans2_to_vxw — convert a uHumans2 / TESSE rosbag2 directly into .vxw.
 
 Pipeline (M2a, single-layer voxel demo; entity extraction comes in M2b):
 
