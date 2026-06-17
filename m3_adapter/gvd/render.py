@@ -16,6 +16,9 @@ SKELETON_EMISSION = 3.0
 PLACE_NODE_NAME = "place_node"
 PLACE_NODE_COLOR = (255, 0, 255)      # magenta
 PLACE_NODE_EMISSION = 4.0
+OBJECT_MARKER_NAME = "object_marker"
+OBJECT_MARKER_COLOR = (255, 140, 0)   # orange
+OBJECT_MARKER_EMISSION = 4.0
 ROOM_COLORS = [
     (255, 80, 80), (80, 255, 80), (80, 80, 255), (255, 255, 80),
     (255, 80, 255), (80, 255, 255), (255, 160, 40), (160, 80, 255),
@@ -100,9 +103,26 @@ def stamp_room_nodes(world, graph, marker_radius: int = 1):
         stamp_voxels(world, cells, f"room_{j}", ROOM_COLORS[j], ROOM_EMISSION)
 
 
-def write_graph_json(path, graph):
+def stamp_object_markers(world, objects, vmin, marker_radius=2):
+    """Stamp orange markers at each object centroid into the world."""
+    if not objects:
+        return
+    r = marker_radius
+    cells = []
+    for o in objects:
+        cx, cy, cz = o.idx
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                for dz in range(-r, r + 1):
+                    cells.append((cx + dx, cy + dy, cz + dz))
+    cells_world = np.array(cells, dtype=np.int64) + np.asarray(vmin, dtype=np.int64)
+    stamp_voxels(world, cells_world, OBJECT_MARKER_NAME, OBJECT_MARKER_COLOR, OBJECT_MARKER_EMISSION)
+
+
+def write_graph_json(path, graph, objects=None):
     """Write the places graph as JSON. Node pos_m = (idx+vmin)*voxel_size.
-    Includes per-node 'room' and top-level 'num_rooms' when any node.room>=0."""
+    Includes per-node 'room' and top-level 'num_rooms' when any node.room>=0.
+    When objects is given, adds an 'objects' array to the JSON."""
     has_rooms = any(n.room >= 0 for n in graph.nodes)
     out_nodes = []
     for i, nd in enumerate(graph.nodes):
@@ -119,4 +139,12 @@ def write_graph_json(path, graph):
     doc = {"nodes": out_nodes, "edges": out_edges}
     if has_rooms:
         doc["num_rooms"] = len({n.room for n in graph.nodes})
+    if objects is not None:
+        doc["objects"] = [
+            {"id": i, "label": o.label, "label_name": o.label_name,
+             "voxel_count": o.voxel_count, "place_id": o.place_id,
+             "idx": list(o.idx), "bbox_min": list(o.bbox_min),
+             "bbox_max": list(o.bbox_max)}
+            for i, o in enumerate(objects)
+        ]
     Path(path).write_text(json.dumps(doc, indent=2))

@@ -256,3 +256,23 @@ def thin_gvd(gvd: np.ndarray) -> np.ndarray:
     if not gvd.any():
         return gvd
     return np.asarray(skeletonize(gvd), dtype=bool)
+
+
+def densify_semantic(world, pad=1):
+    """Like densify_occupancy but returns (occ_bool, sem_uint8, vmin): sem holds
+    each occupied cell's semantic_id from the .vxw chunks (0 elsewhere)."""
+    extent = world.manifest.chunk_extent
+    occ, vmin = densify_occupancy(world, pad=pad)  # reuse for bounds/vmin
+    sem = np.zeros(occ.shape, dtype=np.uint8)
+    for ccoord, chunk in world.chunks.items():
+        v = chunk.voxels
+        mask = v["material_id"] != 0
+        if not mask.any():
+            continue
+        idx = np.argwhere(mask)
+        base = np.array(ccoord, dtype=np.int64) * extent
+        wv = idx + base - vmin
+        inb = ((wv[:,0]>=0)&(wv[:,0]<occ.shape[0])&(wv[:,1]>=0)&(wv[:,1]<occ.shape[1])&(wv[:,2]>=0)&(wv[:,2]<occ.shape[2]))
+        wv = wv[inb]; labs = v["semantic_id"][mask][inb]
+        sem[wv[:,0], wv[:,1], wv[:,2]] = labs
+    return occ, sem, vmin

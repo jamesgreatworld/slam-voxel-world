@@ -35,6 +35,8 @@ class GvdConfig:
     rooms: bool = False
     room_resolution: float = 1.0
     observed_free_path: str | None = None
+    objects: bool = False
+    object_min_voxels: int = 20
 
 
 def run(cfg: GvdConfig) -> dict:
@@ -42,7 +44,11 @@ def run(cfg: GvdConfig) -> dict:
     world = vxw.read_world(Path(cfg.input_vxw))
     vsize = world.manifest.voxel_size_meters
 
-    occ, vmin = field.densify_occupancy(world, pad=cfg.pad)
+    if cfg.objects:
+        occ, sem, vmin = field.densify_semantic(world, pad=cfg.pad)
+    else:
+        occ, vmin = field.densify_occupancy(world, pad=cfg.pad)
+        sem = None
     occ_raw = int(occ.sum())
     if cfg.min_component and cfg.min_component > 1:
         occ = field.denoise_occupancy(occ, cfg.min_component)
@@ -97,13 +103,25 @@ def run(cfg: GvdConfig) -> dict:
         num_rooms = len(set(labels)) if labels else 0
     t_graph = time.perf_counter()
 
+    if cfg.objects:
+        from m3_adapter.gvd.objects import extract_objects, link_to_places
+        objs = extract_objects(occ, sem, vsize, vmin, label_names={}, min_voxels=cfg.object_min_voxels)
+        if graph_obj is not None:
+            link_to_places(objs, graph_obj)
+        print(f"[gvd] objects: {len(objs)} instances linked to places")
+    else:
+        objs = []
+
     render.stamp_skeleton(world, gvd, vmin)
     if do_graph and graph_obj is not None:
         if cfg.rooms:
             render.stamp_room_nodes(world, graph_obj)
         else:
             render.stamp_graph_nodes(world, graph_obj)
-        render.write_graph_json(Path(cfg.output_vxw).with_suffix(".graph.json"), graph_obj)
+        render.write_graph_json(Path(cfg.output_vxw).with_suffix(".graph.json"), graph_obj,
+                                objects=objs if cfg.objects else None)
+    if cfg.objects:
+        render.stamp_object_markers(world, objs, vmin)
     vxw.write_world(Path(cfg.output_vxw), world)
     t_write = time.perf_counter()
 
@@ -119,6 +137,7 @@ def run(cfg: GvdConfig) -> dict:
         "graph_nodes": (len(graph_obj.nodes) if graph_obj is not None else 0),
         "graph_edges": (len(graph_obj.edges) if graph_obj is not None else 0),
         "num_rooms": num_rooms,
+        "num_objects": len(objs),
         "observed_free": bool(cfg.observed_free_path),
         "leak_warning": flood_fraction > 0.5,
         "t_field_s": round(t_field - t0, 2),

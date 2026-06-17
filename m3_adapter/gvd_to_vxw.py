@@ -62,6 +62,10 @@ def main() -> None:
     ap.add_argument("--observed-free", type=str, default=None,
                     help="path to observed_free.npz; use it as the free-space "
                          "source instead of flood (ray-carved, bounds the leak)")
+    ap.add_argument("--objects", action="store_true",
+                    help="extract semantic object instances and link to place nodes")
+    ap.add_argument("--object-min-voxels", type=int, default=20,
+                    help="minimum voxels for an object cluster to be kept (default 20)")
     args = ap.parse_args()
 
     bmax = args.band_max if args.band_max and args.band_max > 0 else None
@@ -74,6 +78,7 @@ def main() -> None:
         drop_small_nodes=args.drop_small,
         rooms=args.rooms, room_resolution=args.room_resolution,
         observed_free_path=args.observed_free,
+        objects=args.objects, object_min_voxels=args.object_min_voxels,
     )
     run(cfg)
 
