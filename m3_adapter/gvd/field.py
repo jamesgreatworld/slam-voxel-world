@@ -205,6 +205,16 @@ def extract_gvd_local(
     return out
 
 
+def replace_region(persistent_gvd, bbox_min, bbox_max, new_region):
+    """Update a persistent full-grid GVD bool array in place: clear the core
+    box [bbox_min,bbox_max) then OR in `new_region` (which is a full-grid bool
+    that is True only inside that box, as returned by extract_gvd_local).
+    Returns persistent_gvd (mutated)."""
+    sl = tuple(slice(int(bbox_min[a]), int(bbox_max[a])) for a in range(3))
+    persistent_gvd[sl] = new_region[sl]
+    return persistent_gvd
+
+
 def load_observed_free(path):
     """Load an observed-free mask sidecar. Returns (mask_bool, vmin_int, voxel_size)."""
     d = np.load(path)

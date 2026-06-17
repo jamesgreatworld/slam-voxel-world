@@ -29,7 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import vxw_format as vxw  # noqa: E402
 from m3_adapter.common import ros_zup_to_vxw_yup  # noqa: E402
-from m3_adapter.gvd.field import densify_occupancy  # noqa: E402
+from m3_adapter.gvd.field import (  # noqa: E402
+    densify_occupancy, extract_gvd_local, replace_region, thin_gvd,
+    compute_esdf, extract_gvd)
 from m3_adapter.obsmap import ObsMap  # noqa: E402
 from m3_adapter.gvd.pipeline import GvdConfig, run as gvd_run  # noqa: E402
 from m3_adapter.obsmap_export import occupancy_to_vxw  # noqa: E402
@@ -107,6 +109,74 @@ def _live_snapshot(obs, batch_idx, frames_so_far, out_vxw: Path, vxw_dir: Path) 
     print(f"[live] batch={batch_idx}  fi={frames_so_far}  occ={occ_count}  free={free_count}  -> {out_vxw}")
 
 
+def _incremental_snapshot(
+    obs,
+    batch_idx: int,
+    frames_so_far: int,
+    out_vxw: Path,
+    vxw_dir: Path,
+    persistent_gvd: np.ndarray | None,
+) -> np.ndarray:
+    """Lightweight incremental GVD snapshot: recompute only the dirty bbox.
+
+    Maintains `persistent_gvd` (full obsmap-grid-shape bool array) across calls.
+    Returns the (possibly freshly allocated) persistent_gvd.
+
+    Writes a geometric .vxw with the thinned persistent GVD skeleton stamped in
+    cyan. Skips room detection (v2.0 scope bound).
+    """
+    from m3_adapter.gvd.render import stamp_skeleton  # local import to avoid circular
+
+    occ_mask = obs.occupancy_mask()
+    occ_count = int(occ_mask.sum())
+    if occ_count == 0:
+        log.info("  [incr] batch=%d  fi=%d  occ=0 — skipping", batch_idx, frames_so_far)
+        if persistent_gvd is None:
+            persistent_gvd = np.zeros(obs.logodds.shape, dtype=bool)
+        return persistent_gvd
+
+    # Allocate on first call
+    if persistent_gvd is None:
+        persistent_gvd = np.zeros(obs.logodds.shape, dtype=bool)
+
+    bbox = obs.pop_dirty_bbox()
+    if bbox is None:
+        log.info("  [incr] batch=%d  fi=%d  no dirty bbox — skipping", batch_idx, frames_so_far)
+        return persistent_gvd
+
+    bmin, bmax = bbox
+    box_size = tuple(int(x) for x in (bmax - bmin))
+
+    free_mask = obs.observed_free_mask()
+
+    # Time the local ESDF vs estimated full cost
+    t0 = time.perf_counter()
+    local = extract_gvd_local(
+        occ_mask, free_mask, obs.voxel_size,
+        bmin, bmax,
+        margin_vox=25, d_min=0.20, theta_sep=0.40,
+    )
+    t_local = time.perf_counter() - t0
+
+    replace_region(persistent_gvd, bmin, bmax, local)
+    thinned = thin_gvd(persistent_gvd)
+
+    # Write geometric vxw
+    temp_geom = vxw_dir / "_live_geom.vxw"
+    occupancy_to_vxw(occ_mask, obs.vmin, obs.voxel_size, temp_geom)
+
+    # Stamp thinned GVD skeleton onto geometric world and write as live.vxw
+    world2 = vxw.read_world(temp_geom)
+    stamp_skeleton(world2, thinned, obs.vmin)
+    vxw.write_world(out_vxw, world2)
+
+    print(
+        f"[incr] batch={batch_idx}  fi={frames_so_far}"
+        f"  bbox={box_size}  local={t_local*1000:.0f}ms  -> {out_vxw}"
+    )
+    return persistent_gvd
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -141,6 +211,9 @@ def main() -> None:
                     help="frames per live snapshot batch (default 50)")
     ap.add_argument("--out-vxw", type=str, default=None,
                     help="output .vxw for live snapshots (default: <vxw_dir>/live.vxw)")
+    ap.add_argument("--incremental", action="store_true",
+                    help="only meaningful with --live: recompute GVD only in the "
+                         "dirty box each batch (fast incremental path, skips rooms)")
     args = ap.parse_args()
 
     live_out_vxw = Path(args.out_vxw) if args.out_vxw else None
@@ -191,6 +264,9 @@ def main() -> None:
 
     if args.live and live_out_vxw is None:
         live_out_vxw = args.vxw_dir / "live.vxw"
+
+    # Persistent GVD grid for --incremental mode (allocated lazily on first snapshot)
+    persistent_gvd: np.ndarray | None = None
 
     # ---- [3/5] scan bag: odom + tf_static + camera_info ----
     from rosbags.rosbag2 import Reader
@@ -303,8 +379,15 @@ def main() -> None:
                          fi_current, frames_integrated, frames_skipped,
                          occ_now, free_now)
             if args.live and frames_integrated % args.batch == 0:
-                _live_snapshot(obs, frames_integrated // args.batch,
-                               frames_integrated, live_out_vxw, args.vxw_dir)
+                if args.incremental:
+                    persistent_gvd = _incremental_snapshot(
+                        obs, frames_integrated // args.batch,
+                        frames_integrated, live_out_vxw, args.vxw_dir,
+                        persistent_gvd,
+                    )
+                else:
+                    _live_snapshot(obs, frames_integrated // args.batch,
+                                   frames_integrated, live_out_vxw, args.vxw_dir)
 
     log.info("      frame loop done: fi_total=%d  integrated=%d  skipped=%d  in %.2fs",
              fi, frames_integrated, frames_skipped, time.perf_counter() - t0)

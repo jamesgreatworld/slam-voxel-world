@@ -1,5 +1,5 @@
 import numpy as np
-from m3_adapter.gvd.field import extract_gvd, compute_esdf, extract_gvd_local
+from m3_adapter.gvd.field import extract_gvd, compute_esdf, extract_gvd_local, replace_region
 from m3_adapter.obsmap import ObsMap
 
 
@@ -37,3 +37,15 @@ def test_obsmap_dirty_bbox_tracks_touched_cells():
     assert lo[1] <= 10 < hi[1]
     # popping again is empty
     assert m.pop_dirty_bbox() is None
+
+
+def test_replace_region_updates_core_box():
+    import numpy as np
+    from m3_adapter.gvd.field import replace_region
+    persistent = np.zeros((20, 20, 20), dtype=bool)
+    persistent[1, 1, 1] = True  # outside the box, should survive
+    new = np.zeros((20, 20, 20), dtype=bool)
+    new[10, 10, 10] = True      # inside the box
+    replace_region(persistent, np.array([8, 8, 8]), np.array([13, 13, 13]), new)
+    assert persistent[10, 10, 10]      # box content updated
+    assert persistent[1, 1, 1]         # outside untouched
