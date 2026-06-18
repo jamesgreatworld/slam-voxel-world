@@ -24,11 +24,12 @@ class VoxelDelta:
 
 @dataclass
 class Overlay:
-    voxels: list = field(default_factory=list)   # list[VoxelDelta]
+    voxels: list[VoxelDelta] = field(default_factory=list)
 
     def add_voxel(self, idx, sem=0, generator="manual",
                   binding="persistent", op="add") -> None:
-        assert op in _OPS, f"bad op {op}"
+        if op not in _OPS:
+            raise ValueError(f"bad op {op!r}; expected one of {_OPS}")
         self.voxels.append(VoxelDelta(
             tuple(int(v) for v in idx), op, int(sem), str(generator), str(binding)))
 

@@ -22,3 +22,13 @@ def test_save_load_roundtrip(tmp_path):
     assert len(ov2.voxels) == 2
     assert ov2.voxels[0].idx == (1, 2, 3) and ov2.voxels[0].generator == "floor_fill"
     assert ov2.voxels[1].op == "remove" and ov2.voxels[1].binding == "independent"
+
+
+def test_replace_op_roundtrips(tmp_path):
+    ov = Overlay()
+    ov.add_voxel((7, 8, 9), sem=11, generator="floor_fill", binding="persistent", op="replace")
+    npz = tmp_path / "overlay.npz"
+    js = tmp_path / "overlay.json"
+    ov.save(npz, js)
+    ov2 = Overlay.load(npz, js)
+    assert ov2.voxels[0].op == "replace" and ov2.voxels[0].sem == 11
