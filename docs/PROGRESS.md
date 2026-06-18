@@ -1,10 +1,10 @@
 # 进展总结与未来展望(自研 Hydra + 增量语义建图)
 
-> 日期:2026-06-17。本文是给后续会话的**交接文档**:当前进展 + 架构 + 未完成展望。
+> 日期:2026-06-18。本文是给后续会话的**交接文档**:当前进展 + 架构 + 未完成展望。
 > 详细设计散在 `docs/superpowers/specs/2026-06-*.md`,本文是索引 + 总览。
 
 ## 0. 一句话现状
-"自研 Hydra 式增量语义建图"主线**从设计到实时、到单一真值源、到完整场景图(含物体跟踪/去碎/模型替换)走完了**,远超最初 SP-A→SP-D 设想。最大未启动前沿 = **Phase ④ 先验引导建图**(docs/vision.md)。
+"自研 Hydra 式增量语义建图"主线**从设计到实时、到单一真值源、到完整场景图(含物体跟踪/去碎/模型替换)走完了**,远超最初 SP-A→SP-D 设想。**Phase ④ 先验引导建图已正式起步**:落地了分层地图的**虚拟层(L1)+ 插件化先验推理流水线(Lc)**,首个 generator `floor_fill` 解决了"屋子悬浮/人掉地"。完整架构见 `docs/superpowers/specs/2026-06-18-layered-map-architecture-design.md`。
 
 ## 1. 端到端数据流(现状)
 ```
@@ -17,6 +17,8 @@ ObsMap(m3_adapter/obsmap.py):持久 log-odds 观测地图
    │
    ├─ obsmap_to_vxw.py ──→ 完整游戏 .vxw(语义体素 + 实体[DBSCAN OBB] + spawn + mc_item 预制模型)
    │                         → Godot 渲染(greedy mesh);--watch 文件热重载(§12 P1/P2)
+   ├─ vlayer(L1 虚拟层,新)─→ compose(观测 ⊕ overlay 差异)→ 补全 .vxw
+   │     Lc 插件化流水线(stage 0..6)→ floor_fill 等 generator 产 overlay;ObsMap 只读
    └─ observed_free 派生 ──→ GVD 子系统(m3_adapter/gvd/)
           field(densify/esdf/gvd/thin/denoise/局部增量)→ graph(PlacesGraph+清洗)
           → rooms(Louvain)→ objects(语义聚类+链places)→ render/scene_graph
@@ -42,21 +44,27 @@ ObsMap(m3_adapter/obsmap.py):持久 log-odds 观测地图
 | 去碎(DBSCAN 容差 + bbox 邻近合并) | gvd/objects.py | 61900c0 |
 | **物体类→mc_item 预制模型替换** | obsmap_export.SUPER_ID_TO_MC_ITEM | 9299115 |
 | 时序物体合并(持久共现碎片→合一) | scene_graph.consolidate_fragments | 5092e0f |
+| **integrate_frame 空数组崩溃修复**(全帧建图得以跑完) | obsmap.py | 220eb0a |
+| **mc_item 直立(yaw-only)+ 原生尺寸拾取盒** | entity_renderer._yaw_only_quat | a4c4768 |
+| **分层地图虚拟层 L1**(overlay 差异 + compose + 插件化 Lc 流水线 + floor_fill 补地板 + export) | m3_adapter/vlayer/* | d97d161..b8ce6e4 |
 
 settled GVD 命令:`--observed-free <npz> --band-max 0 --min-component 30 --thin --rooms --prune-spurs 0.3 --merge-close 0.2 --drop-small 5 --room-resolution 0.3 --objects [--scene-graph]`。
-settled 建图:`uhumans2_stream <bag> <vxwdir> --semantic --hydra-cfg F:/hydra_ws`(rosbag 在 F:/hydra_ws/datasets/...)。
+settled 建图:`uhumans2_stream <bag> <vxwdir> --semantic --hydra-cfg F:/hydra_ws`(rosbag 在 F:/hydra_ws/datasets/...);全 1779 帧 → 占据 173,262 体素。
+settled 补全:`obsmap_to_completed_vxw(ObsMap, out, generators=[FloorFill(close_radius=2)])`(m3_adapter/vlayer/export.py)→ 补 ~49k 地板体素、L0 不变。
 
 ## 3. 未完成(展望,按价值排)
 
-### 3.1 Phase ④ 先验引导建图(最大前沿,未启动)—— docs/vision.md
-- ④a 平面约束(墙平整/垂直)| ④b 模板/尺寸先验(家具拟合标准模型,**mc_item 替换是入口,已做**)| ④c **物理验证回路**("桌应落地"重力/碰撞)| ④d 学习补全。
+### 3.1 Phase ④ 先验引导建图(已起步)—— docs/vision.md + specs/2026-06-18-layered-map
+- **已落地**:分层数据架构(L0 观测 / Lc 先验推理引擎 / L1 虚拟覆盖)+ 插件化 Lc 流水线(stage 0..6 契约)+ ④a 首个 STRUCTURE generator `floor_fill`(补地板)+ ④b 入口 mc_item 替换。
+- ④a 余下:墙面平面拟合 / 遮挡恢复(stage 1 后续 generator)| ④b 模板/尺寸拟合 | ④c **物理验证回路**(stage 6,"桌应落地")| ④d 学习补全。
+- **vlayer 直接延续**:stage 2–5 现有步骤(extract_entities/objects/scene_graph/gvd)正式适配 Generator 契约;Godot 物体编辑写回 entities.json、结构编辑写回 overlay;生死规则事件化 + "保留?"提示 UI;floor_fill 多层/错层(按峰分区)。
 
 ### 3.2 当前工作的直接延续
 - **颜色/ORB/CNN 特征**:`gvd/features.py` 框架已支持,只实现 shape;颜色需给 ObsMap 加 RGB 通道(rosbag 有 RGB 主题)。
 - **Hydra 膨胀式房间法**(剪 clearance 低的门口节点 → 连通分量)—— 可能比 Louvain 干净,place 已带 clearance_m。
 - **真 Voxblox 波前 ESDF**(v2 是局部重算,非完整 raise/lower 队列)= v2.1。
-- **全帧高保真 carve**(追平批处理 43.4 万体素;现 stride4/部分帧约 5.7 万)。
-- **mc_item 缩放保真**:entity_renderer 可能按 OBB 缩放预制模型,DBSCAN 膨胀 OBB 会致变形 —— 建议改为"OBB 定位/朝向,模型用原生比例"。
+- **全帧高保真 carve**:已全 1779 帧重建 → 173,262 体素(stride4);进一步追平批处理 43.4 万体素可降 stride。
+- ~~mc_item 缩放保真~~ **已做**(a4c4768):yaw-only 直立 + 拾取盒用 preset overall_extents_m,模型原生比例(实为 vlayer 的 `generator=plane/template` + `adjust` 的具体实例)。
 - 更多 mc_item preset(couch/plant/books 现无模型 → 保留 OBB)。
 
 ### 3.3 架构储备 / 远期
@@ -73,3 +81,4 @@ settled 建图:`uhumans2_stream <bag> <vxwdir> --semantic --hydra-cfg F:/hydra_w
 - 双层数据:`.vxw`(游戏渲染,稀疏占据)+ ObsMap/sidecar(建图工作态)= "一份逻辑图、两通道"(vision.md §4)。
 - 物体破碎根因 = 语义噪声 + 几何空洞(非 mesh/voxel 之别);解法 = 去碎①② + 时序合并 + **预制模型替换(治本于显示层)**。
 - 追踪 = SORT→DeepSORT 思路;我们的物体静止为主,**不需 Kalman 位姿预测**,靠类内匈牙利 + 外观特征。
+- **分层地图 = 2 存储 + 1 引擎**(spec 2026-06-18):L0 观测(`obsmap.npz`,不可变)/ Lc 先验推理(引擎,不持久,把 observed 物体诚实提交进 L1 并按观测更新调和)/ L1 虚拟覆盖(`overlay.*` 结构差异 + `entities.json` 物体,用户拥有,唯一对外)。原则:**观测只读**(错了也不改,只在 L1 覆盖纠正输出);**进 L1 即用户拥有**,观测不更新就永久存在;`compose(L0,L1)→.vxw` 可重算。先验强弱 = binding(live/persistent/independent)= vision.md 的 λ。
