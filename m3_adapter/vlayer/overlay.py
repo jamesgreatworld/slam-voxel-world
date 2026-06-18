@@ -30,6 +30,8 @@ class Overlay:
                   binding="persistent", op="add") -> None:
         if op not in _OPS:
             raise ValueError(f"bad op {op!r}; expected one of {_OPS}")
+        if not 0 <= int(sem) <= 255:
+            raise ValueError(f"sem {sem} out of uint8 range [0,255]")
         self.voxels.append(VoxelDelta(
             tuple(int(v) for v in idx), op, int(sem), str(generator), str(binding)))
 
@@ -88,5 +90,6 @@ def compose_structure(obsmap, overlay):
         elif d.op == "remove":
             occ[x, y, z] = False
         elif d.op == "replace":
-            sem[x, y, z] = d.sem
+            if occ[x, y, z]:          # replace only relabels an existing voxel
+                sem[x, y, z] = d.sem
     return occ, sem

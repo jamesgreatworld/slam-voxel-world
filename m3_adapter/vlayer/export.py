@@ -17,6 +17,7 @@ def obsmap_to_completed_vxw(obsmap, out_path, generators,
     palette 为 None 时按非语义模式导出(全部 material_id=1);
     传入 vxw.Palette 则语义着色。"""
     out_path = Path(out_path)
+    out_path.mkdir(parents=True, exist_ok=True)
     overlay = run_pipeline(obsmap, generators)
     occ, sem = compose_structure(obsmap, overlay)
     occupancy_to_vxw(

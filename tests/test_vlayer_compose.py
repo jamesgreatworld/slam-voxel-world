@@ -21,6 +21,17 @@ def test_completed_add_fills_only_unknown():
     assert not m.occupancy_mask()[3, 1, 2]           # L0 untouched
 
 
+def test_replace_skips_unoccupied_cell():
+    import numpy as np
+    from m3_adapter.obsmap import ObsMap
+    m = ObsMap.new((4, 4, 4), np.zeros(3, np.int64), 0.1)
+    ov = Overlay()
+    ov.add_voxel((1, 1, 1), sem=7, generator="manual", binding="independent", op="replace")
+    occ, sem = compose_structure(m, ov)
+    assert not occ[1, 1, 1]      # replace did not occupy an empty cell
+    assert sem[1, 1, 1] == 0     # no ghost label
+
+
 def test_authored_add_and_remove_override():
     m = _obs()
     ov = Overlay()
