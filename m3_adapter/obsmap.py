@@ -149,16 +149,21 @@ class ObsMap:
                 else:
                     self.sem_count[x, y, z] = cnt - 1   # Boyer-Moore: opposing vote
         # --- dirty-box tracking ---
+        # touched_parts may hold only zero-row arrays when every traversed/
+        # endpoint voxel of this frame fell outside the grid (e.g. the camera
+        # pose looks out of the mapped volume). Guard on actual row count, not
+        # list non-emptiness, before reducing.
         if touched_parts:
             touched = np.concatenate(touched_parts, axis=0)
-            t_min = touched.min(axis=0)
-            t_max = touched.max(axis=0) + 1  # max is exclusive
-            if self._dirty_min is None:
-                self._dirty_min = t_min.copy()
-                self._dirty_max = t_max.copy()
-            else:
-                np.minimum(self._dirty_min, t_min, out=self._dirty_min)
-                np.maximum(self._dirty_max, t_max, out=self._dirty_max)
+            if len(touched):
+                t_min = touched.min(axis=0)
+                t_max = touched.max(axis=0) + 1  # max is exclusive
+                if self._dirty_min is None:
+                    self._dirty_min = t_min.copy()
+                    self._dirty_max = t_max.copy()
+                else:
+                    np.minimum(self._dirty_min, t_min, out=self._dirty_min)
+                    np.maximum(self._dirty_max, t_max, out=self._dirty_max)
 
     def pop_dirty_bbox(self):
         """Return (min_idx, max_idx) int arrays covering all voxels touched since

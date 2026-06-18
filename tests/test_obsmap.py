@@ -35,3 +35,17 @@ def test_save_load_roundtrip(tmp_path):
     assert np.array_equal(m.logodds, m2.logodds)
     assert np.array_equal(m.vmin, m2.vmin)
     assert m2.voxel_size == 0.5 and m2.occ_thr == m.occ_thr
+
+
+def test_frame_entirely_out_of_bounds_is_noop():
+    # Regression: a frame with rays (len>0) whose every traversed/endpoint voxel
+    # falls OUTSIDE the grid produced a zero-row `touched` array, and dirty-box
+    # tracking called .min(axis=0) on it -> ValueError. Such a frame must be a
+    # silent no-op (nothing touched -> nothing dirty).
+    m = ObsMap.new((20, 5, 5), np.zeros(3, np.int64), 1.0)
+    o = np.array([100.0, 100.0, 100.0])
+    p = np.array([[115.0, 100.0, 100.0]])  # ray of length 15 > margin, all out of grid
+    m.integrate_frame(o, p, free_margin_m=1.0)  # must not raise
+    assert not m.occupancy_mask().any()
+    assert not m.observed_free_mask().any()
+    assert m.pop_dirty_bbox() is None
