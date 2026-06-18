@@ -69,3 +69,24 @@ class Overlay:
                 gl[int(d["gen_id"][i])],
                 bl[int(d["bind_id"][i])]))
         return ov
+
+
+def compose_structure(obsmap, overlay):
+    """返回 (occ_mask, sem_grid):ObsMap 占据/语义贴上 overlay 结构差异后的输出态。
+    不修改 obsmap。优先级:completed 的 add 只填未占据格(观测优先);
+    manual/independent(authored)的 add 强制写;remove 抹掉;replace 改语义。"""
+    occ = obsmap.occupancy_mask().copy()
+    sem = obsmap.sem_label.copy()
+    for d in overlay.voxels:
+        x, y, z = d.idx
+        if d.op == "add":
+            authored = d.generator == "manual" or d.binding == "independent"
+            if occ[x, y, z] and not authored:
+                continue                     # completed 不覆盖观测
+            occ[x, y, z] = True
+            sem[x, y, z] = d.sem
+        elif d.op == "remove":
+            occ[x, y, z] = False
+        elif d.op == "replace":
+            sem[x, y, z] = d.sem
+    return occ, sem
