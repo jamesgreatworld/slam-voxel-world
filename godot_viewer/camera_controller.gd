@@ -19,6 +19,7 @@ enum ViewMode { THIRD_PERSON, FIRST_PERSON }
 @export var orbit_pitch_init: float = 0.35       # rad (~20°)
 @export var mouse_sensitivity: float = 0.005
 @export var zoom_step: float = 1.0
+@export var nav_fly_time: float = 0.3   # seconds to fly the orbit centre to a clicked point
 
 var view_mode: int = ViewMode.THIRD_PERSON
 var orbit_distance: float
@@ -38,6 +39,10 @@ var _logger = null
 var _right_held: bool = false
 var _orbit_anchor_pos: Vector2 = Vector2.ZERO  # cursor pos when right-drag began
 var _orbit_enabled: bool = true  # turned off in edit mode so RMB goes to editor
+var _nav_active: bool = false
+var _nav_from: Vector3 = Vector3.ZERO
+var _nav_to: Vector3 = Vector3.ZERO
+var _nav_t: float = 0.0
 
 
 func init_controller(cam: Camera3D, rig_ctl: Node3D, logger = null) -> void:
@@ -139,6 +144,17 @@ func _input(event: InputEvent) -> void:
         return
 
     if event is InputEventMouseButton:
+        if event.button_index == MOUSE_BUTTON_LEFT and event.pressed and event.double_click \
+           and view_mode == ViewMode.THIRD_PERSON and _orbit_enabled:
+            var mp := get_viewport().get_mouse_position()
+            var from := _cam.project_ray_origin(mp)
+            var dir := _cam.project_ray_normal(mp)
+            var q := PhysicsRayQueryParameters3D.create(from, from + dir * 1000.0)
+            var hit := _cam.get_world_3d().direct_space_state.intersect_ray(q)
+            if not hit.is_empty():
+                navigate_to(hit.position)
+                get_viewport().set_input_as_handled()
+            return
         if event.button_index == MOUSE_BUTTON_RIGHT:
             if not _orbit_enabled:
                 return   # editor owns RMB while edit mode is on
@@ -162,6 +178,18 @@ func _input(event: InputEvent) -> void:
         orbit_pitch = clamp(orbit_pitch, -PI / 2 + 0.1, PI / 2 - 0.1)
 
 
+# Fly the orbit centre (the rig origin) smoothly to a world point. 3P only.
+# Called by double-click navigation; the camera keeps orbiting the moving
+# centre, so the view reframes onto the clicked point.
+func navigate_to(world_point: Vector3) -> void:
+    if view_mode != ViewMode.THIRD_PERSON or _rig_ctl == null:
+        return
+    _nav_from = _rig_ctl.global_position
+    _nav_to = world_point
+    _nav_t = 0.0
+    _nav_active = true
+
+
 func _process(_delta: float) -> void:
     if _cam == null or _rig_ctl == null:
         return
@@ -175,6 +203,12 @@ func _process(_delta: float) -> void:
         _cam.global_transform = Transform3D(basis, rig_xf.origin)
         _rig_ctl.set_visuals_visible(false)
     else:
+        if _nav_active:
+            _nav_t = min(1.0, _nav_t + _delta / max(0.0001, nav_fly_time))
+            var ease: float = _nav_t * _nav_t * (3.0 - 2.0 * _nav_t)   # smoothstep
+            _rig_ctl.global_position = _nav_from.lerp(_nav_to, ease)
+            if _nav_t >= 1.0:
+                _nav_active = false
         var offset := Vector3(
             cos(orbit_pitch) * sin(orbit_yaw),
             sin(orbit_pitch),
