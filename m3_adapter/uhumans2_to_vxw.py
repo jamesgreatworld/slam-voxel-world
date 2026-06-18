@@ -462,6 +462,7 @@ def extract_entities(
                 rotation=(qx, qy, qz, qw),
                 bbox_dims=tuple(float(c) for c in dims),
                 voxel_count=int(len(vc_c)),
+                custom_meta={"provenance": {"generator": "cluster", "binding": "live"}},
             ))
             keep_mask[cluster_global] = False
     return entities, keep_mask
