@@ -43,3 +43,18 @@ def test_slab_fill_ceiling_extrudes_up():
     ov = run_pipeline(m, [SlabFill(CEIL, "ceiling", thickness_m=0.2, close_radius=1)])
     occ, sem = compose_structure(m, ov)
     assert occ[3, 8, 3] and occ[3, 9, 3] and sem[3, 9, 3] == CEIL
+
+
+def test_slab_fill_skips_observed_free_below():
+    m = ObsMap.new((6, 10, 6), np.zeros(3, np.int64), 0.1)
+    for x in range(2, 5):
+        for z in range(2, 5):
+            m.logodds[x, 5, z] = 5.0
+            m.sem_label[x, 5, z] = FLOOR   # floor surface at y=5
+            m.logodds[x, 7, z] = -5.0      # free above -> footprint
+    m.logodds[3, 4, 3] = -5.0              # observed-free directly below the floor
+    ov = run_pipeline(m, [SlabFill(FLOOR, "floor", thickness_m=0.3, close_radius=1)])  # T=3 -> y=5,4,3
+    occ, sem = compose_structure(m, ov)
+    assert occ[3, 5, 3]            # surface present
+    assert not occ[3, 4, 3]       # observed-free below is NOT filled (free-guard works)
+    assert occ[3, 3, 3]           # the non-free cell below IS solidified

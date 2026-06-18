@@ -10,6 +10,7 @@ from m3_adapter.vlayer.overlay import VoxelDelta
 def _cluster_levels(y_indices, gap: int):
     if len(y_indices) == 0:
         return []
+    bc = np.bincount(y_indices)
     u = np.unique(y_indices)
     clusters, cur = [], [int(u[0])]
     for v in u[1:]:
@@ -17,7 +18,7 @@ def _cluster_levels(y_indices, gap: int):
             clusters.append(cur); cur = []
         cur.append(int(v))
     clusters.append(cur)
-    return [int(max(c, key=lambda y: int(np.count_nonzero(y_indices == y)))) for c in clusters]
+    return [int(max(c, key=lambda y: int(bc[y]))) for c in clusters]
 
 
 class SlabFill:
@@ -32,6 +33,7 @@ class SlabFill:
         self.thickness_m = float(thickness_m); self.level_gap_m = float(level_gap_m)
         self.close_radius = int(close_radius)
         self.id = f"slab_fill_{side}"; self.generator = "slab_fill"
+        self._struct = ndimage.generate_binary_structure(2, 1)
 
     def run(self, ctx) -> list:
         obs = ctx.obsmap
@@ -40,16 +42,16 @@ class SlabFill:
         surf = occ & (sem == self.label)
         if not surf.any():
             return []
-        T = max(1, int(round(self.thickness_m / vs)))
+        T = max(1, int(np.ceil(self.thickness_m / vs - 1e-9)))
         gap = max(1, int(round(self.level_gap_m / vs)))
         ys = np.argwhere(surf)[:, 1]
         deltas = []
         for Y in _cluster_levels(ys, gap):
-            ylo = max(0, Y - gap); yhi = min(ny, Y + gap + 1)
+            w = max(gap, 3)
+            ylo = max(0, Y - w); yhi = min(ny, Y + w + 1)
             foot = free[:, ylo:yhi, :].any(axis=1) | surf[:, max(0, Y - 1):Y + 2, :].any(axis=1)
             if self.close_radius > 0:
-                st = ndimage.generate_binary_structure(2, 1)
-                foot = ndimage.binary_closing(foot, structure=st, iterations=self.close_radius)
+                foot = ndimage.binary_closing(foot, structure=self._struct, iterations=self.close_radius)
             yy_list = [Y - k for k in range(T)] if self.side == "floor" else [Y + k for k in range(T)]
             for x, z in np.argwhere(foot):
                 for yy in yy_list:
