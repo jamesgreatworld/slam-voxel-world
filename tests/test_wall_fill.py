@@ -35,6 +35,15 @@ def test_wall_fill_patches_hole_preserves_door_and_thickens():
     assert not m.occupancy_mask()[5, 6, 6]           # L0 untouched
 
 
+def test_wall_fill_thickens_perimeter_cells():
+    m = _wall_with_door_and_hole()
+    ov = run_pipeline(m, [WallFill(thickness_m=0.2, min_wall_cells=10, close_radius=1)])
+    occ, sem = compose_structure(m, ov)
+    # a CORNER wall cell (perimeter of the bbox) must also be thickened along +x
+    assert occ[5, 2, 2]            # original wall corner still there
+    assert occ[6, 2, 2] and sem[6, 2, 2] == WALL   # perimeter thickened (regression: was missed)
+
+
 def test_wall_fill_noop_without_wall():
     m = ObsMap.new((6, 6, 6), np.zeros(3, np.int64), 0.1)
     assert run_pipeline(m, [WallFill()]).voxels == []

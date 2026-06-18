@@ -39,8 +39,11 @@ class WallFill:
             aa, bb = np.nonzero(plane2d)
             a0, a1, b0, b1 = aa.min(), aa.max(), bb.min(), bb.max()
             sub = plane2d[a0:a1 + 1, b0:b1 + 1]
+            # Closing patches only SMALL gaps (radius close_radius); large openings
+            # (doorways/passages) are never bridged. observed_free cells are never
+            # filled (free-guard below), so observed openings stay open regardless.
             filled = ndimage.binary_closing(sub, structure=self._struct, iterations=self.close_radius)
-            fa, fb = np.nonzero(filled)
+            fa, fb = np.nonzero(sub | filled)
             for ia, ib in zip(fa, fb):
                 A = a0 + int(ia); B = b0 + int(ib)
                 for d in range(T):
