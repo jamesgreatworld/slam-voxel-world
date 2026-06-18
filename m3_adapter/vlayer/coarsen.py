@@ -1,0 +1,41 @@
+"""把细占据/语义网格降采样成粗块(Minecraft 厚块感)。L0 不变;导出后处理。"""
+from __future__ import annotations
+
+import numpy as np
+
+
+def downsample_occupancy(occ, sem, vmin, vs, factor, min_fine: int = 1):
+    """细 (occ,sem,vmin,vs) -> 粗 (occ_c,sem_c,vmin_c,vs_c)。
+    粗块占据 = 块内占据细格数 >= min_fine;粗块语义 = 块内占据细格 super_id 的众数。
+    每轴按 vmin%factor 对齐到 factor 边界后分块,保持 world 对齐。"""
+    factor = int(factor)
+    vmin = np.asarray(vmin, dtype=np.int64)
+    if factor <= 1:
+        return occ.copy(), sem.copy(), vmin.copy(), float(vs)
+    pad = []
+    vmin_c = np.empty(3, np.int64)
+    for a in range(3):
+        lo = int(vmin[a]) % factor                       # python mod -> 0..factor-1, aligns boundary
+        sz = occ.shape[a] + lo
+        hi = (-sz) % factor
+        pad.append((lo, hi))
+        vmin_c[a] = (int(vmin[a]) - lo) // factor
+    occ_p = np.pad(occ, pad, mode="constant", constant_values=False)
+    sem_p = np.pad(sem, pad, mode="constant", constant_values=0)
+    f = factor
+    NX, NY, NZ = (np.array(occ_p.shape) // f)
+    occ_b = occ_p.reshape(NX, f, NY, f, NZ, f)
+    cnt = occ_b.sum(axis=(1, 3, 5))
+    occ_c = cnt >= min_fine
+    # semantic majority among OCCUPIED fine cells, per block
+    sem_b = sem_p.reshape(NX, f, NY, f, NZ, f)
+    flat = np.where(occ_b, sem_b, 0).astype(np.int64).transpose(0, 2, 4, 1, 3, 5).reshape(NX, NY, NZ, -1)
+    best_cnt = np.zeros((NX, NY, NZ), np.int32)
+    best_lab = np.zeros((NX, NY, NZ), np.uint8)
+    maxlabel = int(flat.max()) if flat.size else 0
+    for L in range(1, maxlabel + 1):
+        c = (flat == L).sum(axis=-1).astype(np.int32)
+        upd = c > best_cnt
+        best_cnt = np.where(upd, c, best_cnt)
+        best_lab = np.where(upd, np.uint8(L), best_lab)
+    return occ_c, best_lab, vmin_c, float(vs * factor)

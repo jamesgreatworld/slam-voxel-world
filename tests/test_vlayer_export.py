@@ -31,3 +31,50 @@ def test_export_writes_solid_floor(tmp_path):
     assert world is not None
     assert (out / "overlay.npz").exists() and (out / "overlay.json").exists()
     assert int(m.occupancy_mask().sum()) == base_occ      # L0 untouched
+
+
+def test_coarsen_export_fewer_voxels(tmp_path):
+    """coarsen_to_m downsamples: coarse world has fewer voxels than fine; L0 untouched."""
+    m = _obs_holey_floor()
+    base_occ = int(m.occupancy_mask().sum())
+
+    # Fine export
+    fine_out = tmp_path / "fine.vxw"
+    obsmap_to_completed_vxw(m, fine_out, generators=[FloorFill(close_radius=1)])
+    fine_world = vxw.read_world(fine_out)
+
+    # Coarse export (target voxel size 0.2 m, fine is 0.1 m -> factor=2)
+    coarse_out = tmp_path / "coarse.vxw"
+    obsmap_to_completed_vxw(m, coarse_out, generators=[FloorFill(close_radius=1)],
+                            coarsen_to_m=0.2)
+    coarse_world = vxw.read_world(coarse_out)
+
+    # Coarse manifest records larger voxel_size
+    assert abs(coarse_world.manifest.voxel_size_meters - 0.2) < 1e-6
+
+    # Count occupied voxels in each world
+    fine_count = sum(
+        int((chunk.voxels["material_id"] > 0).sum())
+        for chunk in fine_world.chunks.values()
+    )
+    coarse_count = sum(
+        int((chunk.voxels["material_id"] > 0).sum())
+        for chunk in coarse_world.chunks.values()
+    )
+    assert coarse_count < fine_count, (
+        f"Expected coarse ({coarse_count}) < fine ({fine_count})"
+    )
+
+    # L0 untouched
+    assert int(m.occupancy_mask().sum()) == base_occ
+
+
+def test_coarsen_none_unchanged(tmp_path):
+    """coarsen_to_m=None (default) produces same result as before."""
+    m = _obs_holey_floor()
+    out = tmp_path / "default.vxw"
+    overlay = obsmap_to_completed_vxw(m, out, generators=[FloorFill(close_radius=1)],
+                                      coarsen_to_m=None)
+    world = vxw.read_world(out)
+    assert world is not None
+    assert abs(world.manifest.voxel_size_meters - 0.1) < 1e-6
