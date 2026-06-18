@@ -145,7 +145,8 @@ func _input(event: InputEvent) -> void:
 
     if event is InputEventMouseButton:
         if event.button_index == MOUSE_BUTTON_LEFT and event.pressed and event.double_click \
-           and view_mode == ViewMode.THIRD_PERSON and _orbit_enabled:
+           and view_mode == ViewMode.THIRD_PERSON and _orbit_enabled and _cam != null:
+            get_viewport().set_input_as_handled()
             var mp := get_viewport().get_mouse_position()
             var from := _cam.project_ray_origin(mp)
             var dir := _cam.project_ray_normal(mp)
@@ -153,7 +154,6 @@ func _input(event: InputEvent) -> void:
             var hit := _cam.get_world_3d().direct_space_state.intersect_ray(q)
             if not hit.is_empty():
                 navigate_to(hit.position)
-                get_viewport().set_input_as_handled()
             return
         if event.button_index == MOUSE_BUTTON_RIGHT:
             if not _orbit_enabled:
@@ -205,8 +205,8 @@ func _process(_delta: float) -> void:
     else:
         if _nav_active:
             _nav_t = min(1.0, _nav_t + _delta / max(0.0001, nav_fly_time))
-            var ease: float = _nav_t * _nav_t * (3.0 - 2.0 * _nav_t)   # smoothstep
-            _rig_ctl.global_position = _nav_from.lerp(_nav_to, ease)
+            var smooth_t: float = _nav_t * _nav_t * (3.0 - 2.0 * _nav_t)   # smoothstep
+            _rig_ctl.global_position = _nav_from.lerp(_nav_to, smooth_t)
             if _nav_t >= 1.0:
                 _nav_active = false
         var offset := Vector3(
