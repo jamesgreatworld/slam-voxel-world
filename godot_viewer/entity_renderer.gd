@@ -113,17 +113,21 @@ func _spawn_one(e: Dictionary, palette_rgb: PackedColorArray) -> Node3D:
     var label_name: String = String(e.get("label_name", "?"))
     var custom_meta: Dictionary = e.get("custom_meta", {})
     var mc_item_id: String = String(custom_meta.get("mc_item", ""))
+    var use_mc := mc_item_id != "" and _item_presets.has(mc_item_id)
 
+    var quat := Quaternion(float(rot[0]), float(rot[1]), float(rot[2]), float(rot[3]))
+    if use_mc:
+        quat = _yaw_only_quat(quat)
     var root := Node3D.new()
     root.name = "entity_%s_%s" % [label_name, str(e.get("id", "")).substr(0, 8)]
     root.transform = Transform3D(
-        Quaternion(float(rot[0]), float(rot[1]), float(rot[2]), float(rot[3])),
+        quat,
         Vector3(float(pos[0]), float(pos[1]), float(pos[2])),
     )
 
     var state: String = String(custom_meta.get("state", "off"))
     var behaviors: Array = []
-    if mc_item_id != "" and _item_presets.has(mc_item_id):
+    if use_mc:
         var preset: Dictionary = _item_presets[mc_item_id]
         behaviors = preset.get("behaviors", []) if preset.has("behaviors") else []
         _build_mc_composite(root, preset, state)
@@ -138,6 +142,10 @@ func _spawn_one(e: Dictionary, palette_rgb: PackedColorArray) -> Node3D:
     # (selection-time / grab-time semantics). custom_meta.physics_dynamic
     # toggles freeze off so gravity + collisions take over.
     var pick_dims = dims if (dims != null and dims.size() >= 3) else [0.5, 0.5, 0.5]
+    if use_mc:
+        var ext = _item_presets[mc_item_id].get("overall_extents_m", null)
+        if ext != null and ext.size() >= 3:
+            pick_dims = ext
     var dynamic := bool(custom_meta.get("physics_dynamic", false))
     root.add_child(_make_physics_body(pick_dims, dynamic))
 
@@ -150,6 +158,29 @@ func _spawn_one(e: Dictionary, palette_rgb: PackedColorArray) -> Node3D:
         "behaviors": behaviors,
     })
     return root
+
+
+# Reduce a full 3D rotation to a yaw-only rotation about world +Y, so upright-
+# authored mc_item models stay upright (their full PCA orientation would tip
+# them over and, when physics_dynamic, topple them under gravity). Robust to
+# the degenerate case where the dominant basis axis is near-vertical: pick the
+# basis axis with the largest horizontal (XZ) projection as the facing
+# reference. World convention is Y-up, -Z forward.
+func _yaw_only_quat(q: Quaternion) -> Quaternion:
+    var b := Basis(q)
+    var best := Vector3.ZERO
+    var best_len := -1.0
+    for axis in [b.x, b.y, b.z]:
+        var horiz := Vector3(axis.x, 0.0, axis.z)
+        var l := horiz.length()
+        if l > best_len:
+            best_len = l
+            best = horiz
+    if best_len < 1e-4:
+        return Quaternion.IDENTITY   # fully vertical basis -> no meaningful yaw
+    best = best.normalized()
+    var yaw := atan2(best.x, best.z)
+    return Quaternion(Vector3.UP, yaw)
 
 
 func _make_physics_body(dims, dynamic: bool) -> RigidBody3D:
