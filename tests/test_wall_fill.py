@@ -68,3 +68,20 @@ def test_z_wall_not_extended_along_its_length():
 def test_noop_without_wall():
     m = ObsMap.new((6, 6, 6), np.zeros(3, np.int64), 0.1)
     assert run_pipeline(m, [WallFill()]).voxels == []
+
+
+def test_two_parallel_walls_both_detected():
+    # two Z-walls at x=4 and x=6 (one empty voxel between, index gap 2) must BOTH
+    # be detected — not merged into one by _peaks (regression: merge window <=1).
+    m = ObsMap.new((10, 12, 12), np.zeros(3, np.int64), 0.1)
+    for x0 in (4, 6):
+        for y in range(2, 9):
+            for z in range(2, 9):
+                m.logodds[x0, y, z] = 5.0
+                m.sem_label[x0, y, z] = WALL
+        m.logodds[x0, 6, 6] = 0.0       # an unobserved hole in each wall
+        m.sem_label[x0, 6, 6] = 0
+    ov = run_pipeline(m, [WallFill(thickness_m=0.1, min_wall_cells=10, close_radius=1)])
+    occ, sem = compose_structure(m, ov)
+    assert occ[4, 6, 6] and sem[4, 6, 6] == WALL    # wall at x=4 detected + patched
+    assert occ[6, 6, 6] and sem[6, 6, 6] == WALL    # wall at x=6 detected + patched (not merged away)

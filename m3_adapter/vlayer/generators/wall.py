@@ -25,7 +25,8 @@ class WallFill:
         self._struct = ndimage.generate_binary_structure(2, 1)
 
     def _peaks(self, count):
-        """坐标轴投影计数里的局部峰(>=min_wall_cells),近邻(<=2)合并取最大。"""
+        """坐标轴投影计数里的局部峰(>=min_wall_cells),仅合并紧邻(<=1)取最大。
+        合并窗取 1:厚墙(连续索引)并成一峰,但相距 2 格的两面平行墙各自保留。"""
         n = len(count); peaks = []
         for i in range(n):
             if count[i] < self.min_wall_cells:
@@ -33,7 +34,7 @@ class WallFill:
             lo = max(0, i - 1); hi = min(n, i + 2)
             if count[i] < count[lo:hi].max():
                 continue
-            if peaks and i - peaks[-1] <= 2:
+            if peaks and i - peaks[-1] <= 1:
                 if count[i] > count[peaks[-1]]:
                     peaks[-1] = i
                 continue
