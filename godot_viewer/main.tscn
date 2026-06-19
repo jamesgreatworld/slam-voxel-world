@@ -25,7 +25,7 @@ background_mode = 2
 sky = SubResource("Sky_b")
 ambient_light_source = 2
 ambient_light_color = Color(0.4, 0.45, 0.55, 1)
-ambient_light_energy = 0.25
+ambient_light_energy = 0.55
 ssao_enabled = true
 ssao_intensity = 1.0
 
@@ -53,7 +53,7 @@ far = 2000.0
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
 transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 0, 50, 0)
-light_energy = 1.6
+light_energy = 1.05
 shadow_enabled = true
 directional_shadow_max_distance = 300.0
 

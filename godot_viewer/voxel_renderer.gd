@@ -51,6 +51,7 @@ const _PLACED_CAPACITY: int = 2000
 const _MAX_REBUILDS_PER_FRAME: int = 4
 
 const _ZERO_BASIS := Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO)
+const VOXEL_GRID_SHADER := preload("res://voxel_grid.gdshader")
 
 
 func build(world) -> void:
@@ -640,7 +641,18 @@ static func _floor_div(a: int, b: int) -> int:
 # ---------------------------------------------------------------------------
 
 
-func _make_standard_material_for_mid(mid: int, m: Dictionary, world) -> StandardMaterial3D:
+func _make_standard_material_for_mid(mid: int, m: Dictionary, world) -> Material:
+    var is_transparent := not m.is_empty() and bool(m.get("transparent", false))
+    var is_emissive := not m.is_empty() and float(m.get("emission_energy", 0.0)) > 0.0
+    if not is_transparent and not is_emissive:
+        var col := Color(0.6, 0.6, 0.6)
+        if world != null and mid >= 0 and mid < world.palette_rgb.size():
+            col = world.palette_rgb[mid]
+        var sh := ShaderMaterial.new()
+        sh.shader = VOXEL_GRID_SHADER
+        sh.set_shader_parameter("base_color", Vector3(col.r, col.g, col.b))
+        sh.set_shader_parameter("vsize", world.voxel_size_meters if world != null else 0.2)
+        return sh
     var sm := StandardMaterial3D.new()
     # No vertex colors in the greedy mesh — each material has a single
     # albedo color drawn from the palette, so we paint via albedo_color.

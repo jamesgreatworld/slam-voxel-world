@@ -5,10 +5,10 @@
 # emission_energy_multiplier on entity meshes keeps them readable in Night.
 extends Node
 
-const _DAY_LIGHT_ENERGY: float = 1.6
+const _DAY_LIGHT_ENERGY: float = 1.05
 const _DAY_LIGHT_COLOR: Color = Color(1, 1, 1)
 const _DAY_AMBIENT_COLOR: Color = Color(0.4, 0.45, 0.55, 1)
-const _DAY_AMBIENT_ENERGY: float = 0.25
+const _DAY_AMBIENT_ENERGY: float = 0.55
 const _DAY_SKY_TOP: Color = Color(0.4, 0.5, 0.65, 1)
 const _DAY_SKY_HORIZON: Color = Color(0.65, 0.7, 0.75, 1)
 const _DAY_GROUND_BOTTOM: Color = Color(0.1, 0.1, 0.1, 1)
