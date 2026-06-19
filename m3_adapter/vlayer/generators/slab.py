@@ -26,8 +26,11 @@ class SlabFill:
     depends_on: list = []
     default_binding = "persistent"
 
-    def __init__(self, label, side, thickness_m: float = 0.15,
+    def __init__(self, label, side, thickness_m: float = 0.6,
                  level_gap_m: float = 0.5, close_radius: int = 2):
+        # thickness_m default 0.6m (~3 coarse blocks at 0.2m): fills the slab into a
+        # SOLID body, not a thin sheet. observed_free 守护把向下/上填充自然停在下层
+        # 房间空气处,故不会穿进相邻房间(0.15m 太薄,粗化到 0.2m 会整层消失)。
         assert side in ("floor", "ceiling")
         self.label = int(label); self.side = side
         self.thickness_m = float(thickness_m); self.level_gap_m = float(level_gap_m)
