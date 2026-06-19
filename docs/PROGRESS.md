@@ -4,7 +4,7 @@
 > 详细设计散在 `docs/superpowers/specs/2026-06-*.md`,本文是索引 + 总览。
 
 ## 0. 一句话现状
-"自研 Hydra 式增量语义建图"主线**从设计到实时、到单一真值源、到完整场景图(含物体跟踪/去碎/模型替换)走完了**,远超最初 SP-A→SP-D 设想。**Phase ④ 先验引导建图已正式起步**:落地了分层地图的**虚拟层(L1)+ 插件化先验推理流水线(Lc)**,首个 generator `floor_fill` 解决了"屋子悬浮/人掉地"。完整架构见 `docs/superpowers/specs/2026-06-18-layered-map-architecture-design.md`。
+"自研 Hydra 式增量语义建图"主线**从设计到实时、到单一真值源、到完整场景图(含物体跟踪/去碎/模型替换)走完了**,远超最初 SP-A→SP-D 设想。**Phase ④ 先验引导建图已正式起步**:落地了分层地图的**虚拟层(L1)+ 插件化先验推理流水线(Lc)**,STRUCTURE generators(SlabFill 地/顶实心化、WallFill v2 墙补全)+ **多分辨率粗化(0.2m MC 块)**把薄表面补成实心 Minecraft 风结构,门窗保留、L0 始终只读;另加 3P 双击导航巡检相机。完整架构见 `docs/superpowers/specs/2026-06-18-layered-map-architecture-design.md`(+ solid-structure / multiresolution-coarsen / click-navigate specs)。
 
 ## 1. 端到端数据流(现状)
 ```
@@ -47,17 +47,22 @@ ObsMap(m3_adapter/obsmap.py):持久 log-odds 观测地图
 | **integrate_frame 空数组崩溃修复**(全帧建图得以跑完) | obsmap.py | 220eb0a |
 | **mc_item 直立(yaw-only)+ 原生尺寸拾取盒** | entity_renderer._yaw_only_quat | a4c4768 |
 | **分层地图虚拟层 L1**(overlay 差异 + compose + 插件化 Lc 流水线 + floor_fill 补地板 + export) | m3_adapter/vlayer/* | d97d161..b8ce6e4 |
+| **双击导航巡检相机**(3P 双击表面→环绕中心平滑飞抵→右键环视) | camera_controller.navigate_to | e2356aa / b188556 |
+| **SlabFill**(floor/ceiling 多层逐峰 + 实心化增厚;floor_fill 并入) | vlayer/generators/slab.py | ad63c82 |
+| **WallFill v2**(墙=平面峰检测:去重+真法向背向增厚+结构化判定,门窗 free 保留) | vlayer/generators/wall.py | e54460a / 8683e00 |
+| **多分辨率粗化导出**(细→粗块降采样,MC 厚块感,21× 体素↓) | vlayer/coarsen.py + export.coarsen_to_m | 7214b2a |
 
 settled GVD 命令:`--observed-free <npz> --band-max 0 --min-component 30 --thin --rooms --prune-spurs 0.3 --merge-close 0.2 --drop-small 5 --room-resolution 0.3 --objects [--scene-graph]`。
 settled 建图:`uhumans2_stream <bag> <vxwdir> --semantic --hydra-cfg F:/hydra_ws`(rosbag 在 F:/hydra_ws/datasets/...);全 1779 帧 → 占据 173,262 体素。
-settled 补全:`obsmap_to_completed_vxw(ObsMap, out, generators=[FloorFill(close_radius=2)])`(m3_adapter/vlayer/export.py)→ 补 ~49k 地板体素、L0 不变。
+settled 补全:`obsmap_to_completed_vxw(ObsMap, out, generators=[SlabFill(3,'floor'),SlabFill(4,'ceiling'),WallFill()], palette=pal, coarsen_to_m=0.2)`(m3_adapter/vlayer/export.py)→ 实心地板/天花板/墙 + 0.2m 粗块、门窗保留、L0 不变。详见 specs/2026-06-18-*。
 
 ## 3. 未完成(展望,按价值排)
 
 ### 3.1 Phase ④ 先验引导建图(已起步)—— docs/vision.md + specs/2026-06-18-layered-map
-- **已落地**:分层数据架构(L0 观测 / Lc 先验推理引擎 / L1 虚拟覆盖)+ 插件化 Lc 流水线(stage 0..6 契约)+ ④a 首个 STRUCTURE generator `floor_fill`(补地板)+ ④b 入口 mc_item 替换。
-- ④a 余下:墙面平面拟合 / 遮挡恢复(stage 1 后续 generator)| ④b 模板/尺寸拟合 | ④c **物理验证回路**(stage 6,"桌应落地")| ④d 学习补全。
-- **vlayer 直接延续**:stage 2–5 现有步骤(extract_entities/objects/scene_graph/gvd)正式适配 Generator 契约;Godot 物体编辑写回 entities.json、结构编辑写回 overlay;生死规则事件化 + "保留?"提示 UI;floor_fill 多层/错层(按峰分区)。
+- **已落地**:分层数据架构(L0 观测 / Lc 先验推理引擎 / L1 虚拟覆盖)+ 插件化 Lc 流水线(stage 0..6 契约)+ ④a STRUCTURE generators **SlabFill(地/顶 多层+实心化)+ WallFill v2(墙=平面峰检测+背向增厚,门窗保留)** + **多分辨率粗化导出(0.2m MC 块)** + ④b 入口 mc_item 替换(yaw-only 直立)。
+- ④a 余下:遮挡恢复 / 斜墙 RANSAC(非曼哈顿)| ④b 模板/尺寸拟合 | ④c **物理验证回路**(stage 6,"桌应落地")| ④d 学习补全。
+- **vlayer 直接延续**:stage 2–5 现有步骤(extract_entities/objects/scene_graph/gvd)正式适配 Generator 契约;Godot 物体编辑写回 entities.json、结构编辑写回 overlay;生死规则事件化 + "保留?"提示 UI;粗化 min_fine 去噪/众数性能;SlabFill 填到"层间"精确 slab。
+- **玩法层(已搁置,计划就绪)**:`docs/superpowers/plans/2026-06-18-characterbody3d-rig.md` —— 1P 换 CharacterBody3D 胶囊 + move_and_slide + 台阶/斜坡/蹲下(取代射线桩,根治穿墙)。已做 **双击导航巡检相机**(3P)作为更贴合巡检的替代。
 
 ### 3.2 当前工作的直接延续
 - **颜色/ORB/CNN 特征**:`gvd/features.py` 框架已支持,只实现 shape;颜色需给 ObsMap 加 RGB 通道(rosbag 有 RGB 主题)。
