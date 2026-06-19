@@ -1,19 +1,16 @@
 # voxel_renderer.gd — Layer 4 (rendering).
-# Greedy-meshed renderer with per-chunk × per-material MeshInstance3D dict
-# (phase 2). Edits mark the affected chunk dirty; `_process` re-runs greedy
-# meshing on dirty chunks and swaps in fresh MeshInstance3D children. This is
-# the standard Minecraft-style approach and fixes phase 1's visual residual on
-# hide_voxel + the double-render risk when add_voxel'd voxels later got baked
-# into the greedy mesh.
+# Per-voxel cube renderer: every occupied voxel is rendered as an individual
+# solid BoxMesh cube (Minecraft-style one-block-per-voxel) via a single
+# MultiMeshInstance3D (_world_mmi).  Greedy meshing is GONE from the load path;
+# a full MMI rebuild is done whenever the voxel set changes (hide/add), which is
+# cheap at ~21k voxels on the apartment world.
 #
 # Editing API (used by voxel_editor / stereo_rig physics / main.gd undo):
-#   hide_voxel(vi)        removes the voxel from the occupancy set, marks its
-#                         chunk dirty (mesh rebuilt next _process tick), and
-#                         updates the collision mesh immediately.
+#   hide_voxel(vi)        removes the voxel from the occupancy set, rebuilds
+#                         _world_mmi, and updates the collision mesh.
 #   add_voxel(vi, mid)    inserts an immediate green-preview cube via the
 #                         pre-allocated PlacedVoxels MultiMesh AND marks the
-#                         chunk dirty; the next dirty-rebuild folds it into
-#                         the per-chunk greedy mesh and recycles the MMI slot.
+#                         chunk dirty so _process rebuilds _world_mmi.
 #
 # Public API (unchanged contract):
 #   build(world)
@@ -27,28 +24,26 @@ var _world = null
 # Cached world params so editing paths don't need a world handle.
 var _voxel_size: float = 0.10
 var _chunk_extent: int = 32
-# Occupancy + reverse lookup. For greedy-mesh voxels we store a stub entry
-# [null, -1, mid]. For voxels just placed via add_voxel and not yet folded
-# into the greedy mesh, the entry holds [_placed_mmi, slot_idx, mid] so
-# hide_voxel can immediately blank the MMI slot.
+# Occupancy + reverse lookup. Every entry is a stub [null, -1, mid].
+# For voxels just placed via add_voxel the entry holds [_placed_mmi, slot_idx, mid]
+# so hide_voxel can immediately blank the MMI slot while the full rebuild is pending.
 var _voxel_to_instance: Dictionary = {}
-# Per-chunk per-material MeshInstance3D.
+# Per-chunk per-material MeshInstance3D — kept for the dirty-rebuild code path
+# (used only when add_voxel / hide_voxel is called; not used on initial load).
 # _chunk_meshes[chunk_coord: Vector3i] = { mid: int -> MeshInstance3D }
 var _chunk_meshes: Dictionary = {}
-# Dirty set: Vector3i chunk_coord -> true.
-var _dirty_chunks: Dictionary = {}
+# Dirty flag: true when _world_mmi needs rebuilding.
+var _world_mmi_dirty: bool = false
 # StaticBody3D for collision (R7)
 var _collision_body: StaticBody3D = null
 var _collision_shape: CollisionShape3D = null
+# World-voxel cube MultiMesh: one BoxMesh instance per occupied world voxel.
+var _world_mmi: MultiMeshInstance3D = null
 # Placed-voxel scratch bucket: a MMI with pre-allocated slots so add_voxel
-# can show a cube immediately, before the next dirty-rebuild folds the new
-# voxel into its chunk's greedy mesh.
+# can show a cube immediately, before the next _process tick rebuilds _world_mmi.
 var _placed_mmi: MultiMeshInstance3D = null
 var _placed_count: int = 0
 const _PLACED_CAPACITY: int = 2000
-# Rate-limit dirty-chunk rebuilds so a multi-chunk edit (eg. import or
-# big erase) doesn't stall a frame. 4 chunks/frame ≈ <2 ms on the apartment.
-const _MAX_REBUILDS_PER_FRAME: int = 4
 
 const _ZERO_BASIS := Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO)
 const VOXEL_GRID_SHADER := preload("res://voxel_grid.gdshader")
@@ -60,77 +55,29 @@ func build(world) -> void:
     _chunk_extent = max(1, int(world.chunk_extent))
     _voxel_to_instance.clear()
     _free_all_chunk_meshes()
-    _dirty_chunks.clear()
+    _world_mmi_dirty = false
 
     var t0_us := Time.get_ticks_usec()
 
-    # 1) bucket voxel indices into chunks of size CHUNK_EXTENT. Per chunk we
-    #    keep a dense flat PackedByteArray of size extent³. Stub entries are
-    #    added to _voxel_to_instance so the editor's occupancy / collision
-    #    code keeps working and so dirty-rebuilds can re-synthesise the
-    #    chunk's voxels from _voxel_to_instance alone (single source of truth).
-    var chunk_extent: int = _chunk_extent
-    var ee: int = chunk_extent * chunk_extent
-    var eee: int = ee * chunk_extent
-    var chunks: Dictionary = {}  # Vector3i chunk_coord → PackedByteArray of size eee
-    # Per-chunk bbox of occupied voxels in chunk-local coords. Used to skip
-    # empty slabs in the greedy mesher (the apartment has many sparsely-filled
-    # boundary chunks where most slices are air).
-    var bboxes: Dictionary = {}
+    # 1) Populate _voxel_to_instance (occupancy + material lookup).
     var n: int = world.voxel_count()
     for i in n:
         var p: Vector3 = world.positions[i]
         var vi: Vector3i = _world_to_voxel_index(p, _voxel_size)
         var mid: int = int(world.material_ids[i]) if i < world.material_ids.size() else 1
-        var cx: int = _floor_div(vi.x, chunk_extent)
-        var cy: int = _floor_div(vi.y, chunk_extent)
-        var cz: int = _floor_div(vi.z, chunk_extent)
-        var c := Vector3i(cx, cy, cz)
-        var lx: int = vi.x - cx * chunk_extent
-        var ly: int = vi.y - cy * chunk_extent
-        var lz: int = vi.z - cz * chunk_extent
-        if not chunks.has(c):
-            var buf := PackedByteArray()
-            buf.resize(eee)
-            chunks[c] = buf
-            bboxes[c] = [lx, ly, lz, lx, ly, lz]
-        var arr: PackedByteArray = chunks[c]
-        arr[lx * ee + ly * chunk_extent + lz] = mid
-        chunks[c] = arr
-        var bb: Array = bboxes[c]
-        if lx < bb[0]: bb[0] = lx
-        if ly < bb[1]: bb[1] = ly
-        if lz < bb[2]: bb[2] = lz
-        if lx > bb[3]: bb[3] = lx
-        if ly > bb[4]: bb[4] = ly
-        if lz > bb[5]: bb[5] = lz
-        bboxes[c] = bb
-        # Stub entry — single source of truth for occupancy + chunk rebuild.
         _voxel_to_instance[vi] = [null, -1, mid]
 
     var t_bucket_us := Time.get_ticks_usec()
 
-    # 2+3) per-chunk: run greedy mesher, then commit one ArrayMesh +
-    # MeshInstance3D per material. Each chunk gets its own dict in
-    # _chunk_meshes so future dirty-rebuilds only touch the affected chunk.
-    var total_tris := 0
-    var n_mesh_instances := 0
-    for chunk_coord in chunks.keys():
-        var built: Array = _build_chunk_mesh_nodes(
-            chunk_coord, chunks[chunk_coord], bboxes[chunk_coord], world,
-        )
-        var per_mat_meshes: Dictionary = built[0]
-        total_tris += int(built[1])
-        if not per_mat_meshes.is_empty():
-            _chunk_meshes[chunk_coord] = per_mat_meshes
-            n_mesh_instances += per_mat_meshes.size()
+    # 2) Build the per-voxel cube MultiMesh (no greedy merging).
+    _rebuild_world_mmi()
 
     var t_commit_us := Time.get_ticks_usec()
     var dt_total: float = (t_commit_us - t0_us) / 1000.0
     var dt_bucket: float = (t_bucket_us - t0_us) / 1000.0
-    var dt_chunks: float = (t_commit_us - t_bucket_us) / 1000.0
-    print("[renderer] built greedy mesh: %d voxels, %d chunks, %d tris, %d mesh instances, %.1fms (bucket=%.1f greedy+commit=%.1f)"
-        % [n, chunks.size(), total_tris, n_mesh_instances, dt_total, dt_bucket, dt_chunks])
+    var dt_mmi: float = (t_commit_us - t_bucket_us) / 1000.0
+    print("[renderer] built per-voxel cube MMI: %d voxels, %.1fms (bucket=%.1f mmi=%.1f)"
+        % [n, dt_total, dt_bucket, dt_mmi])
 
     _add_reference_helpers(_compute_min_y(world))
     _build_collision_mesh(world)
@@ -144,13 +91,12 @@ func hide_voxel(vi: Vector3i) -> bool:
     var mmi = entry[0]
     var idx: int = entry[1]
     # If this voxel was a placed-MMI instance, blank the slot immediately so
-    # there is no visual residual until the dirty-chunk rebuild runs.
+    # there is no visual residual until _world_mmi is rebuilt.
     if mmi != null and idx >= 0:
         mmi.multimesh.set_instance_transform(idx, Transform3D(_ZERO_BASIS, Vector3.ZERO))
     _voxel_to_instance.erase(vi)
-    # Mark the owning chunk dirty so _process re-runs greedy meshing on it
-    # and visually removes the face that this voxel was contributing to.
-    _dirty_chunks[_chunk_coord_of(vi)] = true
+    # Mark world MMI dirty; _process will rebuild it next tick.
+    _world_mmi_dirty = true
     _rebuild_collision_mesh()
     return true
 
@@ -172,26 +118,73 @@ func add_voxel(vi: Vector3i, material_id: int) -> bool:
     _placed_mmi.multimesh.set_instance_color(_placed_count, _color_for_material(material_id))
     _voxel_to_instance[vi] = [_placed_mmi, _placed_count, material_id]
     _placed_count += 1
-    _dirty_chunks[_chunk_coord_of(vi)] = true
+    _world_mmi_dirty = true
     _rebuild_collision_mesh()
     return true
 
 
 func _process(_delta: float) -> void:
-    if _dirty_chunks.is_empty():
+    if not _world_mmi_dirty:
         return
-    var done := 0
+    _world_mmi_dirty = false
     var t0_us := Time.get_ticks_usec()
-    # Take a snapshot of keys so erase()-during-iteration is safe.
-    for cc in _dirty_chunks.keys():
-        _rebuild_chunk(cc)
-        _dirty_chunks.erase(cc)
-        done += 1
-        if done >= _MAX_REBUILDS_PER_FRAME:
-            break
+    _rebuild_world_mmi()
     var dt_ms: float = (Time.get_ticks_usec() - t0_us) / 1000.0
-    print("[renderer] dirty rebuild: %d chunk(s) in %.2fms, %d still pending"
-        % [done, dt_ms, _dirty_chunks.size()])
+    print("[renderer] world MMI rebuilt: %d voxels in %.2fms"
+        % [_voxel_to_instance.size(), dt_ms])
+
+
+# Build (or rebuild) the per-voxel cube MultiMesh for all occupied world voxels.
+# Uses a single MultiMesh with one BoxMesh instance per occupied voxel.
+# Per-instance color = palette color for that voxel's material.
+# Any placed-MMI preview slots are also rewritten to stub entries since the
+# world MMI now covers those voxels.
+func _rebuild_world_mmi() -> void:
+    # Collect all voxels that are in _voxel_to_instance (stub or placed).
+    var all_vis: Array = _voxel_to_instance.keys()
+    var count: int = all_vis.size()
+
+    var box := BoxMesh.new()
+    box.size = Vector3.ONE * _voxel_size
+    var mm := MultiMesh.new()
+    mm.transform_format = MultiMesh.TRANSFORM_3D
+    mm.use_colors = true
+    mm.mesh = box
+    mm.instance_count = count
+
+    for i in count:
+        var vi: Vector3i = all_vis[i]
+        var entry = _voxel_to_instance[vi]
+        var mid: int = int(entry[2])
+        var world_pos := Vector3(vi) * _voxel_size
+        mm.set_instance_transform(i, Transform3D(Basis.IDENTITY, world_pos))
+        mm.set_instance_color(i, _color_for_material(mid))
+        # Rewrite any placed-MMI slot entries to stub form (the world MMI now
+        # represents this voxel visually, so the placed slot can be blanked).
+        if entry[0] != null and int(entry[1]) >= 0:
+            var old_mmi = entry[0]
+            var old_idx: int = int(entry[1])
+            if is_instance_valid(old_mmi) and old_mmi.multimesh != null:
+                old_mmi.multimesh.set_instance_transform(old_idx, Transform3D(_ZERO_BASIS, Vector3.ZERO))
+            _voxel_to_instance[vi] = [null, -1, mid]
+
+    # Reset placed-count since all placed voxels are now in the world MMI.
+    _placed_count = 0
+
+    # Replace or create the world MMI node.
+    if _world_mmi != null and is_instance_valid(_world_mmi):
+        _world_mmi.queue_free()
+        _world_mmi = null
+    var mmi := MultiMeshInstance3D.new()
+    mmi.name = "WorldVoxelCubes"
+    var mat := StandardMaterial3D.new()
+    mat.vertex_color_use_as_albedo = true
+    mat.roughness = 1.0
+    mat.metallic = 0.0
+    mmi.material_override = mat
+    mmi.multimesh = mm
+    add_child(mmi)
+    _world_mmi = mmi
 
 
 # Rebuild a single chunk's per-material MeshInstance3D set from the current
