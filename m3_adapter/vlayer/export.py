@@ -12,12 +12,16 @@ from m3_adapter.vlayer.pipeline import run_pipeline
 
 
 def obsmap_to_completed_vxw(obsmap, out_path, generators,
-                            palette=None, chunk_extent=32, coarsen_to_m=None):
+                            palette=None, chunk_extent=32, coarsen_to_m=None,
+                            clean=False, clean_min_component=2, clean_close_radius=1):
     """运行补全流水线并导出 .vxw。返回产生的 Overlay。
 
     palette 为 None 时按非语义模式导出(全部 material_id=1);
     传入 vxw.Palette 则语义着色。
-    coarsen_to_m: 目标体素尺寸(米);非 None 时按 round(coarsen_to_m/vs) 降采样。"""
+    coarsen_to_m: 目标体素尺寸(米);非 None 时按 round(coarsen_to_m/vs) 降采样。
+    clean: 是否对(粗)网格做形态学补洞+小连通分量去噪;默认 False 保持原有行为。
+    clean_min_component: 小于该体素数的连通分量被删除。
+    clean_close_radius: 形态学 closing 迭代次数(半径),0 跳过 closing。"""
     out_path = Path(out_path)
     out_path.mkdir(parents=True, exist_ok=True)
     overlay = run_pipeline(obsmap, generators)
@@ -27,6 +31,9 @@ def obsmap_to_completed_vxw(obsmap, out_path, generators,
     if coarsen_to_m:
         factor = max(1, round(coarsen_to_m / vs))
         occ, sem, vmin, vs = downsample_occupancy(occ, sem, vmin, vs, factor)
+    if clean:
+        from m3_adapter.vlayer.coarsen import clean_coarse
+        occ, sem = clean_coarse(occ, sem, clean_min_component, clean_close_radius)
     occupancy_to_vxw(
         occ, vmin, vs, out_path,
         chunk_extent=chunk_extent,

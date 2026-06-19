@@ -39,3 +39,33 @@ def downsample_occupancy(occ, sem, vmin, vs, factor, min_fine: int = 1):
         best_cnt = np.where(upd, c, best_cnt)
         best_lab = np.where(upd, np.uint8(L), best_lab)
     return occ_c, best_lab, vmin_c, float(vs * factor)
+
+
+from scipy import ndimage
+
+
+def clean_coarse(occ, sem, min_component: int = 2, close_radius: int = 1):
+    """Denoise/heal a coarse occupancy: morphological-close small holes (new cells
+    inherit nearest occupied cell's sem) and drop connected components smaller than
+    min_component voxels. Returns (occ_clean, sem_clean). Does not mutate inputs."""
+    occ = occ.copy(); sem = sem.copy()
+    st = ndimage.generate_binary_structure(3, 1)
+    if close_radius > 0:
+        closed = ndimage.binary_closing(occ, structure=st, iterations=int(close_radius))
+        new = closed & ~occ
+        if new.any():
+            # newly-filled cells take the sem of the nearest originally-occupied cell
+            inds = ndimage.distance_transform_edt(~occ, return_distances=False, return_indices=True)
+            sem_near = sem[tuple(inds)]
+            sem = np.where(new, sem_near, sem)
+            occ = closed
+    if min_component and min_component > 1:
+        lbl, n = ndimage.label(occ, structure=st)
+        if n > 0:
+            sizes = np.bincount(lbl.ravel())
+            drop_ids = np.where(sizes[1:] < int(min_component))[0] + 1
+            if len(drop_ids):
+                drop = np.isin(lbl, drop_ids)
+                occ = occ & ~drop
+                sem = np.where(drop, np.uint8(0), sem)
+    return occ, sem
