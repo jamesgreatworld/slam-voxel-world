@@ -51,6 +51,7 @@ ObsMap(m3_adapter/obsmap.py):持久 log-odds 观测地图
 | **SlabFill**(floor/ceiling 多层逐峰 + 实心化增厚;floor_fill 并入) | vlayer/generators/slab.py | ad63c82 |
 | **WallFill v2**(墙=平面峰检测:去重+真法向背向增厚+结构化判定,门窗 free 保留) | vlayer/generators/wall.py | e54460a / 8683e00 |
 | **多分辨率粗化导出**(细→粗块降采样,MC 厚块感,21× 体素↓) | vlayer/coarsen.py + export.coarsen_to_m | 7214b2a |
+| **Minecraft 风渲染**(逐体素立方体 MultiMesh,不合并平面;块边 grid/AO shader;柔和漫反射) | voxel_renderer 逐体素 cube + voxel_grid.gdshader + environment 柔光 | 9aace74 / 7bb53f5 |
 
 settled GVD 命令:`--observed-free <npz> --band-max 0 --min-component 30 --thin --rooms --prune-spurs 0.3 --merge-close 0.2 --drop-small 5 --room-resolution 0.3 --objects [--scene-graph]`。
 settled 建图:`uhumans2_stream <bag> <vxwdir> --semantic --hydra-cfg F:/hydra_ws`(rosbag 在 F:/hydra_ws/datasets/...);全 1779 帧 → 占据 173,262 体素。
