@@ -172,10 +172,9 @@ func _rebuild_world_mmi() -> void:
         _world_mmi = null
     var mmi := MultiMeshInstance3D.new()
     mmi.name = "WorldVoxelCubes"
-    var mat := StandardMaterial3D.new()
-    mat.vertex_color_use_as_albedo = true
-    mat.roughness = 1.0
-    mat.metallic = 0.0
+    var mat := ShaderMaterial.new()
+    mat.shader = VOXEL_GRID_SHADER
+    mat.set_shader_parameter("vsize", _voxel_size)
     mmi.material_override = mat
     mmi.multimesh = mm
     add_child(mmi)

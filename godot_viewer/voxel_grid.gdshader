@@ -1,7 +1,7 @@
 shader_type spatial;
 render_mode diffuse_lambert, specular_disabled;
 
-uniform vec3 base_color : source_color = vec3(0.6, 0.6, 0.6);
+uniform vec3 base_color : source_color = vec3(1.0, 1.0, 1.0);
 uniform float vsize = 0.2;          // world-space block size (metres)
 uniform float line_frac = 0.06;     // grid-line half-width as fraction of a block
 uniform float line_dark = 0.5;      // brightness at a block boundary line
@@ -10,10 +10,12 @@ uniform float ao_dark = 0.72;       // brightness at the very edge (fake AO)
 
 varying vec3 w_pos;
 varying vec3 w_nrm;
+varying vec3 inst_col;
 
 void vertex() {
     w_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
     w_nrm = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
+    inst_col = COLOR.rgb;
 }
 
 void fragment() {
@@ -27,7 +29,7 @@ void fragment() {
     dist = min(dist, mix(1.0, d.z, inplane.z));
     float line = mix(line_dark, 1.0, smoothstep(0.0, line_frac, dist));   // dark line at boundary
     float ao   = mix(ao_dark, 1.0, smoothstep(0.0, ao_frac, dist));        // soft AO toward edges
-    ALBEDO = base_color * line * ao;
+    ALBEDO = base_color * inst_col * line * ao;
     METALLIC = 0.0;
     ROUGHNESS = 1.0;
 }
