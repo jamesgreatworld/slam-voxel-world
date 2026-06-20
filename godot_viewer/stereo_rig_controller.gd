@@ -1,5 +1,5 @@
 # stereo_rig_controller.gd — Layer 5 (control).
-# Attached to the StereoRig Node3D in main.tscn. Owns:
+# Attached to the StereoRig CharacterBody3D in main.tscn. Owns:
 #   - The RIG's 6-DOF pose (this node's own transform)
 #   - WASD/arrows/QE/Space/Ctrl/Shift keyboard 6-DOF input
 #   - Visibility toggle for the rig's child visuals (RedBox + Eye markers),
@@ -12,7 +12,7 @@
 # (per user's mental model). To swap to a different sensor (mono camera, LiDAR
 # scanner, hand-held phone), only this file and its scene children change.
 
-extends Node3D
+extends CharacterBody3D
 
 @export var rig_speed: float = 2.0           # m/s baseline; ×fast_multiplier with Shift
 @export var fast_multiplier: float = 4.0
@@ -22,14 +22,16 @@ extends Node3D
 # Physics-mode (1P) parameters
 @export var gravity_mps2: float = 9.81
 @export var jump_velocity_mps: float = 4.5
-@export var collision_clearance_m: float = 0.01   # tiny gap to avoid sticking to surfaces
-@export var ground_probe_m: float = 0.10          # how far below to look for ground
+@export var eye_height_m: float = 1.6
+@export var capsule_radius_m: float = 0.3
+@export var capsule_stand_h_m: float = 1.7
+@export var floor_max_angle_deg: float = 46.0
 
 var _left_cam: Camera3D = null
 var _right_cam: Camera3D = null
 var _visuals: Array[Node3D] = []
 var _physics_mode: bool = false       # toggled by camera_controller on view_mode change
-var _vertical_velocity: float = 0.0   # for gravity + jump in 1P
+var _body_shape: CollisionShape3D = null
 
 # Walk-cycle animation state. _walk_cycle advances when the rig is moving
 # horizontally (any view mode); when it stops, it lerps back toward 0 so the
@@ -53,6 +55,10 @@ var _seated_entity_id: String = ""
 const _SIT_LIFT_ABOVE_ENTITY_CENTRE: float = 0.45  # rig waist sits above seat
 const _SIT_LEG_PITCH: float = PI * 0.5             # legs out ~90°
 
+# One-shot physics self-check counter (headless smoke test).
+# Counts up to 90 physics frames in 1P mode, then prints settled state.
+var _phys_check_frame: int = 0
+
 
 const HumanoidVisualScript = preload("res://humanoid_visual.gd")
 
@@ -68,28 +74,41 @@ func init_controller(left_cam: Camera3D, right_cam: Camera3D) -> void:
     var humanoid: Node3D = HumanoidVisualScript.build()
     add_child(humanoid)
     _visuals = [humanoid]
-    for name in ["LeftEyeMarker", "RightEyeMarker"]:
-        if has_node(name):
-            _visuals.append(get_node(name))
+    for n in ["LeftEyeMarker", "RightEyeMarker"]:
+        if has_node(n):
+            _visuals.append(get_node(n))
     # Cache pivots for the walk cycle. They were named in HumanoidVisual.build().
     _left_arm  = humanoid.get_node_or_null("LeftArm")
     _right_arm = humanoid.get_node_or_null("RightArm")
     _left_leg  = humanoid.get_node_or_null("LeftLeg")
     _right_leg = humanoid.get_node_or_null("RightLeg")
 
+    # Build capsule collision shape. The rig origin sits at eye height,
+    # so we shift the capsule down so its bottom aligns with the feet.
+    _body_shape = CollisionShape3D.new()
+    _body_shape.name = "BodyShape"
+    var cap := CapsuleShape3D.new()
+    cap.radius = capsule_radius_m
+    cap.height = capsule_stand_h_m
+    _body_shape.shape = cap
+    _body_shape.position = Vector3(0.0, -(eye_height_m - capsule_stand_h_m * 0.5), 0.0)
+    add_child(_body_shape)
+    self.floor_max_angle = deg_to_rad(floor_max_angle_deg)
+    self.floor_snap_length = 0.3
 
-@export var spawn_y_m: float = 1.0   # rig centre height above world origin; safe
+
+@export var spawn_y_m: float = 1.0   # rig origin (eye) height above world origin; safe
                                      # default so 1P physics doesn't dunk us
                                      # into a floor voxel at y=0.
 
 func reset_pose() -> void:
     global_transform = Transform3D(Basis.IDENTITY, Vector3(0.0, spawn_y_m, 0.0))
-    _vertical_velocity = 0.0
+    velocity = Vector3.ZERO
 
 
 func set_pose(xf: Transform3D) -> void:
     global_transform = xf
-    _vertical_velocity = 0.0
+    velocity = Vector3.ZERO
 
 
 func get_pose() -> Transform3D:
@@ -105,7 +124,7 @@ func get_pose() -> Transform3D:
 
 func enter_sit(entity_id: String, entity_pos: Vector3, entity_yaw_rad: float) -> void:
     _seated_entity_id = entity_id
-    _vertical_velocity = 0.0
+    velocity = Vector3.ZERO
     var basis := Basis().rotated(Vector3.UP, entity_yaw_rad)
     var pos := entity_pos + Vector3(0.0, _SIT_LIFT_ABOVE_ENTITY_CENTRE, 0.0)
     global_transform = Transform3D(basis, pos)
@@ -115,7 +134,7 @@ func enter_sit(entity_id: String, entity_pos: Vector3, entity_yaw_rad: float) ->
 
 func exit_seat() -> void:
     _seated_entity_id = ""
-    _vertical_velocity = 0.0
+    velocity = Vector3.ZERO
     if _left_leg  != null: _left_leg.rotation.x  = 0.0
     if _right_leg != null: _right_leg.rotation.x = 0.0
 
@@ -132,7 +151,8 @@ func get_seated_entity_id() -> String:
 # obeys gravity and is blocked by voxel collision in WASD movement.
 func set_physics_mode(enabled: bool) -> void:
     _physics_mode = enabled
-    _vertical_velocity = 0.0
+    velocity = Vector3.ZERO
+    _phys_check_frame = 0
 
 
 func set_visuals_visible(v: bool) -> void:
@@ -145,16 +165,27 @@ func _input(event: InputEvent) -> void:
         reset_pose()
 
 
+func _physics_process(delta: float) -> void:
+    if _physics_mode and not is_seated():
+        _apply_keyboard_physics(delta)
+        _sync_stereo()
+
+        # one-shot physics self-check (headless smoke)
+        if _phys_check_frame >= 0:
+            _phys_check_frame += 1
+            if _phys_check_frame == 90:
+                print("[rig] 1P self-check y=%.2f on_floor=%s vel_y=%.2f" % [global_position.y, str(is_on_floor()), velocity.y])
+                _phys_check_frame = -1
+
+
 func _process(delta: float) -> void:
     if is_seated():
         # Sit mode: rig stays glued to the entity; ignore movement keys.
         _sync_stereo()
         return
-    if _physics_mode:
-        _apply_keyboard_physics(delta)
-    else:
+    if not _physics_mode:
         _apply_keyboard_freefly(delta)
-    _sync_stereo()
+        _sync_stereo()
     _animate_walk(delta)
 
 
@@ -218,7 +249,7 @@ func _apply_keyboard_freefly(delta: float) -> void:
 
 
 # Physics mode (1P): horizontal-only WASD on the rig's yaw plane,
-# gravity pulls down, Space jumps when grounded, raycasts block wall collision.
+# gravity pulls down, Space jumps when grounded, move_and_slide handles collision.
 func _apply_keyboard_physics(delta: float) -> void:
     # 1) Horizontal movement (project rig basis onto Y=0 plane)
     var fwd: Vector3 = -transform.basis.z
@@ -227,37 +258,32 @@ func _apply_keyboard_physics(delta: float) -> void:
     right.y = 0.0
     if fwd.length_squared() > 0.0001: fwd = fwd.normalized()
     if right.length_squared() > 0.0001: right = right.normalized()
-    var horizontal := Vector3.ZERO
-    if Input.is_key_pressed(KEY_W):     horizontal += fwd
-    if Input.is_key_pressed(KEY_S):     horizontal -= fwd
-    if Input.is_key_pressed(KEY_A):     horizontal -= right
-    if Input.is_key_pressed(KEY_D):     horizontal += right
+    var horiz := Vector3.ZERO
+    if Input.is_key_pressed(KEY_W):     horiz += fwd
+    if Input.is_key_pressed(KEY_S):     horiz -= fwd
+    if Input.is_key_pressed(KEY_A):     horiz -= right
+    if Input.is_key_pressed(KEY_D):     horiz += right
     var spd := rig_speed
     if Input.is_key_pressed(KEY_SHIFT): spd *= fast_multiplier
-    var horizontal_step: Vector3 = horizontal.normalized() * spd * delta if horizontal.length_squared() > 0.0001 else Vector3.ZERO
-
-    # 2) Gravity / jump — gate on grounded state so velocity doesn't accumulate
-    #    while we're resting on the floor (was the source of the post-landing jitter).
-    var grounded := _is_grounded()
-    if grounded and _vertical_velocity <= 0.0:
-        _vertical_velocity = 0.0   # at rest on ground; don't add gravity
-        if Input.is_key_pressed(KEY_SPACE):
-            _vertical_velocity = jump_velocity_mps
+    if horiz.length_squared() > 0.0001:
+        horiz = horiz.normalized()
+        velocity.x = horiz.x * spd
+        velocity.z = horiz.z * spd
     else:
-        _vertical_velocity -= gravity_mps2 * delta
-    var vertical_step := Vector3(0.0, _vertical_velocity * delta, 0.0)
+        velocity.x = 0.0
+        velocity.z = 0.0
 
-    # 3) Move with collision resolution (one axis at a time so we slide along walls)
-    var new_pos := global_position
-    new_pos = _slide_axis(new_pos, Vector3(horizontal_step.x, 0.0, 0.0))
-    new_pos = _slide_axis(new_pos, Vector3(0.0, 0.0, horizontal_step.z))
-    var before_vertical := new_pos
-    new_pos = _slide_axis(new_pos, vertical_step)
-    # Ceiling bonk: if going up and the actual move is short of requested, reset velocity.
-    if vertical_step.y > 0.0 and (new_pos.y - before_vertical.y) < vertical_step.y - 0.0001:
-        _vertical_velocity = 0.0
+    # 2) Gravity / jump
+    if is_on_floor():
+        if velocity.y < 0.0:
+            velocity.y = 0.0
+        if Input.is_key_pressed(KEY_SPACE):
+            velocity.y = jump_velocity_mps
+    else:
+        velocity.y -= gravity_mps2 * delta
 
-    global_position = new_pos
+    # 3) Sweep capsule against world geometry
+    move_and_slide()
 
     # 4) Look rotation: only yaw + pitch (no roll in 1P walking)
     var dyaw := 0.0
@@ -288,31 +314,6 @@ func _apply_rotation_keys(delta: float) -> void:
         rotate_object_local(Vector3.UP, dyaw * keyboard_look_speed * delta)
     if droll != 0.0:
         rotate_object_local(Vector3.FORWARD, droll * keyboard_roll_speed * delta)
-
-
-# Raycast from current position toward (pos + offset). If hit, clamp the offset
-# so we stop just before the geometry. Returns the new position.
-func _slide_axis(from: Vector3, offset: Vector3) -> Vector3:
-    if offset.length_squared() < 1e-12:
-        return from
-    var space := get_world_3d().direct_space_state
-    var query := PhysicsRayQueryParameters3D.create(from, from + offset)
-    var result := space.intersect_ray(query)
-    if result.is_empty():
-        return from + offset
-    var hit_pos: Vector3 = result.position
-    var back: Vector3 = -offset.normalized() * collision_clearance_m
-    return hit_pos + back
-
-
-func _is_grounded() -> bool:
-    var space := get_world_3d().direct_space_state
-    var query := PhysicsRayQueryParameters3D.create(
-        global_position,
-        global_position + Vector3(0.0, -(collision_clearance_m + ground_probe_m), 0.0)
-    )
-    var result := space.intersect_ray(query)
-    return not result.is_empty()
 
 
 func _sync_stereo() -> void:

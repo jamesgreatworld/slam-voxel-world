@@ -63,7 +63,7 @@ environment = SubResource("Env_a")
 [node name="VoxelRenderer" type="Node3D" parent="."]
 script = ExtResource("VoxelRendererScript")
 
-[node name="StereoRig" type="Node3D" parent="."]
+[node name="StereoRig" type="CharacterBody3D" parent="."]
 script = ExtResource("StereoRigCtlScript")
 
 [node name="RedBox" type="MeshInstance3D" parent="StereoRig"]
