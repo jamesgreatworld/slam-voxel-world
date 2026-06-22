@@ -57,8 +57,16 @@ class SlabFill:
                 foot = ndimage.binary_closing(foot, structure=self._struct, iterations=self.close_radius)
             yy_list = [Y - k for k in range(T)] if self.side == "floor" else [Y + k for k in range(T)]
             for x, z in np.argwhere(foot):
-                for yy in yy_list:
-                    if 0 <= yy < ny and not occ[x, yy, z] and not free[x, yy, z]:
-                        deltas.append(VoxelDelta((int(x), int(yy), int(z)), "add",
-                                                 self.label, self.generator, self.default_binding))
+                for k, yy in enumerate(yy_list):
+                    if not (0 <= yy < ny):
+                        break
+                    if free[x, yy, z]:
+                        break                     # never fill/cross an observed opening
+                    if occ[x, yy, z]:
+                        if k == 0:
+                            continue              # existing surface cell — keep going to solidify below it
+                        else:
+                            break                 # hit another observed surface below — stop
+                    deltas.append(VoxelDelta((int(x), int(yy), int(z)), "add",
+                                             self.label, self.generator, self.default_binding))
         return deltas
