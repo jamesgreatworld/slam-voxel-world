@@ -51,7 +51,10 @@ ObsMap(m3_adapter/obsmap.py):持久 log-odds 观测地图
 | **SlabFill**(floor/ceiling 多层逐峰 + 实心化增厚;floor_fill 并入) | vlayer/generators/slab.py | ad63c82 |
 | **WallFill v2**(墙=平面峰检测:去重+真法向背向增厚+结构化判定,门窗 free 保留) | vlayer/generators/wall.py | e54460a / 8683e00 |
 | **多分辨率粗化导出**(细→粗块降采样,MC 厚块感,21× 体素↓) | vlayer/coarsen.py + export.coarsen_to_m | 7214b2a |
-| **Minecraft 风渲染**(逐体素立方体 MultiMesh,不合并平面;块边 grid/AO shader;柔和漫反射) | voxel_renderer 逐体素 cube + voxel_grid.gdshader + environment 柔光 | 9aace74 / 7bb53f5 |
+| **Minecraft 风渲染**(逐体素立方体 MultiMesh,不合并平面;块边 grid/AO shader;柔和漫反射) | voxel_renderer 逐体素 cube + voxel_grid.gdshader + environment 柔光 | 9aace74 / 7bb53f5 / 776539c |
+| **结构 generator 套件**(RANSAC 任意平面 / StairsFill 楼梯 / OcclusionFill 封针孔 / SlabFill 精确层间)+ coarsen 去噪 `clean_coarse` | vlayer/generators/{plane,stairs,occlusion}.py + coarsen.clean_coarse | 9c98a34..ff6c92d |
+| **渲染 LOD**(体素超阈值自动合并粗块,细网格 17万也可渲染) | voxel_renderer max_render_voxels | fd4ef8c |
+| **CharacterBody3D 行走**(1P 真胶囊 move_and_slide + 重力/跳/台阶/蹲,取代射线桩) | stereo_rig_controller | 6bb3e4a / eec961d |
 
 settled GVD 命令:`--observed-free <npz> --band-max 0 --min-component 30 --thin --rooms --prune-spurs 0.3 --merge-close 0.2 --drop-small 5 --room-resolution 0.3 --objects [--scene-graph]`。
 settled 建图:`uhumans2_stream <bag> <vxwdir> --semantic --hydra-cfg F:/hydra_ws`(rosbag 在 F:/hydra_ws/datasets/...);全 1779 帧 → 占据 173,262 体素。
@@ -61,9 +64,10 @@ settled 补全:`obsmap_to_completed_vxw(ObsMap, out, generators=[SlabFill(3,'flo
 
 ### 3.1 Phase ④ 先验引导建图(已起步)—— docs/vision.md + specs/2026-06-18-layered-map
 - **已落地**:分层数据架构(L0 观测 / Lc 先验推理引擎 / L1 虚拟覆盖)+ 插件化 Lc 流水线(stage 0..6 契约)+ ④a STRUCTURE generators **SlabFill(地/顶 多层+实心化)+ WallFill v2(墙=平面峰检测+背向增厚,门窗保留)** + **多分辨率粗化导出(0.2m MC 块)** + ④b 入口 mc_item 替换(yaw-only 直立)。
-- ④a 余下:遮挡恢复 / 斜墙 RANSAC(非曼哈顿)| ④b 模板/尺寸拟合 | ④c **物理验证回路**(stage 6,"桌应落地")| ④d 学习补全。
-- **vlayer 直接延续**:stage 2–5 现有步骤(extract_entities/objects/scene_graph/gvd)正式适配 Generator 契约;Godot 物体编辑写回 entities.json、结构编辑写回 overlay;生死规则事件化 + "保留?"提示 UI;粗化 min_fine 去噪/众数性能;SlabFill 填到"层间"精确 slab。
-- **玩法层(已搁置,计划就绪)**:`docs/superpowers/plans/2026-06-18-characterbody3d-rig.md` —— 1P 换 CharacterBody3D 胶囊 + move_and_slide + 台阶/斜坡/蹲下(取代射线桩,根治穿墙)。已做 **双击导航巡检相机**(3P)作为更贴合巡检的替代。
+- ④a STRUCTURE 已较完整:SlabFill/WallFill/**RANSAC 斜面**/**StairsFill**/**OcclusionFill** + 精确层间 slab;余下 ④b 模板/尺寸拟合 | ④c **物理验证回路**(stage 6,"桌应落地")| ④d 学习补全。
+- **最大单项未完成 = #10 stage 2–5 适配 Generator 契约**:把 `extract_entities`/`objects`/`scene_graph`/`gvd` 重构进流水线契约,让 0–6 全经 `run_pipeline` 统一跑。纯架构统一、无可见变化、有打断现有管线风险 → **宜作独立设计项目**,本程未做。
+- **vlayer 其它延续**:Godot 物体编辑写回 entities.json、结构编辑写回 overlay;生死规则事件化 + "保留?"提示 UI;粗化众数性能。
+- **玩法层已落地**:1P = CharacterBody3D 胶囊 + move_and_slide + 重力/跳/台阶攀爬/蹲下(`stereo_rig_controller`,根治穿墙掉地);3P = **双击导航巡检相机**;**Minecraft 风逐体素立方体渲染 + 块边 AO + LOD**。
 
 ### 3.2 当前工作的直接延续
 - **颜色/ORB/CNN 特征**:`gvd/features.py` 框架已支持,只实现 shape;颜色需给 ObsMap 加 RGB 通道(rosbag 有 RGB 主题)。
