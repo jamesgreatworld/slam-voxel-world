@@ -44,6 +44,10 @@ const _PLACED_CAPACITY: int = 2000
 const _ZERO_BASIS := Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO)
 const VOXEL_GRID_SHADER := preload("res://voxel_grid.gdshader")
 
+# When occupied voxel count exceeds this threshold, cube MMI is rendered at a
+# coarser LOD (integer grouping factor) so instance count stays manageable.
+@export var max_render_voxels: int = 120000
+
 
 func build(world) -> void:
     _world = world
@@ -130,41 +134,88 @@ func _process(_delta: float) -> void:
 
 
 # Build (or rebuild) the per-voxel cube MultiMesh for all occupied world voxels.
-# Uses a single MultiMesh with one BoxMesh instance per occupied voxel.
-# Per-instance color = palette color for that voxel's material.
+# When voxel count exceeds max_render_voxels, an integer LOD factor is computed
+# and voxels are grouped into coarser cells (one cube per coarse cell) so the
+# rendered instance count stays manageable. The collision mesh and _voxel_to_instance
+# data are always kept at full resolution.
+# Per-instance color = palette color for that voxel's material (first member).
 # Any placed-MMI preview slots are also rewritten to stub entries since the
 # world MMI now covers those voxels.
 func _rebuild_world_mmi() -> void:
     # Collect all voxels that are in _voxel_to_instance (stub or placed).
     var all_vis: Array = _voxel_to_instance.keys()
-    var count: int = all_vis.size()
+    var n: int = all_vis.size()
 
-    var box := BoxMesh.new()
-    box.size = Vector3.ONE * _voxel_size
-    var mm := MultiMesh.new()
-    mm.transform_format = MultiMesh.TRANSFORM_3D
-    mm.use_colors = true
-    mm.mesh = box
-    mm.instance_count = count
+    # --- Determine integer LOD factor ---
+    # Increase lod until coarse cell count (≈ n / lod³) fits under max_render_voxels.
+    var lod := 1
+    while n > max_render_voxels * lod * lod * lod and lod < 16:
+        lod += 1
 
-    for i in count:
-        var vi: Vector3i = all_vis[i]
+    # --- First, rewrite any placed-MMI slot entries to stub form ---
+    # (the world MMI will cover those voxels visually)
+    for vi in all_vis:
         var entry = _voxel_to_instance[vi]
-        var mid: int = int(entry[2])
-        var world_pos := Vector3(vi) * _voxel_size
-        mm.set_instance_transform(i, Transform3D(Basis.IDENTITY, world_pos))
-        mm.set_instance_color(i, _color_for_material(mid))
-        # Rewrite any placed-MMI slot entries to stub form (the world MMI now
-        # represents this voxel visually, so the placed slot can be blanked).
         if entry[0] != null and int(entry[1]) >= 0:
             var old_mmi = entry[0]
             var old_idx: int = int(entry[1])
             if is_instance_valid(old_mmi) and old_mmi.multimesh != null:
                 old_mmi.multimesh.set_instance_transform(old_idx, Transform3D(_ZERO_BASIS, Vector3.ZERO))
+            var mid: int = int(entry[2])
             _voxel_to_instance[vi] = [null, -1, mid]
 
     # Reset placed-count since all placed voxels are now in the world MMI.
     _placed_count = 0
+
+    var mm := MultiMesh.new()
+    mm.transform_format = MultiMesh.TRANSFORM_3D
+    mm.use_colors = true
+
+    if lod == 1:
+        # --- lod=1: one cube per voxel (original behaviour) ---
+        var box := BoxMesh.new()
+        box.size = Vector3.ONE * _voxel_size
+        mm.mesh = box
+        mm.instance_count = n
+        for i in n:
+            var vi: Vector3i = all_vis[i]
+            var mid: int = int(_voxel_to_instance[vi][2])
+            var world_pos := Vector3(vi) * _voxel_size
+            mm.set_instance_transform(i, Transform3D(Basis.IDENTITY, world_pos))
+            mm.set_instance_color(i, _color_for_material(mid))
+        print("[renderer] cube MMI: %d cells (lod=%d from %d voxels)" % [n, lod, n])
+    else:
+        # --- lod>1: group into coarse cells ---
+        # coarse_key = floor(vi / lod) for each component.
+        var coarse_cells: Dictionary = {}  # Vector3i -> Color (first member's color)
+        for vi in all_vis:
+            var ck := Vector3i(
+                int(floori(float(vi.x) / lod)),
+                int(floori(float(vi.y) / lod)),
+                int(floori(float(vi.z) / lod))
+            )
+            if not coarse_cells.has(ck):
+                var mid: int = int(_voxel_to_instance[vi][2])
+                coarse_cells[ck] = _color_for_material(mid)
+
+        var cell_count: int = coarse_cells.size()
+        var coarse_vsize: float = _voxel_size * lod
+        var half := coarse_vsize * 0.5
+        var box := BoxMesh.new()
+        box.size = Vector3.ONE * coarse_vsize
+        mm.mesh = box
+        mm.instance_count = cell_count
+        var keys: Array = coarse_cells.keys()
+        for i in cell_count:
+            var ck: Vector3i = keys[i]
+            # Cell centre: coarse_key * coarse_vsize + half_cell offset
+            var world_pos := Vector3(ck) * coarse_vsize + Vector3(half, half, half)
+            mm.set_instance_transform(i, Transform3D(Basis.IDENTITY, world_pos))
+            mm.set_instance_color(i, coarse_cells[ck])
+        print("[renderer] cube MMI: %d cells (lod=%d from %d voxels)" % [cell_count, lod, n])
+
+    # Determine vsize for the shader parameter
+    var render_vsize_shader: float = _voxel_size * lod
 
     # Replace or create the world MMI node.
     if _world_mmi != null and is_instance_valid(_world_mmi):
@@ -174,7 +225,7 @@ func _rebuild_world_mmi() -> void:
     mmi.name = "WorldVoxelCubes"
     var mat := ShaderMaterial.new()
     mat.shader = VOXEL_GRID_SHADER
-    mat.set_shader_parameter("vsize", _voxel_size)
+    mat.set_shader_parameter("vsize", render_vsize_shader)
     mmi.material_override = mat
     mmi.multimesh = mm
     add_child(mmi)
