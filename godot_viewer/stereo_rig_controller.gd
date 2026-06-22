@@ -26,6 +26,10 @@ extends CharacterBody3D
 @export var capsule_radius_m: float = 0.3
 @export var capsule_stand_h_m: float = 1.7
 @export var floor_max_angle_deg: float = 46.0
+@export var max_step_m: float = 0.35
+@export var capsule_crouch_h_m: float = 0.9
+
+var _crouched: bool = false
 
 var _left_cam: Camera3D = null
 var _right_cam: Camera3D = null
@@ -251,6 +255,15 @@ func _apply_keyboard_freefly(delta: float) -> void:
 # Physics mode (1P): horizontal-only WASD on the rig's yaw plane,
 # gravity pulls down, Space jumps when grounded, move_and_slide handles collision.
 func _apply_keyboard_physics(delta: float) -> void:
+    # 0) Crouch toggle (Ctrl) — gate stand-up on headroom clearance
+    var want_crouch := Input.is_key_pressed(KEY_CTRL)
+    if want_crouch and not _crouched:
+        _set_capsule_height(capsule_crouch_h_m); _crouched = true
+    elif not want_crouch and _crouched:
+        var dh := capsule_stand_h_m - capsule_crouch_h_m
+        if not test_move(global_transform, Vector3(0.0, dh, 0.0)):   # headroom?
+            _set_capsule_height(capsule_stand_h_m); _crouched = false
+
     # 1) Horizontal movement (project rig basis onto Y=0 plane)
     var fwd: Vector3 = -transform.basis.z
     var right: Vector3 = transform.basis.x
@@ -285,6 +298,21 @@ func _apply_keyboard_physics(delta: float) -> void:
     # 3) Sweep capsule against world geometry
     move_and_slide()
 
+    # Step-up assist: if grounded and a near-vertical obstacle blocked horizontal
+    # motion, and the same horizontal move is clear when raised by max_step_m, lift up.
+    if is_on_floor() and (velocity.x * velocity.x + velocity.z * velocity.z) > 0.0001:
+        var blocked := false
+        for i in get_slide_collision_count():
+            if absf(get_slide_collision(i).get_normal().y) < 0.3:
+                blocked = true
+                break
+        if blocked:
+            var hstep := Vector3(velocity.x, 0.0, velocity.z) * delta
+            var up := Vector3(0.0, max_step_m, 0.0)
+            if not test_move(global_transform, up) \
+               and not test_move(Transform3D(global_transform.basis, global_transform.origin + up), hstep):
+                global_position += up
+
     # 4) Look rotation: only yaw + pitch (no roll in 1P walking)
     var dyaw := 0.0
     var dpitch := 0.0
@@ -314,6 +342,16 @@ func _apply_rotation_keys(delta: float) -> void:
         rotate_object_local(Vector3.UP, dyaw * keyboard_look_speed * delta)
     if droll != 0.0:
         rotate_object_local(Vector3.FORWARD, droll * keyboard_roll_speed * delta)
+
+
+# Resize the body capsule keeping the FEET fixed; raise/lower the rig origin (eye)
+# by half the height delta so the camera tracks the head.
+func _set_capsule_height(h: float) -> void:
+    var cap := _body_shape.shape as CapsuleShape3D
+    var old_h: float = cap.height
+    cap.height = h
+    _body_shape.position.y = -(eye_height_m - h * 0.5)
+    global_position.y += (h - old_h) * 0.5
 
 
 func _sync_stereo() -> void:
