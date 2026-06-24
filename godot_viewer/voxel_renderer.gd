@@ -398,12 +398,14 @@ func compute_spawn_point() -> Vector3:
     for vi in _voxel_to_instance.keys():
         sx += float(vi.x); sz += float(vi.z); n += 1
     var cx := int(round(sx / n)); var cz := int(round(sz / n))
-    var best_y := -2147483648
-    for vi in _voxel_to_instance.keys():        # top voxel within a small radius of centre
+    # floor at centre = LOWEST occupied voxel near the centre column → stand on it,
+    # INSIDE the room (not on the roof). Spawn the eye ~1.7 m above that floor top.
+    var floor_y := 2147483647
+    for vi in _voxel_to_instance.keys():
         if abs(vi.x - cx) <= 4 and abs(vi.z - cz) <= 4:
-            if vi.y > best_y: best_y = vi.y
-    if best_y == -2147483648:
+            if vi.y < floor_y: floor_y = vi.y
+    if floor_y == 2147483647:
         for vi in _voxel_to_instance.keys():
-            if vi.y > best_y: best_y = vi.y
+            if vi.y < floor_y: floor_y = vi.y
     var vs := _voxel_size
-    return Vector3(float(cx) * vs, float(best_y + 1) * vs + 1.8, float(cz) * vs)
+    return Vector3(float(cx) * vs, float(floor_y + 1) * vs + 1.7, float(cz) * vs)
