@@ -389,23 +389,51 @@ func get_mmi() -> MultiMeshInstance3D:
     return _placed_mmi
 
 
-# Suggested rig spawn: occupied-geometry XZ centre, ~1.8 m above the top
-# occupied voxel near that centre (so gravity settles the capsule onto the floor).
+# Suggested rig spawn: nearest standable floor to the room centre with head clearance.
+# A "standable floor" is an occupied voxel whose `head` cells directly above are all
+# empty — guarantees spawn is INSIDE a room, not on the roof and not falling through.
 func compute_spawn_point() -> Vector3:
     if _voxel_to_instance.is_empty():
         return Vector3(0.0, 2.0, 0.0)
+    # 1) occupancy set + per-column sorted Y lists + centroid
+    var occ := {}                       # Vector3i -> bool (fast membership test)
+    var col_ys := {}                    # Vector2i(x,z) -> Array[int]
     var sx := 0.0; var sz := 0.0; var n := 0
     for vi in _voxel_to_instance.keys():
+        occ[vi] = true
+        var key := Vector2i(vi.x, vi.z)
+        if not col_ys.has(key): col_ys[key] = []
+        col_ys[key].append(vi.y)
         sx += float(vi.x); sz += float(vi.z); n += 1
     var cx := int(round(sx / n)); var cz := int(round(sz / n))
-    # floor at centre = LOWEST occupied voxel near the centre column → stand on it,
-    # INSIDE the room (not on the roof). Spawn the eye ~1.7 m above that floor top.
-    var floor_y := 2147483647
-    for vi in _voxel_to_instance.keys():
-        if abs(vi.x - cx) <= 4 and abs(vi.z - cz) <= 4:
-            if vi.y < floor_y: floor_y = vi.y
-    if floor_y == 2147483647:
-        for vi in _voxel_to_instance.keys():
-            if vi.y < floor_y: floor_y = vi.y
+    var head := int(ceil(1.8 / _voxel_size))    # head clearance in cells (~9 at 0.2 m)
+
+    # 2) search all columns for the nearest-to-centre standable floor (lowest floor
+    #    with `head` empty cells above it). Ties broken by distance to centre.
+    var best_col := Vector2i(2147483647, 0)
+    var best_floor_y := 0
+    var best_dist := 1e30
+    for key in col_ys.keys():
+        var d := float((key.x - cx) * (key.x - cx) + (key.y - cz) * (key.y - cz))
+        if d >= best_dist:
+            continue
+        var ys: Array = col_ys[key]
+        ys.sort()
+        for fy in ys:                               # low → high: first floor with headroom
+            var clear := true
+            for h in range(1, head + 1):
+                if occ.has(Vector3i(key.x, fy + h, key.y)):
+                    clear = false; break
+            if clear:
+                best_col = key; best_floor_y = fy; best_dist = d
+                break
     var vs := _voxel_size
-    return Vector3(float(cx) * vs, float(floor_y + 1) * vs + 1.7, float(cz) * vs)
+    if best_col.x == 2147483647:
+        # No standable floor found — spawn safely above global max at centroid
+        var maxy := -2147483648
+        for vi in _voxel_to_instance.keys():
+            if vi.y > maxy: maxy = vi.y
+        return Vector3(float(cx) * vs, float(maxy + 1) * vs + 2.0, float(cz) * vs)
+    # Floor top is at (best_floor_y + 1) * vs; +1.8 m eye height + margin so the
+    # capsule settles cleanly onto the floor with eye ~1.6 m above floor top.
+    return Vector3(float(best_col.x) * vs, float(best_floor_y + 1) * vs + 1.8, float(best_col.y) * vs)
