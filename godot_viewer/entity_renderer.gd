@@ -214,21 +214,11 @@ func _build_single_box(root: Node3D, col: Color, dims) -> void:
     root.add_child(mi)
 
 
-# Phase-2 multi-box composite: each MC sub-box becomes 6 PlaneMesh faces,
-# one per side, each with its own albedo_texture / albedo_color taken from
-# that face's entry in face_textures / face_colors. This is the MC
-# convention — a chair seat can have red_wool on top, oak_planks on bottom,
-# and the model JSON spelled that out per face.
-#
-# Face axis convention (matches MC + our coord system Y-up, -Z forward):
-#   up    +Y, plane normal +Y
-#   down  -Y
-#   north -Z  (looking at the front of a chair from -Z)
-#   south +Z
-#   east  +X
-#   west  -X
+# Phase-2 multi-box composite: each MC sub-box becomes ONE solid BoxMesh,
+# textured with the dominant_texture (triplanar) or the average face colour.
+# This replaces the previous 6-PlaneMesh approach that produced see-through
+# decals; a BoxMesh is fully solid and visible from all angles.
 func _build_mc_composite(root: Node3D, preset: Dictionary, state: String = "off") -> void:
-    var face_names := ["up", "down", "north", "south", "east", "west"]
     var behaviors: Array = preset.get("behaviors", []) if preset.has("behaviors") else []
     var glow_on := state == "on" and behaviors.has("switchable")
     for b in preset.get("boxes", []):
@@ -246,23 +236,32 @@ func _build_mc_composite(root: Node3D, preset: Dictionary, state: String = "off"
             (float(bmax[1]) + float(bmin[1])) * 0.5,
             (float(bmax[2]) + float(bmin[2])) * 0.5,
         )
-        var fc: Dictionary = b.get("face_colors") if b.has("face_colors") else {}
-        var ft: Dictionary = b.get("face_textures") if b.has("face_textures") else {}
-        # Fallback colour for any face missing a face_colors entry.
-        var avg_col := _avg_color(fc)
-        for face in face_names:
-            var face_col: Color = avg_col
-            if fc.has(face):
-                var c = fc[face]
-                if c is Array and c.size() >= 3:
-                    face_col = Color(float(c[0]) / 255.0,
-                                     float(c[1]) / 255.0,
-                                     float(c[2]) / 255.0)
-            var tex_path := String(ft.get(face, ""))
-            var tex: Texture2D = _load_pack_texture(tex_path) if tex_path != "" else null
-            var mi := _build_face_quad(face, center, dims, face_col, tex, glow_on)
-            if mi != null:
-                root.add_child(mi)
+        var box := BoxMesh.new()
+        box.size = dims
+        var mat := StandardMaterial3D.new()
+        mat.roughness = 1.0
+        mat.metallic = 0.0
+        # Use dominant texture (triplanar) if available, else average face colour.
+        var tex_path := String(b.get("dominant_texture", ""))
+        var tex: Texture2D = _load_pack_texture(tex_path) if tex_path != "" else null
+        if tex != null:
+            mat.albedo_texture = tex
+            mat.albedo_color = Color.WHITE
+            mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+            mat.uv1_triplanar = true
+            mat.uv1_scale = Vector3(5, 5, 5)
+        else:
+            var fc: Dictionary = b.get("face_colors") if b.has("face_colors") else {}
+            mat.albedo_color = _avg_color(fc)
+        if glow_on:
+            mat.emission_enabled = true
+            mat.emission = mat.albedo_color * 1.2
+            mat.emission_energy_multiplier = 2.5
+        var mi := MeshInstance3D.new()
+        mi.mesh = box
+        mi.material_override = mat
+        mi.position = center
+        root.add_child(mi)
 
 
 func _avg_color(fc: Dictionary) -> Color:
@@ -273,75 +272,6 @@ func _avg_color(fc: Dictionary) -> Color:
     if n == 0:
         return Color(0.6, 0.6, 0.6)
     return Color(r / n / 255.0, g / n / 255.0, b / n / 255.0)
-
-
-# Build one face as a PlaneMesh oriented so its outward normal points along
-# the named axis. PlaneMesh defaults to lying flat in XZ with normal +Y and
-# size.x → X extent, size.y → Z extent; we rotate the basis to put that
-# normal on each of the 6 sides and pick size accordingly.
-func _build_face_quad(face: String, center: Vector3, dims: Vector3,
-                      col: Color, tex: Texture2D,
-                      glow_on: bool = false) -> MeshInstance3D:
-    var sx := 0.0
-    var sy := 0.0
-    var pos := center
-    var basis := Basis()
-    match face:
-        "up":
-            sx = dims.x; sy = dims.z
-            pos.y = center.y + dims.y * 0.5
-            basis = Basis()
-        "down":
-            sx = dims.x; sy = dims.z
-            pos.y = center.y - dims.y * 0.5
-            basis = Basis().rotated(Vector3.RIGHT, PI)        # flip normal to -Y
-        "north":
-            sx = dims.x; sy = dims.y
-            pos.z = center.z - dims.z * 0.5
-            basis = Basis().rotated(Vector3.RIGHT, -PI / 2.0) # normal → -Z
-        "south":
-            sx = dims.x; sy = dims.y
-            pos.z = center.z + dims.z * 0.5
-            basis = Basis().rotated(Vector3.RIGHT, PI / 2.0)  # normal → +Z
-        "east":
-            sx = dims.z; sy = dims.y
-            pos.x = center.x + dims.x * 0.5
-            basis = Basis().rotated(Vector3.FORWARD, -PI / 2.0)  # normal → +X
-        "west":
-            sx = dims.z; sy = dims.y
-            pos.x = center.x - dims.x * 0.5
-            basis = Basis().rotated(Vector3.FORWARD, PI / 2.0)   # normal → -X
-        _:
-            return null
-    if sx <= 0.0 or sy <= 0.0:
-        return null
-    var plane := PlaneMesh.new()
-    plane.size = Vector2(sx, sy)
-    var mat := StandardMaterial3D.new()
-    if tex != null:
-        mat.albedo_texture = tex
-        mat.albedo_color = Color.WHITE
-        mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
-    else:
-        mat.albedo_color = col
-    mat.metallic = 0.05
-    mat.roughness = 0.75
-    # Behavior "switchable" with state=="on": light up the sub-box faces by
-    # enabling emission tinted to albedo. Off / non-switchable items keep
-    # emission disabled.
-    if glow_on:
-        mat.emission_enabled = true
-        mat.emission = col * 1.2
-        mat.emission_energy_multiplier = 2.5
-    else:
-        mat.emission_enabled = false
-    # PlaneMesh is single-sided; outward normal is set by `basis`, so backface
-    # culling is correct as long as we built the box right.
-    var mi := MeshInstance3D.new()
-    mi.mesh = plane
-    mi.material_override = mat
-    mi.transform = Transform3D(basis, pos)
-    return mi
 
 
 var _tex_cache: Dictionary = {}    # rel path → Texture2D
