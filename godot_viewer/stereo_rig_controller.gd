@@ -185,11 +185,6 @@ func set_visuals_visible(v: bool) -> void:
         n.visible = v
 
 
-func _input(event: InputEvent) -> void:
-    if event is InputEventKey and event.pressed and event.keycode == KEY_R:
-        reset_pose()
-
-
 func _physics_process(delta: float) -> void:
     # Physics runs whenever NOT flying/seated, regardless of view mode.
     if _fly_mode or is_seated():

@@ -169,6 +169,7 @@ func _try_pick_at_mouse() -> void:
     var params := PhysicsRayQueryParameters3D.create(ro, ro + rd * 200.0)
     params.collide_with_areas = false
     params.collide_with_bodies = true
+    params.collision_mask = 4   # entity-pick layer ONLY — ignores voxel mesh + rig
     var hit := space.intersect_ray(params)
     if hit.is_empty():
         clear_selection()

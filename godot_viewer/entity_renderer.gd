@@ -192,6 +192,11 @@ func _make_physics_body(dims, dynamic: bool) -> RigidBody3D:
     # dynamic = true, freeze=false, and gravity + collisions take over.
     body.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
     body.mass = max(0.5, float(dims[0]) * float(dims[1]) * float(dims[2]) * 100.0)
+    # Bit 1 = world layer (player/physics collides with furniture).
+    # Bit 3 = entity-pick layer (selector ray queries ONLY this layer,
+    #         so the ray ignores solid voxel geometry and the CharacterBody3D rig).
+    body.collision_layer = 1 | 4   # bits: world + entity-pick
+    body.collision_mask  = 1       # collide with world voxels (for physics_dynamic)
     body.contact_monitor = false   # we don't need callbacks yet
     var cs := CollisionShape3D.new()
     var shape := BoxShape3D.new()
