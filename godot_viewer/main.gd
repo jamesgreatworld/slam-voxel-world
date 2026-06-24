@@ -77,6 +77,8 @@ func _ready() -> void:
     stereo_rig.init_controller(left_cam, right_cam)
     stereo_rig.reset_pose()
     cam_ctl.init_controller(main_cam, stereo_rig, logger)
+    ents.toolbar.fly_pressed.connect(cam_ctl.toggle_fly)
+    cam_ctl.fly_changed.connect(ents.toolbar.set_fly_state)
     hud_ctl.init_controller(status_label, mode_label, pose_label, ws.world, stereo_rig, cam_ctl, logger)
     snap_ctl.init_controller(stereo_rig, cam_ctl, logger)
     snap_ctl.configure_from_cli(cfg.raw_args)

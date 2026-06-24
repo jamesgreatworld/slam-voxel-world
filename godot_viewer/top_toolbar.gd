@@ -10,10 +10,12 @@ extends CanvasLayer
 signal items_pressed
 signal snapshot_pressed
 signal menu_pressed
+signal fly_pressed
 
 const _BTN_MIN_SIZE := Vector2(96, 32)
 
 var _row: HBoxContainer = null
+var _fly_btn: Button = null
 
 
 func _ready() -> void:
@@ -51,6 +53,19 @@ func _ready() -> void:
     _add_button("Items  [I]",    func(): emit_signal("items_pressed"))
     _add_button("Snapshot  [F5]", func(): emit_signal("snapshot_pressed"))
     _add_button("Menu  [Esc]",   func(): emit_signal("menu_pressed"))
+
+    _fly_btn = Button.new()
+    _fly_btn.toggle_mode = true
+    _fly_btn.text = "Fly  [V]"
+    _fly_btn.custom_minimum_size = _BTN_MIN_SIZE
+    _fly_btn.toggled.connect(func(_p): emit_signal("fly_pressed"))
+    _row.add_child(_fly_btn)
+
+
+func set_fly_state(on: bool) -> void:
+    if _fly_btn != null:
+        _fly_btn.set_pressed_no_signal(on)
+        _fly_btn.text = "Fly: ON  [V]" if on else "Fly  [V]"
 
 
 func _add_button(text: String, on_pressed: Callable) -> void:

@@ -14,6 +14,8 @@
 
 extends Node
 
+signal fly_changed(on: bool)
+
 enum ViewMode { THIRD_PERSON, FIRST_PERSON }
 
 @export var orbit_distance_init: float = 8.0
@@ -121,6 +123,21 @@ func _notify_rig_physics_mode() -> void:
     pass
 
 
+func toggle_fly() -> void:
+    set_fly(not _fly)
+
+
+func set_fly(on: bool) -> void:
+    if on == _fly:
+        return
+    _fly = on
+    if _rig_ctl != null and _rig_ctl.has_method("set_fly_mode"):
+        _rig_ctl.set_fly_mode(_fly)
+    emit_signal("fly_changed", _fly)
+    if _logger:
+        _logger.info("fly_mode", {"on": _fly})
+
+
 func set_orbit_enabled(enabled: bool) -> void:
     _orbit_enabled = enabled
     if not enabled and _right_held:
@@ -154,11 +171,7 @@ func _input(event: InputEvent) -> void:
 
     # V: toggle fly mode (works in both views).
     if event is InputEventKey and event.pressed and event.keycode == KEY_V:
-        _fly = not _fly
-        if _rig_ctl != null and _rig_ctl.has_method("set_fly_mode"):
-            _rig_ctl.set_fly_mode(_fly)
-        if _logger:
-            _logger.info("fly_mode", {"on": _fly})
+        toggle_fly()
         return
 
     # 1P FPS look.
