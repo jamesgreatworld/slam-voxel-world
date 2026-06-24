@@ -30,6 +30,7 @@ extends CharacterBody3D
 @export var capsule_crouch_h_m: float = 0.9
 
 var _crouched: bool = false
+var _spawn_origin: Vector3 = Vector3(0, 1, 0)
 
 var _left_cam: Camera3D = null
 var _right_cam: Camera3D = null
@@ -109,11 +110,13 @@ func init_controller(left_cam: Camera3D, right_cam: Camera3D) -> void:
 func reset_pose() -> void:
     global_transform = Transform3D(Basis.IDENTITY, Vector3(0.0, spawn_y_m, 0.0))
     velocity = Vector3.ZERO
+    _spawn_origin = global_position
 
 
 func set_pose(xf: Transform3D) -> void:
     global_transform = xf
     velocity = Vector3.ZERO
+    _spawn_origin = global_position
 
 
 func get_pose() -> Transform3D:
@@ -190,6 +193,11 @@ func _input(event: InputEvent) -> void:
 func _physics_process(delta: float) -> void:
     # Physics runs whenever NOT flying/seated, regardless of view mode.
     if _fly_mode or is_seated():
+        return
+    # Fall-through respawn safety: snap back if dropped far below spawn.
+    if global_position.y < _spawn_origin.y - 50.0:
+        global_position = _spawn_origin
+        velocity = Vector3.ZERO
         return
     _apply_keyboard_physics(delta)
     _sync_stereo()

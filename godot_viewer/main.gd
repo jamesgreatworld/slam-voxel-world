@@ -116,6 +116,10 @@ func _apply_cli_overrides() -> void:
         var xf_h := Transform3D(basis_h, Vector3(float(sh[0]), float(sh[1]), float(sh[2])))
         call_deferred("_set_rig_xform_deferred", xf_h)
         logger.info("spawn_hint_applied", {"pos": [sh[0], sh[1], sh[2]], "yaw_deg": sh[3]})
+    elif cfg.rig_pose_spec == "":
+        var sp: Vector3 = renderer.compute_spawn_point()
+        call_deferred("_set_rig_xform_deferred", Transform3D(Basis.IDENTITY, sp))
+        logger.info("spawn_center", {"pos": [sp.x, sp.y, sp.z]})
     # CLI-driven overrides (must happen after init_controller)
     if cfg.view_override != "":
         cam_ctl.set_view_mode_str(cfg.view_override)

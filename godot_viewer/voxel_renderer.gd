@@ -387,3 +387,23 @@ func _add_reference_helpers(plane_y: float) -> void:
 # only need a non-null MultiMeshInstance3D handle continue to work.
 func get_mmi() -> MultiMeshInstance3D:
     return _placed_mmi
+
+
+# Suggested rig spawn: occupied-geometry XZ centre, ~1.8 m above the top
+# occupied voxel near that centre (so gravity settles the capsule onto the floor).
+func compute_spawn_point() -> Vector3:
+    if _voxel_to_instance.is_empty():
+        return Vector3(0.0, 2.0, 0.0)
+    var sx := 0.0; var sz := 0.0; var n := 0
+    for vi in _voxel_to_instance.keys():
+        sx += float(vi.x); sz += float(vi.z); n += 1
+    var cx := int(round(sx / n)); var cz := int(round(sz / n))
+    var best_y := -2147483648
+    for vi in _voxel_to_instance.keys():        # top voxel within a small radius of centre
+        if abs(vi.x - cx) <= 4 and abs(vi.z - cz) <= 4:
+            if vi.y > best_y: best_y = vi.y
+    if best_y == -2147483648:
+        for vi in _voxel_to_instance.keys():
+            if vi.y > best_y: best_y = vi.y
+    var vs := _voxel_size
+    return Vector3(float(cx) * vs, float(best_y + 1) * vs + 1.8, float(cz) * vs)
