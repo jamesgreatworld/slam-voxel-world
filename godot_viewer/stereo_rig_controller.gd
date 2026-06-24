@@ -19,7 +19,7 @@ extends CharacterBody3D
 @export var keyboard_look_speed: float = 1.5 # rad/s for yaw + pitch
 @export var keyboard_roll_speed: float = 1.2 # rad/s for roll (Q/E)
 @export var stereo_baseline: float = 0.10    # meters between L/R eye centres
-# Physics-mode (1P) parameters
+# Physics-mode parameters
 @export var gravity_mps2: float = 9.81
 @export var jump_velocity_mps: float = 4.5
 @export var eye_height_m: float = 1.6
@@ -34,13 +34,23 @@ var _crouched: bool = false
 var _left_cam: Camera3D = null
 var _right_cam: Camera3D = null
 var _visuals: Array[Node3D] = []
-var _physics_mode: bool = false       # toggled by camera_controller on view_mode change
+# _physics_mode is kept for backward compatibility (no-op; movement is now
+# always physics unless _fly_mode is true).
+var _physics_mode: bool = true
 var _body_shape: CollisionShape3D = null
 
-# Walk-cycle animation state. _walk_cycle advances when the rig is moving
-# horizontally (any view mode); when it stops, it lerps back toward 0 so the
-# limbs settle to neutral. The four pivots are cached from the humanoid
-# after init_controller builds it.
+# Movement-mode flag: when true the rig flies freely (no gravity/collision).
+# Toggled by camera_controller via V key.
+var _fly_mode: bool = false
+
+# Camera yaw reference for camera-relative movement.
+# In 1P: set to _fp_yaw (look direction).  In 3P: set to orbit_yaw.
+var _move_yaw: float = 0.0
+
+# True when camera is in THIRD_PERSON; rig faces its movement direction.
+var _third_person: bool = true
+
+# Walk-cycle animation state.
 var _walk_cycle: float = 0.0
 var _last_pos: Vector3 = Vector3.ZERO
 var _last_pos_inited: bool = false
@@ -53,14 +63,13 @@ var _right_arm: Node3D = null
 var _left_leg: Node3D = null
 var _right_leg: Node3D = null
 
-# A2 sit/lay state. When _seated_entity_id != "" the rig is parked on top
-# of an entity and the WASD / mouse-look paths skip movement.
+# A2 sit/lay state.
 var _seated_entity_id: String = ""
-const _SIT_LIFT_ABOVE_ENTITY_CENTRE: float = 0.45  # rig waist sits above seat
-const _SIT_LEG_PITCH: float = PI * 0.5             # legs out ~90°
+const _SIT_LIFT_ABOVE_ENTITY_CENTRE: float = 0.45
+const _SIT_LEG_PITCH: float = PI * 0.5
 
 # One-shot physics self-check counter (headless smoke test).
-# Counts up to 90 physics frames in 1P mode, then prints settled state.
+# Counts up to 90 physics frames, then prints settled state.
 var _phys_check_frame: int = 0
 
 
@@ -70,9 +79,6 @@ const HumanoidVisualScript = preload("res://humanoid_visual.gd")
 func init_controller(left_cam: Camera3D, right_cam: Camera3D) -> void:
     _left_cam = left_cam
     _right_cam = right_cam
-    # Replace the red sensor box with a block-style humanoid. Hide the
-    # original RedBox so we don't see both. Eye markers stay (they show
-    # the stereo baseline).
     if has_node("RedBox"):
         get_node("RedBox").visible = false
     var humanoid: Node3D = HumanoidVisualScript.build()
@@ -81,14 +87,11 @@ func init_controller(left_cam: Camera3D, right_cam: Camera3D) -> void:
     for n in ["LeftEyeMarker", "RightEyeMarker"]:
         if has_node(n):
             _visuals.append(get_node(n))
-    # Cache pivots for the walk cycle. They were named in HumanoidVisual.build().
     _left_arm  = humanoid.get_node_or_null("LeftArm")
     _right_arm = humanoid.get_node_or_null("RightArm")
     _left_leg  = humanoid.get_node_or_null("LeftLeg")
     _right_leg = humanoid.get_node_or_null("RightLeg")
 
-    # Build capsule collision shape. The rig origin sits at eye height,
-    # so we shift the capsule down so its bottom aligns with the feet.
     _body_shape = CollisionShape3D.new()
     _body_shape.name = "BodyShape"
     var cap := CapsuleShape3D.new()
@@ -101,9 +104,7 @@ func init_controller(left_cam: Camera3D, right_cam: Camera3D) -> void:
     self.floor_snap_length = 0.3
 
 
-@export var spawn_y_m: float = 1.0   # rig origin (eye) height above world origin; safe
-                                     # default so 1P physics doesn't dunk us
-                                     # into a floor voxel at y=0.
+@export var spawn_y_m: float = 1.0
 
 func reset_pose() -> void:
     global_transform = Transform3D(Basis.IDENTITY, Vector3(0.0, spawn_y_m, 0.0))
@@ -120,10 +121,7 @@ func get_pose() -> Transform3D:
 
 
 # ---------------------------------------------------------------------------
-# A2 sit: park the rig on top of an entity. The entity supplies the chair's
-# world-space centre + yaw; we lift the waist by _SIT_LIFT and bend the legs
-# 90° forward so the humanoid reads as "sitting". WASD is gated on
-# is_seated() in _apply_keyboard_*.
+# A2 sit
 # ---------------------------------------------------------------------------
 
 func enter_sit(entity_id: String, entity_pos: Vector3, entity_yaw_rad: float) -> void:
@@ -151,11 +149,31 @@ func get_seated_entity_id() -> String:
     return _seated_entity_id
 
 
-# Called by camera_controller when the view mode toggles. When ON, the rig
-# obeys gravity and is blocked by voxel collision in WASD movement.
-func set_physics_mode(enabled: bool) -> void:
-    _physics_mode = enabled
+# ---------------------------------------------------------------------------
+# Movement mode API (called by camera_controller)
+# ---------------------------------------------------------------------------
+
+# Fly toggle (V key). When on: free-fly, no gravity/collision.
+func set_fly_mode(on: bool) -> void:
+    _fly_mode = on
     velocity = Vector3.ZERO
+    _phys_check_frame = 0
+
+
+# Camera yaw reference so WASD is relative to the camera view.
+func set_move_yaw(y: float) -> void:
+    _move_yaw = y
+
+
+# Tell the rig which perspective the camera is using.
+func set_third_person(on: bool) -> void:
+    _third_person = on
+
+
+# Kept for backward compatibility; physics is now always on unless _fly_mode.
+# Calling this no longer has any effect on movement mode.
+func set_physics_mode(enabled: bool) -> void:
+    _physics_mode = enabled   # stored but ignored; movement driven by _fly_mode
     _phys_check_frame = 0
 
 
@@ -170,36 +188,34 @@ func _input(event: InputEvent) -> void:
 
 
 func _physics_process(delta: float) -> void:
-    if _physics_mode and not is_seated():
-        _apply_keyboard_physics(delta)
-        _sync_stereo()
+    # Physics runs whenever NOT flying/seated, regardless of view mode.
+    if _fly_mode or is_seated():
+        return
+    _apply_keyboard_physics(delta)
+    _sync_stereo()
 
-        # one-shot physics self-check (headless smoke)
-        if _phys_check_frame >= 0:
-            _phys_check_frame += 1
-            if _phys_check_frame == 90:
-                print("[rig] 1P self-check y=%.2f on_floor=%s vel_y=%.2f" % [global_position.y, str(is_on_floor()), velocity.y])
-                _phys_check_frame = -1
+    # One-shot physics self-check (headless smoke).
+    if _phys_check_frame >= 0:
+        _phys_check_frame += 1
+        if _phys_check_frame == 90:
+            print("[rig] 1P self-check y=%.2f on_floor=%s vel_y=%.2f" % [global_position.y, str(is_on_floor()), velocity.y])
+            _phys_check_frame = -1
 
 
 func _process(delta: float) -> void:
     if is_seated():
-        # Sit mode: rig stays glued to the entity; ignore movement keys.
         _sync_stereo()
         return
-    if not _physics_mode:
+    if _fly_mode:
         _apply_keyboard_freefly(delta)
         _sync_stereo()
     _animate_walk(delta)
 
 
-# Advance the walk cycle when the rig is moving horizontally and apply
-# sin-driven swing to the four limb pivots. Opposite limbs swing in
-# opposition (left leg forward → right arm forward), and arms swing
-# counter-phase to the legs for a natural gait.
+# Advance the walk cycle when moving horizontally.
 func _animate_walk(delta: float) -> void:
     if _left_arm == null:
-        return    # humanoid wasn't built yet
+        return
     var pos := global_position
     var horizontal_speed := 0.0
     if _last_pos_inited:
@@ -211,15 +227,11 @@ func _animate_walk(delta: float) -> void:
 
     var moving := horizontal_speed > _WALK_VEL_THRESHOLD
     var target_speed := horizontal_speed if moving else 0.0
-    # Cycle advances proportionally to speed (faster walk = faster swing)
-    # but capped so sprint doesn't blur the limbs.
     var cycle_rate: float = min(target_speed, 4.0) * _WALK_FREQ_HZ
     _walk_cycle = fmod(_walk_cycle + cycle_rate * delta, TAU)
 
     var swing := sin(_walk_cycle) * _WALK_AMPL_RAD
     if not moving:
-        # When standing, decay the visible swing toward 0 even though the
-        # internal cycle keeps its phase — avoids snapping mid-step.
         swing = lerp(_get_current_swing(), 0.0,
                      clamp(delta * _WALK_DAMP_PER_SEC, 0.0, 1.0))
 
@@ -235,7 +247,7 @@ func _get_current_swing() -> float:
     return _left_leg.rotation.x
 
 
-# Free-fly mode (3P): unchanged behaviour, ignores gravity & collision.
+# Free-fly mode: ignores gravity and collision.
 func _apply_keyboard_freefly(delta: float) -> void:
     var dir := Vector3.ZERO
     if Input.is_key_pressed(KEY_W):     dir -= transform.basis.z
@@ -252,24 +264,23 @@ func _apply_keyboard_freefly(delta: float) -> void:
     _apply_rotation_keys(delta)
 
 
-# Physics mode (1P): horizontal-only WASD on the rig's yaw plane,
-# gravity pulls down, Space jumps when grounded, move_and_slide handles collision.
+# Physics movement: camera-relative WASD, gravity, jump, move_and_slide.
+# Active in BOTH 1P and 3P whenever _fly_mode is false.
 func _apply_keyboard_physics(delta: float) -> void:
-    # 0) Crouch toggle (Ctrl) — gate stand-up on headroom clearance
+    # 0) Crouch toggle (Ctrl)
     var want_crouch := Input.is_key_pressed(KEY_CTRL)
     if want_crouch and not _crouched:
         _set_capsule_height(capsule_crouch_h_m); _crouched = true
     elif not want_crouch and _crouched:
         var dh := capsule_stand_h_m - capsule_crouch_h_m
-        if not test_move(global_transform, Vector3(0.0, dh, 0.0)):   # headroom?
+        if not test_move(global_transform, Vector3(0.0, dh, 0.0)):
             _set_capsule_height(capsule_stand_h_m); _crouched = false
 
-    # 1) Horizontal movement (project rig basis onto Y=0 plane)
-    var fwd: Vector3 = -transform.basis.z
-    var right: Vector3 = transform.basis.x
-    fwd.y = 0.0
-    right.y = 0.0
-    if fwd.length_squared() > 0.0001: fwd = fwd.normalized()
+    # 1) Horizontal movement — camera-relative via _move_yaw
+    var yaw_basis := Basis(Vector3.UP, _move_yaw)
+    var fwd: Vector3 = -yaw_basis.z; fwd.y = 0.0
+    var right: Vector3 = yaw_basis.x; right.y = 0.0
+    if fwd.length_squared() > 0.0001:   fwd   = fwd.normalized()
     if right.length_squared() > 0.0001: right = right.normalized()
     var horiz := Vector3.ZERO
     if Input.is_key_pressed(KEY_W):     horiz += fwd
@@ -286,6 +297,11 @@ func _apply_keyboard_physics(delta: float) -> void:
         velocity.x = 0.0
         velocity.z = 0.0
 
+    # In 3P: rotate the rig to face the movement direction (character turns).
+    if _third_person and horiz.length_squared() > 0.0001:
+        var target_yaw := atan2(horiz.x, horiz.z)
+        rotation.y = lerp_angle(rotation.y, target_yaw, clamp(delta * 10.0, 0.0, 1.0))
+
     # 2) Gravity / jump
     if is_on_floor():
         if velocity.y < 0.0:
@@ -298,8 +314,7 @@ func _apply_keyboard_physics(delta: float) -> void:
     # 3) Sweep capsule against world geometry
     move_and_slide()
 
-    # Step-up assist: if grounded and a near-vertical obstacle blocked horizontal
-    # motion, and the same horizontal move is clear when raised by max_step_m, lift up.
+    # Step-up assist
     if is_on_floor() and (velocity.x * velocity.x + velocity.z * velocity.z) > 0.0001:
         var blocked := false
         for i in get_slide_collision_count():
@@ -313,7 +328,7 @@ func _apply_keyboard_physics(delta: float) -> void:
                and not test_move(Transform3D(global_transform.basis, global_transform.origin + up), hstep):
                 global_position += up
 
-    # 4) Look rotation: only yaw + pitch (no roll in 1P walking)
+    # 4) Look rotation (arrow keys) — only yaw+pitch, no roll
     var dyaw := 0.0
     var dpitch := 0.0
     if Input.is_key_pressed(KEY_LEFT):  dyaw += 1.0
@@ -323,7 +338,7 @@ func _apply_keyboard_physics(delta: float) -> void:
     if dpitch != 0.0:
         rotate_object_local(Vector3.RIGHT, dpitch * keyboard_look_speed * delta)
     if dyaw != 0.0:
-        rotate(Vector3.UP, dyaw * keyboard_look_speed * delta)  # world-yaw stays upright
+        rotate(Vector3.UP, dyaw * keyboard_look_speed * delta)
 
 
 func _apply_rotation_keys(delta: float) -> void:
@@ -344,8 +359,6 @@ func _apply_rotation_keys(delta: float) -> void:
         rotate_object_local(Vector3.FORWARD, droll * keyboard_roll_speed * delta)
 
 
-# Resize the body capsule keeping the FEET fixed; raise/lower the rig origin (eye)
-# by half the height delta so the camera tracks the head.
 func _set_capsule_height(h: float) -> void:
     var cap := _body_shape.shape as CapsuleShape3D
     var old_h: float = cap.height
