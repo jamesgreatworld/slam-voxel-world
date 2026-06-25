@@ -107,6 +107,16 @@ func build(main_cam: Camera3D, voxel_editor: Node3D, stereo_rig: Node3D,
 
     ws.world_loaded.connect(_on_world_loaded)
 
+    if "--entity-pick-selftest" in OS.get_cmdline_user_args():
+        _run_pick_selftest()
+
+
+func _run_pick_selftest() -> void:
+    await get_tree().physics_frame
+    await get_tree().physics_frame
+    selector.selftest_pick_all()
+    get_tree().quit()
+
 
 func _on_world_loaded(world, path: String) -> void:
     ent_renderer.load_entities(path, world.palette_rgb)

@@ -204,6 +204,37 @@ func _select(id: String, node: Node3D) -> void:
     emit_signal("entity_selected", id)
 
 
+# --- Headless diagnostic --------------------------------------------------
+# For every spawned entity, raycast straight down through its origin on the
+# entity-pick layer (mask 4) and report whether a click there would select it.
+# Decisively separates a broken collision layer / proxy from an interaction
+# issue (mouse mode, view). Triggered by `-- --entity-pick-selftest`.
+func selftest_pick_all() -> void:
+    if _entity_renderer == null:
+        print("[entity-selftest] FAIL no entity_renderer"); return
+    var space := get_world_3d().direct_space_state
+    var total := 0
+    var ok := 0
+    for root in _entity_renderer.get_children():
+        if not (root is Node3D) or not root.has_meta(ENTITY_META_KEY):
+            continue
+        total += 1
+        var gp: Vector3 = (root as Node3D).global_position
+        var q := PhysicsRayQueryParameters3D.create(gp + Vector3(0, 6, 0), gp + Vector3(0, -6, 0))
+        q.collision_mask = 4
+        var hit := space.intersect_ray(q)
+        var meta: Dictionary = root.get_meta(ENTITY_META_KEY)
+        var nm := String(meta.get("label_name", "?"))
+        if hit.is_empty():
+            print("[entity-selftest] MISS  %-12s @%v — nothing on pick layer 4" % [nm, gp])
+        elif _find_entity_ancestor(hit.collider) == root:
+            ok += 1
+            print("[entity-selftest] HIT   %-12s @%v" % [nm, gp])
+        else:
+            print("[entity-selftest] WRONG %-12s resolved to a different node" % nm)
+    print("[entity-selftest] RESULT %d/%d entities pickable on layer 4" % [ok, total])
+
+
 func _update_outline() -> void:
     if _outline == null or _selected_node == null:
         return
