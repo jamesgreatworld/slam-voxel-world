@@ -112,7 +112,13 @@ func _is_placer_active() -> bool:
     return _placer != null and _placer.has_method("is_active") and _placer.is_active()
 
 
-func _input(event: InputEvent) -> void:
+# Uses _unhandled_input (NOT _input): mouse clicks consumed by the GUI (the
+# bottom context bar's Rotate/Delete buttons, the top toolbar, menus) must NOT
+# reach the picker, otherwise the pick ray fires under the cursor — at empty
+# floor below a button — and clears the very selection the user is acting on.
+# _unhandled_input only sees events the GUI did not consume, so UI clicks keep
+# the selection while world clicks still pick.
+func _unhandled_input(event: InputEvent) -> void:
     if _is_placer_active():
         return
     # Grab mode owns LMB (confirm) / ESC (cancel); everything else passes
@@ -232,7 +238,31 @@ func selftest_pick_all() -> void:
             print("[entity-selftest] HIT   %-12s @%v" % [nm, gp])
         else:
             print("[entity-selftest] WRONG %-12s resolved to a different node" % nm)
-    print("[entity-selftest] RESULT %d/%d entities pickable on layer 4" % [ok, total])
+    print("[entity-selftest] RESULT %d/%d entities pickable (vertical ray) on layer 4" % [ok, total])
+    # Pass 2: cast from the active camera toward each entity centre — this is
+    # exactly the click ray (project_ray) minus the mouse. Catches camera /
+    # world-space mismatches that the vertical ray can't.
+    if _cam == null:
+        print("[entity-selftest] CAM-PASS skipped: _cam is null"); return
+    print("[entity-selftest] cam @%v  current=%s  world_match=%s" % [
+        _cam.global_position, str(_cam.current),
+        str(_cam.get_world_3d() == get_world_3d())])
+    var cam_ok := 0
+    for root in _entity_renderer.get_children():
+        if not (root is Node3D) or not root.has_meta(ENTITY_META_KEY):
+            continue
+        var gp: Vector3 = (root as Node3D).global_position
+        var co: Vector3 = _cam.global_position
+        var q := PhysicsRayQueryParameters3D.create(co, co + (gp - co).normalized() * 300.0)
+        q.collision_mask = 4
+        var hit := space.intersect_ray(q)
+        var nm := String(root.get_meta(ENTITY_META_KEY).get("label_name", "?"))
+        if not hit.is_empty() and _find_entity_ancestor(hit.collider) == root:
+            cam_ok += 1
+        else:
+            print("[entity-selftest] CAM-MISS %-12s (ray cam→entity hit %s)" % [
+                nm, "nothing" if hit.is_empty() else str(hit.collider)])
+    print("[entity-selftest] CAM-RESULT %d/%d pickable from camera ray" % [cam_ok, total])
 
 
 func _update_outline() -> void:
