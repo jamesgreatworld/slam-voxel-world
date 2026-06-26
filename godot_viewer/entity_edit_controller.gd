@@ -44,17 +44,106 @@ func init_controller(
     _entity_selector = entity_selector
     _stereo_rig = stereo_rig
     _logger = logger
-    # Hook entity picker / placer / selector signals.
+    # Hook entity picker / placer signals. (Selection mutations now call this
+    # controller directly — see rotate_selected / move_selected_to / delete_selected.)
     item_picker.item_chosen.connect(_on_item_chosen)
     entity_placer.placement_committed.connect(_on_placement_committed)
-    entity_selector.will_delete.connect(_on_entity_will_delete)
-    entity_selector.will_move.connect(_on_entity_will_move)
-    entity_selector.will_rotate.connect(_on_entity_will_rotate)
 
 
 func set_world(world, world_path: String) -> void:
     _world = world
     _world_path = world_path
+
+
+# ---------------------------------------------------------------------------
+# Selection mutations — the single entry point for editing the selected entity.
+# The selector / context bar call these; each reads entities.json, mutates the
+# selected record, writes, pushes an undo entry, then reloads + re-syncs the
+# selection so the screen (and the outline) update at once.
+# ---------------------------------------------------------------------------
+
+func _sel_id() -> String:
+    return _entity_selector.get_selected_id() if _entity_selector != null else ""
+
+
+func rotate_selected(yaw_delta_rad: float) -> bool:
+    var sid := _sel_id()
+    if sid == "":
+        return false
+    var ent_path := _world_path + "/entities.json"
+    var entities := _read_entities_json(ent_path)
+    for e in entities:
+        if String(e.get("id", "")) != sid:
+            continue
+        var rot = e.get("rotation", [0, 0, 0, 1])
+        var cur := Quaternion(float(rot[0]), float(rot[1]), float(rot[2]), float(rot[3]))
+        var new_q := Quaternion(Vector3.UP, yaw_delta_rad) * cur
+        var to_q := [new_q.x, new_q.y, new_q.z, new_q.w]
+        emit_signal("entity_undo_push", {"op": "entity_rotate", "id": sid,
+            "from": [float(rot[0]), float(rot[1]), float(rot[2]), float(rot[3])], "to": to_q})
+        e["rotation"] = to_q
+        _write_entities_json(ent_path, entities)
+        if _logger != null:
+            _logger.info("entity_rotated", {"id": sid, "yaw_deg": rad_to_deg(yaw_delta_rad)})
+        _reload_and_resync()
+        return true
+    return false
+
+
+func move_selected_to(world_pos: Vector3) -> bool:
+    var sid := _sel_id()
+    if sid == "":
+        return false
+    var ent_path := _world_path + "/entities.json"
+    var entities := _read_entities_json(ent_path)
+    for e in entities:
+        if String(e.get("id", "")) != sid:
+            continue
+        var old = e.get("position", [0, 0, 0])
+        var newp := [world_pos.x, world_pos.y, world_pos.z]
+        emit_signal("entity_undo_push", {"op": "entity_move", "id": sid,
+            "from": [float(old[0]), float(old[1]), float(old[2])], "to": newp})
+        e["position"] = newp
+        _write_entities_json(ent_path, entities)
+        if _logger != null:
+            _logger.info("entity_moved", {"id": sid, "pos": newp})
+        _reload_and_resync()
+        return true
+    return false
+
+
+func delete_selected() -> bool:
+    var sid := _sel_id()
+    if sid == "":
+        return false
+    var ent_path := _world_path + "/entities.json"
+    var entities := _read_entities_json(ent_path)
+    var kept: Array = []
+    var removed: Dictionary = {}
+    for e in entities:
+        if String(e.get("id", "")) == sid:
+            removed = e
+        else:
+            kept.append(e)
+    if removed.is_empty():
+        return false
+    emit_signal("entity_undo_push", {"op": "entity_delete", "entity": removed.duplicate(true)})
+    _write_entities_json(ent_path, kept)
+    if _logger != null:
+        _logger.info("entity_deleted", {"id": sid, "remaining": kept.size()})
+    if _entity_selector != null:
+        _entity_selector.clear_selection()
+    _reload_and_resync()
+    return true
+
+
+# Single reload path: refresh visuals from disk, then let the selector re-bind
+# its node + outline to the (newly re-spawned) selected entity.
+func _reload_and_resync() -> void:
+    if _entity_renderer != null:
+        _entity_renderer.reload()
+    if _entity_selector != null and _entity_selector.has_method("refresh_selection"):
+        _entity_selector.refresh_selection()
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +202,7 @@ func duplicate_selected() -> bool:
             "src_id": sel_id, "new_id": new_id,
             "pos": copy["position"], "total": existing.size(),
         })
-    _entity_renderer.load_entities(_world_path, _world.palette_rgb)
+    _reload_and_resync()
     return true
 
 
@@ -161,7 +250,7 @@ func spawn_entity(item_id: String, preset: Dictionary,
                                         "pos": [pos.x, pos.y, pos.z],
                                         "yaw_deg": rad_to_deg(yaw_rad),
                                         "total_entities": existing.size()})
-    _entity_renderer.load_entities(_world_path, _world.palette_rgb)
+    _reload_and_resync()
 
 
 # ---------------------------------------------------------------------------
@@ -246,27 +335,8 @@ func apply_behavior(behavior: String) -> bool:
         if _logger != null:
             _logger.info("entity_behavior_applied",
                          {"id": sel_id, "behavior": behavior, "state": new_state})
-        _entity_renderer.load_entities(_world_path, _world.palette_rgb)
+        _reload_and_resync()
     return changed
-
-
-# ---------------------------------------------------------------------------
-# Selector mutation → undo entry
-# ---------------------------------------------------------------------------
-
-func _on_entity_will_delete(entity_dict: Dictionary) -> void:
-    emit_signal("entity_undo_push",
-                {"op": "entity_delete", "entity": entity_dict.duplicate(true)})
-
-
-func _on_entity_will_move(id: String, from_pos: Array, to_pos: Array) -> void:
-    emit_signal("entity_undo_push",
-                {"op": "entity_move", "id": id, "from": from_pos, "to": to_pos})
-
-
-func _on_entity_will_rotate(id: String, from_quat: Array, to_quat: Array) -> void:
-    emit_signal("entity_undo_push",
-                {"op": "entity_rotate", "id": id, "from": from_quat, "to": to_quat})
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +363,7 @@ func _undo_spawn(id: String) -> void:
         if String(e.get("id", "")) != id:
             kept.append(e)
     _write_entities_json(ent_path, kept)
-    _entity_renderer.load_entities(_world_path, _world.palette_rgb)
+    _reload_and_resync()
 
 
 func _undo_delete(entity_dict: Dictionary) -> void:
@@ -301,7 +371,7 @@ func _undo_delete(entity_dict: Dictionary) -> void:
     var entities := _read_entities_json(ent_path)
     entities.append(entity_dict)
     _write_entities_json(ent_path, entities)
-    _entity_renderer.load_entities(_world_path, _world.palette_rgb)
+    _reload_and_resync()
 
 
 func _undo_move(id: String, from_pos: Array) -> void:
@@ -312,7 +382,7 @@ func _undo_move(id: String, from_pos: Array) -> void:
             e["position"] = from_pos
             break
     _write_entities_json(ent_path, entities)
-    _entity_renderer.load_entities(_world_path, _world.palette_rgb)
+    _reload_and_resync()
 
 
 func _undo_rotate(id: String, from_quat: Array) -> void:
@@ -323,7 +393,7 @@ func _undo_rotate(id: String, from_quat: Array) -> void:
             e["rotation"] = from_quat
             break
     _write_entities_json(ent_path, entities)
-    _entity_renderer.load_entities(_world_path, _world.palette_rgb)
+    _reload_and_resync()
 
 
 # ---------------------------------------------------------------------------

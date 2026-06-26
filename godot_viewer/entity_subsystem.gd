@@ -57,8 +57,7 @@ func build(main_cam: Camera3D, voxel_editor: Node3D, stereo_rig: Node3D,
     selector.name = "EntitySelector"
     add_child(selector)
     selector.init_selector(
-        main_cam, ws.world_path, ent_renderer,
-        placer, voxel_editor, logger
+        main_cam, ent_renderer, placer, voxel_editor, logger
     )
 
     edit = Node.new()
@@ -72,6 +71,7 @@ func build(main_cam: Camera3D, voxel_editor: Node3D, stereo_rig: Node3D,
     )
     edit.entity_undo_push.connect(edit_session.push_undo)
     edit_session.set_entity_edit(edit)
+    selector.set_edit_controller(edit)   # selector routes mutations through the controller
 
     inspector = CanvasLayer.new()
     inspector.set_script(EntityInspectorScript)
@@ -97,9 +97,11 @@ func build(main_cam: Camera3D, voxel_editor: Node3D, stereo_rig: Node3D,
         if edit.duplicate_selected():
             context_bar.flash("✅ 已复制副本")
     )
-    context_bar.physics_toggle_pressed.connect(func(): selector.toggle_physics_on_selected())
-    context_bar.rotate_pressed.connect(_on_context_rotate)
-    context_bar.delete_pressed.connect(_on_context_delete)
+    context_bar.rotate_pressed.connect(func(yaw: float):
+        if edit.rotate_selected(yaw):
+            context_bar.flash("✅ 已旋转 %+d°" % int(round(rad_to_deg(yaw))))
+    )
+    context_bar.delete_pressed.connect(func(): edit.delete_selected())
     context_bar.use_pressed.connect(func(): edit.use_selected())
     context_bar.move_pressed.connect(func(): selector.start_move())
     selector.entity_selected.connect(func(id: String):
@@ -116,6 +118,8 @@ func build(main_cam: Camera3D, voxel_editor: Node3D, stereo_rig: Node3D,
 
     if "--entity-pick-selftest" in OS.get_cmdline_user_args():
         _run_pick_selftest()
+    if "--entity-edit-selftest" in OS.get_cmdline_user_args():
+        _run_edit_selftest()
 
 
 func _run_pick_selftest() -> void:
@@ -125,10 +129,66 @@ func _run_pick_selftest() -> void:
     get_tree().quit()
 
 
+# Exercises the controller mutation path (select → rotate → move → delete) and
+# asserts entities.json changed each time. Headless regression net for the
+# selector→controller refactor.
+func _run_edit_selftest() -> void:
+    await get_tree().physics_frame
+    await get_tree().physics_frame
+    var ids: Array = []
+    for c in ent_renderer.get_children():
+        if c is Node3D and c.has_meta("vxw_entity"):
+            ids.append(String((c.get_meta("vxw_entity") as Dictionary).get("id", "")))
+    if ids.is_empty():
+        print("[edit-selftest] FAIL no entities"); get_tree().quit(); return
+    var id: String = ids[0]
+    selector.select_by_id(id)
+    print("[edit-selftest] selected=%s (sel_id=%s)" % [id, selector.get_selected_id()])
+
+    var rot0 = _edit_rec(id).get("rotation", [0, 0, 0, 1])
+    var rot_ok: bool = edit.rotate_selected(deg_to_rad(30))
+    await get_tree().physics_frame
+    var rot1 = _edit_rec(id).get("rotation", [0, 0, 0, 1])
+    var node_yaw := rad_to_deg(selector._selected_node.global_transform.basis.get_euler().y) \
+        if is_instance_valid(selector._selected_node) else 0.0
+    var out_yaw := rad_to_deg(selector._outline.global_transform.basis.get_euler().y) \
+        if selector._outline != null else 0.0
+    print("[edit-selftest] rotate ok=%s changed=%s  node_yaw=%.1f outline_yaw=%.1f match=%s" % [
+        str(rot_ok), str(rot0 != rot1), node_yaw, out_yaw, str(abs(node_yaw - out_yaw) < 0.5)])
+
+    var mv_ok: bool = edit.move_selected_to(Vector3(2, 1, 2))
+    await get_tree().physics_frame
+    var pos1 = _edit_rec(id).get("position", [0, 0, 0])
+    print("[edit-selftest] move ok=%s pos=%s" % [str(mv_ok), str(pos1)])
+
+    var n0: int = _edit_all().size()
+    var del_ok: bool = edit.delete_selected()
+    await get_tree().physics_frame
+    var n1: int = _edit_all().size()
+    print("[edit-selftest] delete ok=%s count %d->%d" % [str(del_ok), n0, n1])
+    print("[edit-selftest] RESULT %s" % ("PASS" if (rot_ok and rot0 != rot1 and mv_ok and del_ok and n1 == n0 - 1) else "FAIL"))
+    get_tree().quit()
+
+
+func _edit_all() -> Array:
+    var p: String = _ws.world_path + "/entities.json"
+    if not FileAccess.file_exists(p):
+        return []
+    var d = JSON.parse_string(FileAccess.get_file_as_string(p))
+    return d.entities if (d != null and d.has("entities")) else []
+
+
+func _edit_rec(id: String) -> Dictionary:
+    for e in _edit_all():
+        if String(e.get("id", "")) == id:
+            return e
+    return {}
+
+
 func _on_world_loaded(world, path: String) -> void:
     ent_renderer.load_entities(path, world.palette_rgb)
     if selector != null:
-        selector.set_world_path(path)
+        selector.on_world_changed()
     if edit != null:
         edit.set_world(world, path)
     if inspector != null:
@@ -164,14 +224,3 @@ func _on_inspector_committed(_updated: Dictionary) -> void:
         ent_renderer.load_entities(_ws.world_path, _ws.world.palette_rgb)
 
 
-func _on_context_rotate(yaw_delta_rad: float) -> void:
-    var sid: String = selector.get_selected_id()
-    if sid != "":
-        selector.rotate_by_id(sid, yaw_delta_rad)
-        context_bar.flash("✅ 已旋转 %+d°" % int(round(rad_to_deg(yaw_delta_rad))))
-
-
-func _on_context_delete() -> void:
-    var sid: String = selector.get_selected_id()
-    if sid != "":
-        selector.delete_by_id(sid)

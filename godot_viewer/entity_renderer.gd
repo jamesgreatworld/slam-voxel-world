@@ -63,6 +63,11 @@ func get_item_presets() -> Dictionary:
 func clear() -> void:
     for n in _spawned:
         if is_instance_valid(n):
+            # remove_child first: queue_free alone leaves the node in
+            # get_children() until end of frame, so a reload-then-relookup (e.g.
+            # the selector re-binding its selection) would match the STALE old
+            # node instead of the freshly spawned one → outline desync.
+            remove_child(n)
             n.queue_free()
     _spawned.clear()
 

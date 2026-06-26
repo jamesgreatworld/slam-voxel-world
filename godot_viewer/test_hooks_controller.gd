@@ -40,12 +40,16 @@ func run() -> void:
         var rec_list := _read_entity_records()
         if rec_list.size() > 0:
             var first_id := String(rec_list[0].get("id", ""))
+            # Select first, then drive the same controller methods the UI uses.
+            _ents.selector.select_by_id(first_id)
             if _cfg.test_grab_first_set:
-                _ents.selector.grab_to(first_id, _cfg.test_grab_first_to)
+                _ents.edit.move_selected_to(_cfg.test_grab_first_to)
             if _cfg.test_rotate_first_deg != 0.0:
-                _ents.selector.rotate_by_id(first_id, deg_to_rad(_cfg.test_rotate_first_deg))
+                _ents.selector.select_by_id(first_id)
+                _ents.edit.rotate_selected(deg_to_rad(_cfg.test_rotate_first_deg))
             if _cfg.test_delete_first:
-                _ents.selector.delete_by_id(first_id)
+                _ents.selector.select_by_id(first_id)
+                _ents.edit.delete_selected()
 
     for _i in _cfg.test_undo_times:
         _es.undo_last_edit()
