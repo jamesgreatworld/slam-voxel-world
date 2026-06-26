@@ -98,11 +98,15 @@ func build(main_cam: Camera3D, voxel_editor: Node3D, stereo_rig: Node3D,
     context_bar.rotate_pressed.connect(_on_context_rotate)
     context_bar.delete_pressed.connect(_on_context_delete)
     context_bar.use_pressed.connect(func(): edit.use_selected())
+    context_bar.move_pressed.connect(func(): selector.start_move())
     selector.entity_selected.connect(func(id: String):
         context_bar.on_entity_selected(id, selector.get_selected_label_name())
     )
     selector.selection_cleared.connect(func():
         context_bar.on_selection_cleared()
+    )
+    selector.move_state_changed.connect(func(active: bool):
+        context_bar.set_move_mode(active)
     )
 
     ws.world_loaded.connect(_on_world_loaded)

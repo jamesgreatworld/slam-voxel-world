@@ -18,6 +18,7 @@ signal physics_toggle_pressed
 signal rotate_pressed(yaw_delta_rad: float)
 signal delete_pressed
 signal use_pressed
+signal move_pressed
 
 const _BTN_MIN_SIZE := Vector2(120, 36)
 const _ROT_STEP := PI / 18.0   # 10° per click
@@ -79,7 +80,8 @@ func _ready() -> void:
     _row.add_theme_constant_override("separation", 6)
     vbox.add_child(_row)
 
-    # Mouse-only, minimal: rotate ±10° per click, duplicate, delete.
+    # Mouse-only, minimal: pick-up-to-move, rotate ±10° per click, duplicate, delete.
+    _add_button("移动",     func(): emit_signal("move_pressed"))
     _add_button("⟲ -10°",  func(): emit_signal("rotate_pressed", -_ROT_STEP))
     _add_button("⟳ +10°",  func(): emit_signal("rotate_pressed",  _ROT_STEP))
     _add_button("复制",     func(): emit_signal("duplicate_pressed"))
@@ -95,9 +97,30 @@ func _add_button(text: String, on_pressed: Callable) -> void:
 
 
 # main wires entity_selector.entity_selected / selection_cleared into these.
+var _last_label_name: String = "?"
+
+
 func on_entity_selected(id: String, label_name: String = "") -> void:
     visible = true
-    _label.text = "已选中:%s　(拖动移动)" % [label_name if label_name != "" else "?"]
+    _last_label_name = label_name if label_name != "" else "?"
+    _set_selected_label()
+
+
+func _set_selected_label() -> void:
+    _label.text = "已选中:%s　—　点[移动]→移到目标→单击地面放置" % [_last_label_name]
+
+
+# Toggle the move-mode banner: while moving, hide every button and show only a
+# clear instruction, so the user can't click rotate/delete by mistake (which
+# would teleport the followed entity) and the only ways out are place / cancel.
+func set_move_mode(active: bool) -> void:
+    if active:
+        visible = true
+        _row.visible = false
+        _label.text = "🖐 移动中:把鼠标移到目标 →  单击地面放下　(右键取消)"
+    else:
+        _row.visible = true
+        _set_selected_label()
 
 
 func on_selection_cleared() -> void:

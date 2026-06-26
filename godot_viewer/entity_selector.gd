@@ -18,6 +18,7 @@ signal entity_selected(id: String)
 signal entity_changed(id: String)
 signal entity_deleted(id: String)
 signal selection_cleared
+signal move_state_changed(active: bool)
 
 # Pre-change snapshots for undo. Emitted *before* the mutation so the
 # listener (main.gd) can stash the old state in its undo stack.
@@ -43,15 +44,11 @@ var _selected_node: Node3D = null
 var _outline: MeshInstance3D = null
 
 # Grab mode state: when not "" we're moving _selected_node with the mouse.
+# _grab_active == "move mode": the selected entity follows the cursor until the
+# next left-click places it (right-click cancels). Entered via the bar's 移动
+# button — NOT by dragging, so a plain select-click never moves anything.
 var _grab_active: bool = false
 var _grab_original_pos: Vector3 = Vector3.ZERO
-
-# Drag-to-move: a press on an entity arms a potential drag; _process promotes
-# it to a real grab once the cursor moves past this threshold, so a plain click
-# that doesn't move stays a pure selection.
-var _press_armed: bool = false
-var _press_screen: Vector2 = Vector2.ZERO
-const _DRAG_THRESHOLD_PX := 6.0
 
 
 func init_selector(cam: Camera3D,
@@ -129,27 +126,48 @@ func _is_placer_active() -> bool:
 func _unhandled_input(event: InputEvent) -> void:
     if _is_placer_active():
         return
-    if not (event is InputEventMouseButton) or event.button_index != MOUSE_BUTTON_LEFT:
+    if not (event is InputEventMouseButton) or not event.pressed:
         return
+    # Move mode: the entity is following the cursor. Left-click drops it here,
+    # right-click cancels back to the original spot.
     if _grab_active:
-        # Drag in progress: releasing LMB drops the entity at the cursor.
-        if not event.pressed:
+        if event.button_index == MOUSE_BUTTON_LEFT:
             _commit_grab()
             get_viewport().set_input_as_handled()
+        elif event.button_index == MOUSE_BUTTON_RIGHT:
+            _cancel_grab()
+            get_viewport().set_input_as_handled()
         return
-    if event.pressed:
-        _on_lmb_press()
-    else:
-        _press_armed = false
+    if event.button_index != MOUSE_BUTTON_LEFT:
+        return
+    # Idle: click an entity to select it, click empty world to deselect. We
+    # consume the click only when it acts on an entity, so a click in empty
+    # space with nothing selected still reaches the camera (double-click walk).
+    var ent := _entity_under_mouse()
+    if ent == null:
+        if _selected_id != "":
+            clear_selection()
+            get_viewport().set_input_as_handled()
+        return
+    var id := String((ent.get_meta(ENTITY_META_KEY) as Dictionary).get("id", ""))
+    if id == "":
+        return
+    if id != _selected_id:
+        _select(id, ent)
+    get_viewport().set_input_as_handled()
 
 
 func _process(_delta: float) -> void:
     if _grab_active:
         _update_grab_position()
-    elif _press_armed and _selected_node != null and _cam != null:
-        var vp := _cam.get_viewport()
-        if vp != null and vp.get_mouse_position().distance_to(_press_screen) > _DRAG_THRESHOLD_PX:
-            _start_grab()
+
+
+# Called by the bottom-bar 移动 button: pick up the selected entity so it
+# follows the cursor until the next left-click places it (right-click cancels).
+func start_move() -> void:
+    if _selected_id == "" or not is_instance_valid(_selected_node):
+        return
+    _start_grab()
 
 
 # Returns the entity Node3D under the cursor (via the pick-layer ray) or null.
@@ -171,24 +189,6 @@ func _entity_under_mouse() -> Node3D:
     if hit.is_empty():
         return null
     return _find_entity_ancestor(hit.collider)
-
-
-# LMB pressed: select the entity under the cursor (or deselect on empty world)
-# and arm a potential drag of it.
-func _on_lmb_press() -> void:
-    var ent := _entity_under_mouse()
-    if ent == null:
-        clear_selection()
-        _press_armed = false
-        return
-    var id := String((ent.get_meta(ENTITY_META_KEY) as Dictionary).get("id", ""))
-    if id == "":
-        return
-    if id != _selected_id:
-        _select(id, ent)
-    _press_armed = true
-    if _cam != null and _cam.get_viewport() != null:
-        _press_screen = _cam.get_viewport().get_mouse_position()
 
 
 func _find_entity_ancestor(node: Node) -> Node3D:
@@ -324,10 +324,11 @@ func _write_entities(entities: Array) -> void:
 # ---------------------------------------------------------------------------
 
 func _start_grab() -> void:
-    if _selected_node == null or _voxel_editor == null:
+    if not is_instance_valid(_selected_node) or _voxel_editor == null:
         return
     _grab_active = true
     _grab_original_pos = _selected_node.global_position
+    emit_signal("move_state_changed", true)
     if _logger != null:
         _logger.info("entity_grab_started", {"id": _selected_id})
 
@@ -369,6 +370,7 @@ func _update_grab_position() -> void:
 func _commit_grab() -> void:
     if _selected_node == null:
         _grab_active = false
+        emit_signal("move_state_changed", false)
         return
     var new_pos := _selected_node.global_position
     var entities := _read_entities()
@@ -391,6 +393,7 @@ func _commit_grab() -> void:
                          {"id": _selected_id, "pos": [new_pos.x, new_pos.y, new_pos.z]})
         emit_signal("entity_changed", _selected_id)
     _grab_active = false
+    emit_signal("move_state_changed", false)
     _reload_entities()
 
 
@@ -404,6 +407,7 @@ func _cancel_grab() -> void:
             ox.origin = _grab_original_pos
             _outline.global_transform = ox
     _grab_active = false
+    emit_signal("move_state_changed", false)
     if _logger != null:
         _logger.info("entity_grab_cancelled", {"id": _selected_id})
 
