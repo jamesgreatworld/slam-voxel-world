@@ -20,7 +20,7 @@ signal delete_pressed
 signal use_pressed
 
 const _BTN_MIN_SIZE := Vector2(120, 36)
-const _ROT_STEP := PI / 4.0   # 45°
+const _ROT_STEP := PI / 18.0   # 10° per click
 
 var _row: HBoxContainer = null
 var _label: Label = null
@@ -75,13 +75,11 @@ func _ready() -> void:
     _row.add_theme_constant_override("separation", 6)
     vbox.add_child(_row)
 
-    _add_button("Use [U]",           func(): emit_signal("use_pressed"))
-    _add_button("Inspector [F2]",    func(): emit_signal("inspector_pressed"))
-    _add_button("Duplicate [Ctrl+D]", func(): emit_signal("duplicate_pressed"))
-    _add_button("Physics [P]",       func(): emit_signal("physics_toggle_pressed"))
-    _add_button("Rotate -45° [R]",   func(): emit_signal("rotate_pressed", -_ROT_STEP))
-    _add_button("Rotate +45°",       func(): emit_signal("rotate_pressed",  _ROT_STEP))
-    _add_button("Delete [Del]",      func(): emit_signal("delete_pressed"))
+    # Mouse-only, minimal: rotate ±10° per click, duplicate, delete.
+    _add_button("⟲ -10°",  func(): emit_signal("rotate_pressed", -_ROT_STEP))
+    _add_button("⟳ +10°",  func(): emit_signal("rotate_pressed",  _ROT_STEP))
+    _add_button("复制",     func(): emit_signal("duplicate_pressed"))
+    _add_button("删除",     func(): emit_signal("delete_pressed"))
 
 
 func _add_button(text: String, on_pressed: Callable) -> void:
@@ -95,8 +93,8 @@ func _add_button(text: String, on_pressed: Callable) -> void:
 # main wires entity_selector.entity_selected / selection_cleared into these.
 func on_entity_selected(id: String, label_name: String = "") -> void:
     visible = true
-    var short_id := id.substr(0, 8)
-    _label.text = "Selected: %s  (id %s)" % [label_name if label_name != "" else "?", short_id]
+    _label.text = "已选中:%s   ·   拖动=移动   ·   下方按钮=旋转/复制/删除" % [
+        label_name if label_name != "" else "?"]
 
 
 func on_selection_cleared() -> void:

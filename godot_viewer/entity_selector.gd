@@ -25,7 +25,7 @@ signal will_delete(entity_dict: Dictionary)
 signal will_move(id: String, from_pos: Array, to_pos: Array)
 signal will_rotate(id: String, from_quat: Array, to_quat: Array)
 
-const _ROTATION_STEP_RAD := PI / 4.0
+const _ROTATION_STEP_RAD := PI / 18.0   # 10° per click
 const _OUTLINE_INFLATE := 0.04
 # Mirrors entity_renderer.ENTITY_META_KEY; duplicated to avoid a runtime
 # script-import cycle. Keep in sync if you change the canonical constant.
@@ -45,6 +45,13 @@ var _outline: MeshInstance3D = null
 # Grab mode state: when not "" we're moving _selected_node with the mouse.
 var _grab_active: bool = false
 var _grab_original_pos: Vector3 = Vector3.ZERO
+
+# Drag-to-move: a press on an entity arms a potential drag; _process promotes
+# it to a real grab once the cursor moves past this threshold, so a plain click
+# that doesn't move stays a pure selection.
+var _press_armed: bool = false
+var _press_screen: Vector2 = Vector2.ZERO
+const _DRAG_THRESHOLD_PX := 6.0
 
 
 func init_selector(cam: Camera3D,
@@ -112,62 +119,46 @@ func _is_placer_active() -> bool:
     return _placer != null and _placer.has_method("is_active") and _placer.is_active()
 
 
-# Uses _unhandled_input (NOT _input): mouse clicks consumed by the GUI (the
-# bottom context bar's Rotate/Delete buttons, the top toolbar, menus) must NOT
-# reach the picker, otherwise the pick ray fires under the cursor — at empty
-# floor below a button — and clears the very selection the user is acting on.
-# _unhandled_input only sees events the GUI did not consume, so UI clicks keep
-# the selection while world clicks still pick.
+# Mouse-only entity manipulation — no keyboard shortcuts:
+#   • LMB click an entity        → select (yellow outline + bottom bar)
+#   • LMB drag a selected entity → move it along the floor; release to drop
+#   • LMB click empty space      → deselect
+#   • rotate / duplicate / delete → bottom-bar buttons (all mouse)
+# Runs in _unhandled_input so clicks the GUI already consumed (bottom bar, top
+# toolbar, menus) never reach the picker and clear the active selection.
 func _unhandled_input(event: InputEvent) -> void:
     if _is_placer_active():
         return
-    # Grab mode owns LMB (confirm) / ESC (cancel); everything else passes
-    # through to whichever subsystem normally handles it.
-    if _grab_active:
-        if event is InputEventMouseButton and event.pressed:
-            if event.button_index == MOUSE_BUTTON_LEFT:
-                _commit_grab()
-                get_viewport().set_input_as_handled()
-            elif event.button_index == MOUSE_BUTTON_RIGHT:
-                _cancel_grab()
-                get_viewport().set_input_as_handled()
-        elif event is InputEventKey and event.pressed:
-            if event.keycode == KEY_ESCAPE:
-                _cancel_grab()
-                get_viewport().set_input_as_handled()
+    if not (event is InputEventMouseButton) or event.button_index != MOUSE_BUTTON_LEFT:
         return
-
-    if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-        _try_pick_at_mouse()
-    elif event is InputEventKey and event.pressed:
-        if event.keycode == KEY_DELETE and _selected_id != "":
-            _delete_selected()
+    if _grab_active:
+        # Drag in progress: releasing LMB drops the entity at the cursor.
+        if not event.pressed:
+            _commit_grab()
             get_viewport().set_input_as_handled()
-        elif event.keycode == KEY_R and _selected_id != "":
-            _rotate_selected(_ROTATION_STEP_RAD)
-            get_viewport().set_input_as_handled()
-        elif event.keycode == KEY_G and _selected_id != "":
-            _start_grab()
-            get_viewport().set_input_as_handled()
-        elif event.keycode == KEY_P and _selected_id != "":
-            _toggle_physics_on_selected()
-            get_viewport().set_input_as_handled()
-        elif event.keycode == KEY_ESCAPE and _selected_id != "":
-            clear_selection()
-            get_viewport().set_input_as_handled()
+        return
+    if event.pressed:
+        _on_lmb_press()
+    else:
+        _press_armed = false
 
 
 func _process(_delta: float) -> void:
     if _grab_active:
         _update_grab_position()
+    elif _press_armed and _selected_node != null and _cam != null:
+        var vp := _cam.get_viewport()
+        if vp != null and vp.get_mouse_position().distance_to(_press_screen) > _DRAG_THRESHOLD_PX:
+            _start_grab()
 
 
-func _try_pick_at_mouse() -> void:
+# Returns the entity Node3D under the cursor (via the pick-layer ray) or null.
+func _entity_under_mouse() -> Node3D:
     if _cam == null:
-        return
+        return null
     var vp := _cam.get_viewport()
     if vp == null:
-        return
+        return null
     var mouse: Vector2 = vp.get_mouse_position()
     var ro: Vector3 = _cam.project_ray_origin(mouse)
     var rd: Vector3 = _cam.project_ray_normal(mouse)
@@ -178,18 +169,26 @@ func _try_pick_at_mouse() -> void:
     params.collision_mask = 4   # entity-pick layer ONLY — ignores voxel mesh + rig
     var hit := space.intersect_ray(params)
     if hit.is_empty():
+        return null
+    return _find_entity_ancestor(hit.collider)
+
+
+# LMB pressed: select the entity under the cursor (or deselect on empty world)
+# and arm a potential drag of it.
+func _on_lmb_press() -> void:
+    var ent := _entity_under_mouse()
+    if ent == null:
         clear_selection()
+        _press_armed = false
         return
-    var entity_node := _find_entity_ancestor(hit.collider)
-    if entity_node == null:
-        # Hit something else (e.g. a voxel collision mesh) → clear selection.
-        clear_selection()
-        return
-    var meta: Dictionary = entity_node.get_meta(ENTITY_META_KEY)
-    var id := String(meta.get("id", ""))
+    var id := String((ent.get_meta(ENTITY_META_KEY) as Dictionary).get("id", ""))
     if id == "":
         return
-    _select(id, entity_node)
+    if id != _selected_id:
+        _select(id, ent)
+    _press_armed = true
+    if _cam != null and _cam.get_viewport() != null:
+        _press_screen = _cam.get_viewport().get_mouse_position()
 
 
 func _find_entity_ancestor(node: Node) -> Node3D:

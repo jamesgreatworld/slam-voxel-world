@@ -150,17 +150,9 @@ func _input(event: InputEvent) -> void:
             _toggle_pause()
         elif event.keycode == KEY_Z and event.ctrl_pressed and es != null:
             es.undo_last_edit()
-        elif event.keycode == KEY_I and ents != null and ents.picker != null:
-            ents.picker.toggle()
-        elif event.keycode == KEY_D and event.ctrl_pressed and ents != null and ents.edit != null:
-            ents.edit.duplicate_selected()
-            get_viewport().set_input_as_handled()
-        elif event.keycode == KEY_F2 and ents != null:
-            ents.open_inspector_for_selection()
-            get_viewport().set_input_as_handled()
-        elif event.keycode == KEY_U and ents != null and ents.edit != null:
-            ents.edit.use_selected()
-            get_viewport().set_input_as_handled()
+        # Entity shortcuts (I / Ctrl+D / F2 / U) removed — entity manipulation is
+        # mouse-only now: select=click, move=drag, rotate/duplicate/delete=bottom
+        # bar buttons, add furniture=top toolbar "Items" button.
         elif event.keycode == KEY_F5 and ws != null:
             ws.save_snapshot()
             get_viewport().set_input_as_handled()
