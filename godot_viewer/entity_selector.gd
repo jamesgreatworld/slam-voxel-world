@@ -546,13 +546,11 @@ func _rotate_selected(yaw_delta_rad: float) -> void:
 func _reload_entities() -> void:
     if _entity_renderer == null:
         return
-    var palette = null
-    var root := get_parent()
-    if root != null and root.has_method("get") and "_world" in root:
-        palette = root._world.palette_rgb
-    if palette == null:
-        return
-    _entity_renderer.load_entities(_world_path, palette)
+    # Refresh visuals from disk via the renderer's cached path+palette. (The old
+    # path tried to read a `_world` member off the parent, which doesn't exist
+    # on entity_subsystem, so it silently returned and never reloaded — rotate /
+    # delete wrote the file but the screen only updated on the next full reload.)
+    _entity_renderer.reload()
     # Re-resolve our selected node after the reload (nodes were freed).
     _selected_node = _find_node_by_id(_selected_id) if _selected_id != "" else null
     if _selected_node == null:

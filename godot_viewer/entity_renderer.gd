@@ -22,6 +22,10 @@ const ITEM_PACK_COMPILED := "res://../m3_adapter/mc_item_pack/_compiled.json"
 var _spawned: Array[Node3D] = []
 var _item_presets: Dictionary = {}    # id -> preset dict (boxes, etc.)
 var _logger = null
+# Cached from the last load so reload() can refresh from disk without the
+# caller having to re-supply the path / palette.
+var _last_path: String = ""
+var _last_palette: PackedColorArray = PackedColorArray()
 
 
 func init_renderer(logger = null) -> void:
@@ -66,7 +70,17 @@ func clear() -> void:
 # Load entities.json from `world_path` and spawn nodes as children of this node.
 # `palette_rgb` is the world's palette (PackedColorArray, index = material_id).
 # Returns the number of entities spawned.
+func reload() -> int:
+    # Re-read entities.json from disk using the last path + palette. Used after
+    # an in-place edit (rotate / delete / move) to refresh the visuals.
+    if _last_path == "":
+        return 0
+    return load_entities(_last_path, _last_palette)
+
+
 func load_entities(world_path: String, palette_rgb: PackedColorArray) -> int:
+    _last_path = world_path
+    _last_palette = palette_rgb
     clear()
     var ent_path := world_path + "/entities.json"
     if not FileAccess.file_exists(ent_path):

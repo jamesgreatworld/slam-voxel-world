@@ -93,7 +93,10 @@ func build(main_cam: Camera3D, voxel_editor: Node3D, stereo_rig: Node3D,
     context_bar.name = "EntityContextBar"
     add_child(context_bar)
     context_bar.inspector_pressed.connect(open_inspector_for_selection)
-    context_bar.duplicate_pressed.connect(func(): edit.duplicate_selected())
+    context_bar.duplicate_pressed.connect(func():
+        if edit.duplicate_selected():
+            context_bar.flash("✅ 已复制副本")
+    )
     context_bar.physics_toggle_pressed.connect(func(): selector.toggle_physics_on_selected())
     context_bar.rotate_pressed.connect(_on_context_rotate)
     context_bar.delete_pressed.connect(_on_context_delete)
@@ -165,6 +168,7 @@ func _on_context_rotate(yaw_delta_rad: float) -> void:
     var sid: String = selector.get_selected_id()
     if sid != "":
         selector.rotate_by_id(sid, yaw_delta_rad)
+        context_bar.flash("✅ 已旋转 %+d°" % int(round(rad_to_deg(yaw_delta_rad))))
 
 
 func _on_context_delete() -> void:

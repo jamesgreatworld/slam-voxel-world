@@ -108,7 +108,24 @@ func on_entity_selected(id: String, label_name: String = "") -> void:
 
 
 func _set_selected_label() -> void:
-    _label.text = "已选中:%s　—　点[移动]→移到目标→单击地面放置" % [_last_label_name]
+    _label.text = "已选中:%s　|　[移动]拿起·单击地面放下　⟲⟳转10°　复制　属性　删除" % [
+        _last_label_name]
+
+
+# Briefly show an action-confirmation line (e.g. "已旋转 +10°"), then revert to
+# the normal selected hint — gives every button the same kind of text feedback
+# the move banner does.
+func flash(text: String) -> void:
+    if not visible:
+        return
+    _label.text = text
+    var t := get_tree().create_timer(1.3)
+    t.timeout.connect(_on_flash_done)
+
+
+func _on_flash_done() -> void:
+    if visible and _row.visible:   # still selected and not in move-mode banner
+        _set_selected_label()
 
 
 # Toggle the move-mode banner: while moving, hide every button and show only a
