@@ -49,6 +49,11 @@ var _outline: MeshInstance3D = null
 # button — NOT by dragging, so a plain select-click never moves anything.
 var _grab_active: bool = false
 var _grab_original_pos: Vector3 = Vector3.ZERO
+# The entity only starts following the cursor once it has moved away from where
+# the 移动 button was clicked — otherwise it would snap to the floor point under
+# the button (bottom of screen) the instant move mode begins.
+var _move_following: bool = false
+var _move_anchor_screen: Vector2 = Vector2.ZERO
 
 
 func init_selector(cam: Camera3D,
@@ -158,7 +163,13 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _process(_delta: float) -> void:
-    if _grab_active:
+    if not _grab_active:
+        return
+    if not _move_following and _cam != null:
+        var vp := _cam.get_viewport()
+        if vp != null and vp.get_mouse_position().distance_to(_move_anchor_screen) > 8.0:
+            _move_following = true
+    if _move_following:
         _update_grab_position()
 
 
@@ -327,6 +338,9 @@ func _start_grab() -> void:
     if not is_instance_valid(_selected_node) or _voxel_editor == null:
         return
     _grab_active = true
+    _move_following = false
+    if _cam != null and _cam.get_viewport() != null:
+        _move_anchor_screen = _cam.get_viewport().get_mouse_position()
     _grab_original_pos = _selected_node.global_position
     emit_signal("move_state_changed", true)
     if _logger != null:

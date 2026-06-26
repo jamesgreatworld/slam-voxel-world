@@ -80,11 +80,12 @@ func _ready() -> void:
     _row.add_theme_constant_override("separation", 6)
     vbox.add_child(_row)
 
-    # Mouse-only, minimal: pick-up-to-move, rotate ±10° per click, duplicate, delete.
+    # Mouse-only: pick-up-to-move, rotate ±10°/click, duplicate, properties, delete.
     _add_button("移动",     func(): emit_signal("move_pressed"))
     _add_button("⟲ -10°",  func(): emit_signal("rotate_pressed", -_ROT_STEP))
     _add_button("⟳ +10°",  func(): emit_signal("rotate_pressed",  _ROT_STEP))
     _add_button("复制",     func(): emit_signal("duplicate_pressed"))
+    _add_button("属性",     func(): emit_signal("inspector_pressed"))
     _add_button("删除",     func(): emit_signal("delete_pressed"))
 
 
