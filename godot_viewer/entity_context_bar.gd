@@ -32,16 +32,20 @@ func _ready() -> void:
     process_mode = Node.PROCESS_MODE_ALWAYS
 
     var anchor := Control.new()
-    anchor.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
-    anchor.set_offset(SIDE_LEFT, -460)
-    anchor.set_offset(SIDE_TOP, -68)
-    anchor.set_offset(SIDE_RIGHT, 460)
-    anchor.set_offset(SIDE_BOTTOM, -28)
+    anchor.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
+    anchor.set_offset(SIDE_TOP, -78)
+    anchor.set_offset(SIDE_BOTTOM, -24)
     anchor.mouse_filter = Control.MOUSE_FILTER_PASS
     add_child(anchor)
 
+    # CenterContainer sizes the panel to its content and centres it, so the bar
+    # is only as wide as the buttons it holds (no empty fixed-width band).
+    var center := CenterContainer.new()
+    center.set_anchors_preset(Control.PRESET_FULL_RECT)
+    center.mouse_filter = Control.MOUSE_FILTER_PASS
+    anchor.add_child(center)
+
     var panel := PanelContainer.new()
-    panel.set_anchors_preset(Control.PRESET_FULL_RECT)
     var sb := StyleBoxFlat.new()
     sb.bg_color = Color(0, 0, 0, 0.55)
     sb.border_width_top = 1
@@ -58,7 +62,7 @@ func _ready() -> void:
     sb.content_margin_top = 4
     sb.content_margin_bottom = 4
     panel.add_theme_stylebox_override("panel", sb)
-    anchor.add_child(panel)
+    center.add_child(panel)
 
     var vbox := VBoxContainer.new()
     vbox.add_theme_constant_override("separation", 4)
@@ -93,8 +97,7 @@ func _add_button(text: String, on_pressed: Callable) -> void:
 # main wires entity_selector.entity_selected / selection_cleared into these.
 func on_entity_selected(id: String, label_name: String = "") -> void:
     visible = true
-    _label.text = "已选中:%s   ·   拖动=移动   ·   下方按钮=旋转/复制/删除" % [
-        label_name if label_name != "" else "?"]
+    _label.text = "已选中:%s　(拖动移动)" % [label_name if label_name != "" else "?"]
 
 
 func on_selection_cleared() -> void:

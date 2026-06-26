@@ -163,6 +163,24 @@ func apply_mouse_mode() -> void:
     _right_held = false
 
 
+func _unhandled_input(event: InputEvent) -> void:
+    # Double-click the floor in 3P to walk the camera there. Lives in
+    # _unhandled_input so clicks the UI already consumed (context-bar buttons,
+    # top toolbar) neither navigate nor send the rig to the button's position.
+    if not (event is InputEventMouseButton):
+        return
+    if event.button_index == MOUSE_BUTTON_LEFT and event.pressed and event.double_click \
+       and view_mode == ViewMode.THIRD_PERSON and _orbit_enabled and _cam != null:
+        var mp := get_viewport().get_mouse_position()
+        var from := _cam.project_ray_origin(mp)
+        var dir := _cam.project_ray_normal(mp)
+        var q := PhysicsRayQueryParameters3D.create(from, from + dir * 1000.0)
+        var hit := _cam.get_world_3d().direct_space_state.intersect_ray(q)
+        if not hit.is_empty():
+            navigate_to(hit.position)
+        get_viewport().set_input_as_handled()
+
+
 func _input(event: InputEvent) -> void:
     # Tab: toggle view mode.
     if event is InputEventKey and event.pressed and event.keycode == KEY_TAB:
@@ -183,17 +201,6 @@ func _input(event: InputEvent) -> void:
         return
 
     if event is InputEventMouseButton:
-        if event.button_index == MOUSE_BUTTON_LEFT and event.pressed and event.double_click \
-           and view_mode == ViewMode.THIRD_PERSON and _orbit_enabled and _cam != null:
-            get_viewport().set_input_as_handled()
-            var mp := get_viewport().get_mouse_position()
-            var from := _cam.project_ray_origin(mp)
-            var dir := _cam.project_ray_normal(mp)
-            var q := PhysicsRayQueryParameters3D.create(from, from + dir * 1000.0)
-            var hit := _cam.get_world_3d().direct_space_state.intersect_ray(q)
-            if not hit.is_empty():
-                navigate_to(hit.position)
-            return
         if event.button_index == MOUSE_BUTTON_RIGHT:
             if not _orbit_enabled:
                 return
