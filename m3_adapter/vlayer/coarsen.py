@@ -44,10 +44,16 @@ def downsample_occupancy(occ, sem, vmin, vs, factor, min_fine: int = 1):
 from scipy import ndimage
 
 
-def clean_coarse(occ, sem, min_component: int = 2, close_radius: int = 1):
+def clean_coarse(occ, sem, min_component: int = 2, close_radius: int = 1,
+                 keep_largest: bool = False):
     """Denoise/heal a coarse occupancy: morphological-close small holes (new cells
     inherit nearest occupied cell's sem) and drop connected components smaller than
-    min_component voxels. Returns (occ_clean, sem_clean). Does not mutate inputs."""
+    min_component voxels. Returns (occ_clean, sem_clean). Does not mutate inputs.
+
+    keep_largest: if True, keep ONLY the largest connected component and drop every
+    other blob (floating sensor specks, detached debris) regardless of their size.
+    Right for a scan of a single dominant structure (e.g. one building); leave
+    False when genuinely-detached objects should survive."""
     occ = occ.copy(); sem = sem.copy()
     st = ndimage.generate_binary_structure(3, 1)
     if close_radius > 0:
@@ -68,4 +74,12 @@ def clean_coarse(occ, sem, min_component: int = 2, close_radius: int = 1):
                 drop = np.isin(lbl, drop_ids)
                 occ = occ & ~drop
                 sem = np.where(drop, np.uint8(0), sem)
+    if keep_largest:
+        lbl, n = ndimage.label(occ, structure=st)
+        if n > 1:
+            sizes = np.bincount(lbl.ravel()); sizes[0] = 0
+            keep = int(sizes.argmax())
+            drop = (lbl != keep) & (lbl != 0)
+            occ = occ & ~drop
+            sem = np.where(drop, np.uint8(0), sem)
     return occ, sem
