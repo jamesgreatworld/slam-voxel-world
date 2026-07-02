@@ -23,3 +23,6 @@ godot_viewer/.godot/
 # OS
 Thumbs.db
 .DS_Store
+
+# Claude Code local state
+.claude/
