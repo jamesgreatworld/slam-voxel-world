@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 from scipy import ndimage
-from sklearn.cluster import DBSCAN
+from m3_adapter.clustering import dbscan_labels
 
 
 @dataclass
@@ -87,7 +87,7 @@ def skeleton_to_graph(gvd, dist_m, voxel_size, vmin, merge_radius_m=0.15) -> Pla
         return PlacesGraph([node], [], voxel_size, np.asarray(vmin))
 
     eps_vox = max(merge_radius_m / voxel_size, np.sqrt(3))
-    labels = DBSCAN(eps=eps_vox, min_samples=1).fit(key_coords).labels_
+    labels = dbscan_labels(key_coords, eps_vox, 1)
     n_clusters = int(labels.max()) + 1
 
     key_to_cluster = {}
@@ -250,7 +250,7 @@ def merge_close(g: PlacesGraph, radius_m: float) -> PlacesGraph:
     if radius_m <= 0 or len(g.nodes) < 2:
         return g
     pos = g.positions_m()
-    labels = DBSCAN(eps=radius_m, min_samples=1).fit(pos).labels_
+    labels = dbscan_labels(pos, radius_m, 1)
     n_clusters = int(labels.max()) + 1
     if n_clusters == len(g.nodes):
         return g  # nothing merged

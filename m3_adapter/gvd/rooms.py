@@ -11,7 +11,6 @@ def partition_rooms(graph, resolution: float = 1.0, seed: int = 0):
     largest). Isolated nodes (no edges) each get their own room.
     """
     import networkx as nx
-    from networkx.algorithms.community import louvain_communities
 
     n = len(graph.nodes)
     g = nx.Graph()
@@ -20,7 +19,14 @@ def partition_rooms(graph, resolution: float = 1.0, seed: int = 0):
         g.add_edge(int(a), int(b), weight=1.0 / max(float(length_m), 1e-3))
     if g.number_of_edges() == 0:
         return list(range(n))
-    comms = louvain_communities(g, weight="weight", resolution=resolution, seed=seed)
+    try:
+        from networkx.algorithms.community import louvain_communities
+        comms = louvain_communities(g, weight="weight", resolution=resolution, seed=seed)
+    except ImportError:
+        # networkx < 3 lacks louvain_communities; greedy modularity maximisation
+        # (available since 2.x) optimises the same objective, deterministically.
+        from networkx.algorithms.community import greedy_modularity_communities
+        comms = greedy_modularity_communities(g, weight="weight", resolution=resolution)
     room_of = [0] * n
     for rid, comm in enumerate(sorted(comms, key=lambda c: -len(c))):
         for node in comm:

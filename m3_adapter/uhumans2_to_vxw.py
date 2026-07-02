@@ -415,7 +415,7 @@ def extract_entities(
     """For each object label, DBSCAN-cluster its voxels, fit PCA OBB per
     cluster, and emit one Entity per cluster. Returns (entities, keep_mask)
     where keep_mask[i] is False for voxels that became part of an entity."""
-    from sklearn.cluster import DBSCAN
+    from m3_adapter.clustering import dbscan_labels
 
     entities: list = []
     keep_mask = np.ones(len(final_vc), dtype=bool)
@@ -425,11 +425,7 @@ def extract_entities(
             continue
         sub_idx = np.flatnonzero(mask)
         vc_lbl = final_vc[mask].astype(np.float64)
-        # n_jobs=1: the parallel (loky) backend deadlocks on Windows even for a
-        # few hundred points; clustering this few voxels is milliseconds serial.
-        clusters = DBSCAN(
-            eps=dbscan_eps_voxels, min_samples=min_samples, n_jobs=1,
-        ).fit_predict(vc_lbl)
+        clusters = dbscan_labels(vc_lbl, dbscan_eps_voxels, min_samples)
         n_clusters = int(clusters.max()) + 1 if clusters.max() >= 0 else 0
         log.info("    label %2d %-12s: %d voxels → %d clusters",
                  int(lbl), label_names.get(int(lbl), "?"),

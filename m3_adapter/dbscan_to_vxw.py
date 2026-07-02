@@ -100,12 +100,10 @@ def cluster_voxel_centres(
     Returns: labels array of shape (N,) — integer cluster ids (>=0) or -1 for
     noise, one per row of vc_unique.
     """
-    from sklearn.cluster import DBSCAN  # local import so missing dep is reported lazily
+    from m3_adapter.clustering import dbscan_labels
 
     centres = (vc_unique.astype(np.float64) + 0.5) * voxel_size
-    db = DBSCAN(eps=eps, min_samples=min_samples, n_jobs=-1)
-    labels = db.fit_predict(centres)
-    return labels.astype(np.int64)
+    return dbscan_labels(centres, eps, min_samples).astype(np.int64)
 
 
 # ---------------------------------------------------------------------------

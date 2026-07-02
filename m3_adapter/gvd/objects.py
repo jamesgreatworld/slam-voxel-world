@@ -92,7 +92,7 @@ def extract_objects(occ, sem, voxel_size, vmin, label_names=None,
     (same as the old connected-components implementation). Callers that convert
     to world metres add vmin externally — that contract is unchanged.
     """
-    from sklearn.cluster import DBSCAN
+    from m3_adapter.clustering import dbscan_labels
     from m3_adapter.gvd.features import extract_features
 
     label_names = label_names or {}
@@ -109,7 +109,7 @@ def extract_objects(occ, sem, voxel_size, vmin, label_names=None,
             continue
 
         # DBSCAN in voxel units — eps bridges gaps ≤ cluster_eps_voxels; noise (-1) dropped
-        lab = DBSCAN(eps=cluster_eps_voxels, min_samples=min_samples).fit(cells_all).labels_
+        lab = dbscan_labels(cells_all, cluster_eps_voxels, min_samples)
 
         clusters = []
         for g in np.unique(lab):
