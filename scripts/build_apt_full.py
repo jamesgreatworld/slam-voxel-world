@@ -60,13 +60,25 @@ def main(out_dir: str = "out/apt_full.vxw") -> None:
         coarsen_to_m=0.2, clean=True, clean_close_radius=0, clean_keep_largest=True,
     )
 
-    # ④ 模型替换:物体 → mc_item / OBB 实体(带观测色、安装面、bbox 解算)
+    # ④ 模型替换:物体 → mc_item / OBB 实体(带观测色、安装面、bbox 解算)。
+    # 小物体类(books/vase)由点级通道实例化,体素通道只解耦、不再出实体,
+    # 否则同一只花瓶会两个通道各一份(双重表示)。
+    from m3_adapter.small_objects import SMALL_OBJECT_LABELS
+    from m3_adapter.vlayer.objects import OBJECT_LABELS
+    sp = pathlib.Path(src).parent / "small_objects.json"
+    voxel_labels = OBJECT_LABELS - SMALL_OBJECT_LABELS if sp.exists() else OBJECT_LABELS
     entities = extract_object_models(
         obsmap.occupancy_mask(), obsmap.semantic_grid(),
         np.asarray(obsmap.vmin), obsmap.voxel_size,
-        label_names, SUPER_ID_TO_MC_ITEM, min_voxels=30,
+        label_names, SUPER_ID_TO_MC_ITEM, min_voxels=30, labels=voxel_labels,
         rgb=obsmap.rgb, rgb_count=obsmap.rgb_count,
     )
+    # 小物体点级实例(--small-objects 流式产物)并入同一份 entities.json
+    sp = pathlib.Path(src).parent / "small_objects.json"
+    if sp.exists():
+        small = json.loads(sp.read_text())["entities"]
+        entities.extend(small)
+        print("[full] + %d small-object instances (point-level channel)" % len(small))
     ent_path = pathlib.Path(out_dir) / "entities.json"
     ent_path.write_text(json.dumps(
         {"format_version": "1.0", "entities": entities}, indent=2))

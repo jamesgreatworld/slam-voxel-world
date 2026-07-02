@@ -229,6 +229,13 @@ def main() -> None:
     ap.add_argument("--rgb", action="store_true",
                     help="also integrate observed colour from /tesse/left_cam/rgb "
                          "into the ObsMap RGB channel (requires --semantic path)")
+    ap.add_argument("--small-objects", action="store_true",
+                    help="divert small-object-class hit points (books/vase — cup/key "
+                         "scale, below grid resolution) into the point-level instance "
+                         "channel; writes <vxw_dir>/small_objects.json")
+    ap.add_argument("--skip-integrate", action="store_true",
+                    help="decode/unproject only, no ObsMap integration — fast second "
+                         "pass to harvest e.g. --small-objects without touching the map")
     ap.add_argument("--semantic", action="store_true",
                     help="read seg frames in lockstep with depth, feed per-point "
                          "labels into ObsMap, and export semantic-coloured .vxw")
@@ -303,6 +310,12 @@ def main() -> None:
 
     # Persistent GVD grid for --incremental mode (allocated lazily on first snapshot)
     persistent_gvd: np.ndarray | None = None
+
+    # Small-object point-level channel (--small-objects, semantic path only)
+    small_buf = None
+    if args.small_objects and args.semantic:
+        from m3_adapter.small_objects import SmallObjectBuffer
+        small_buf = SmallObjectBuffer()
 
     # ---- [3/5] scan bag: odom + tf_static + camera_info ----
     from rosbags.rosbag2 import Reader
@@ -441,9 +454,14 @@ def main() -> None:
                 origin_ros = T_world_cam[:3, 3:4].T
                 O_m = ros_zup_to_vxw_yup(origin_ros)[0]
 
-                obs.integrate_frame(O_m, P_m, point_labels=seg_labels,
-                                    free_margin_m=args.free_margin,
-                                    point_colors=point_colors)
+                if small_buf is not None:
+                    # 小物体点级实例通道:装不进栅格的类(杯/钥匙量级)按点分流
+                    small_buf.add_frame(P_m, seg_labels, point_colors)
+
+                if not args.skip_integrate:
+                    obs.integrate_frame(O_m, P_m, point_labels=seg_labels,
+                                        free_margin_m=args.free_margin,
+                                        point_colors=point_colors)
                 frames_integrated += 1
 
                 if frames_integrated % 50 == 0:
@@ -546,22 +564,35 @@ def main() -> None:
              fi, frames_integrated, frames_skipped, time.perf_counter() - t0)
 
     # ---- [5/5] save obsmap + observed_free export ----
-    log.info("[5/5] saving obsmap and observed_free")
-    obs.save(obsmap_path)
-    log.info("      obsmap saved: %s", obsmap_path)
+    if args.skip_integrate:
+        log.info("[5/5] --skip-integrate: leaving obsmap/observed_free untouched")
+    else:
+        log.info("[5/5] saving obsmap and observed_free")
+        obs.save(obsmap_path)
+        log.info("      obsmap saved: %s", obsmap_path)
+    if small_buf is not None:
+        import json
+        small_ents = small_buf.finalize(label_names if args.semantic else {})
+        sp = args.vxw_dir / "small_objects.json"
+        sp.write_text(json.dumps(
+            {"format_version": "1.0", "entities": small_ents}, indent=2))
+        log.info("      small objects: %d instances -> %s", len(small_ents), sp)
 
     # Export observed-free mask for GVD pipeline (same format as uhumans2_carve)
-    free_out = args.vxw_dir / "observed_free.npz"
-    np.savez_compressed(
-        free_out,
-        mask=obs.observed_free_mask(),
-        vmin=obs.vmin,
-        voxel_size=np.float64(obs.voxel_size),
-    )
-    log.info("      observed_free exported: %s", free_out)
+    if not args.skip_integrate:
+        free_out = args.vxw_dir / "observed_free.npz"
+        np.savez_compressed(
+            free_out,
+            mask=obs.observed_free_mask(),
+            vmin=obs.vmin,
+            voxel_size=np.float64(obs.voxel_size),
+        )
+        log.info("      observed_free exported: %s", free_out)
 
     # Export final geometric .vxw (semantic-coloured when --semantic)
-    if not args.live:
+    if args.skip_integrate:
+        pass          # harvest-only pass: nothing map-derived to export
+    elif not args.live:
         # Non-live: we write a final geometric vxw from the full map
         occ_mask = obs.occupancy_mask()
         if int(occ_mask.sum()) > 0:
