@@ -3,7 +3,7 @@
 四阶段流程(docs/PROGRESS.md):
   ③ vlayer.objects.decouple_objects   — 物体按标签从结构剔除(不粘连)
   ① SlabFill/WallFill/StairsFill/OcclusionFill — 结构平面拟合 + 实心化
-  (② OpeningCarve 门窗形状挖空 — 待做)
+  ② OpeningCarve — 门窗开口矩形/拱形拟合后规整挖空
   ④ vlayer.objects.extract_object_models — 物体 → mc_item 模型 entities.json
 
 用法:  python scripts/build_apt_full.py [out_dir]
@@ -29,6 +29,7 @@ from m3_adapter.vlayer.generators.slab import SlabFill
 from m3_adapter.vlayer.generators.wall import WallFill
 from m3_adapter.vlayer.generators.stairs import StairsFill
 from m3_adapter.vlayer.generators.occlusion import OcclusionFill
+from m3_adapter.vlayer.generators.opening import OpeningCarve
 
 OBSMAP = "out/uhumans2_apt_full.vxw/obsmap.npz"
 HYDRA = "F:/hydra_ws"
@@ -45,9 +46,9 @@ def main(out_dir: str = "out/apt_full.vxw") -> None:
     struct, obj_cells = decouple_objects(obsmap)
     print("[full] decoupled %d object voxels from structure" % int(obj_cells.sum()))
 
-    # ① 结构补全(平面先验)+ 粗化 + 去噪
+    # ①+② 结构补全(平面先验)+ 开口规整挖空 + 粗化 + 去噪
     generators = [SlabFill(3, "floor"), SlabFill(4, "ceiling"),
-                  WallFill(), StairsFill(), OcclusionFill()]
+                  WallFill(), StairsFill(), OcclusionFill(), OpeningCarve()]
     obsmap_to_completed_vxw(
         struct, out_dir, generators=generators, palette=palette,
         coarsen_to_m=0.2, clean=True, clean_close_radius=0, clean_keep_largest=True,

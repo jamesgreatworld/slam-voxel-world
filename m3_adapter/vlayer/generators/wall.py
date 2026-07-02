@@ -11,6 +11,25 @@ from m3_adapter.vlayer.overlay import VoxelDelta
 WALL_LABEL = 19
 
 
+def projection_peaks(count, min_cells):
+    """坐标轴投影计数里的局部峰(>=min_cells),仅合并紧邻(<=1)取最大。
+    合并窗取 1:厚墙(连续索引)并成一峰,相距 2 格的平行墙各自保留。
+    (模块级函数:WallFill 与 OpeningCarve 共用同一套墙平面检测。)"""
+    n = len(count); peaks = []
+    for i in range(n):
+        if count[i] < min_cells:
+            continue
+        lo = max(0, i - 1); hi = min(n, i + 2)
+        if count[i] < count[lo:hi].max():
+            continue
+        if peaks and i - peaks[-1] <= 1:
+            if count[i] > count[peaks[-1]]:
+                peaks[-1] = i
+            continue
+        peaks.append(i)
+    return peaks
+
+
 class WallFill:
     stage = 1
     depends_on: list = []
@@ -25,21 +44,7 @@ class WallFill:
         self._struct = ndimage.generate_binary_structure(2, 1)
 
     def _peaks(self, count):
-        """坐标轴投影计数里的局部峰(>=min_wall_cells),仅合并紧邻(<=1)取最大。
-        合并窗取 1:厚墙(连续索引)并成一峰,但相距 2 格的两面平行墙各自保留。"""
-        n = len(count); peaks = []
-        for i in range(n):
-            if count[i] < self.min_wall_cells:
-                continue
-            lo = max(0, i - 1); hi = min(n, i + 2)
-            if count[i] < count[lo:hi].max():
-                continue
-            if peaks and i - peaks[-1] <= 1:
-                if count[i] > count[peaks[-1]]:
-                    peaks[-1] = i
-                continue
-            peaks.append(i)
-        return peaks
+        return projection_peaks(count, self.min_wall_cells)
 
     def run(self, ctx) -> list:
         obs = ctx.obsmap
