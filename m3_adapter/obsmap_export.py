@@ -27,6 +27,9 @@ SUPER_ID_TO_MC_ITEM = {
     5: "chair",
     16: "table",
     11: "lamp",
+    10: "computer",
+    14: "bed",
+    18: "trashcan",
     # 7 (couch) has no preset yet; 9 (furniture) is ambiguous -> left as generic box.
 }
 

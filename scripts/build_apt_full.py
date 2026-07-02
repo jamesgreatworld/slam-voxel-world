@@ -30,14 +30,19 @@ from m3_adapter.vlayer.generators.wall import WallFill
 from m3_adapter.vlayer.generators.stairs import StairsFill
 from m3_adapter.vlayer.generators.occlusion import OcclusionFill
 from m3_adapter.vlayer.generators.opening import OpeningCarve
+from m3_adapter.vlayer.generators.regularize import PlaneRegularize
 
+# 带 RGB 通道的重建图优先(--rgb 全量重跑的产物);没有时退回旧几何图。
+OBSMAP_RGB = "out/uhumans2_apt_rgb.vxw/obsmap.npz"
 OBSMAP = "out/uhumans2_apt_full.vxw/obsmap.npz"
 HYDRA = "F:/hydra_ws"
 SCENE = "apartment"
 
 
 def main(out_dir: str = "out/apt_full.vxw") -> None:
-    obsmap = ObsMap.load(OBSMAP)
+    src = OBSMAP_RGB if pathlib.Path(OBSMAP_RGB).exists() else OBSMAP
+    print("[full] obsmap source: %s" % src)
+    obsmap = ObsMap.load(src)
     yaml_path, _ = _resolve_hydra_paths(pathlib.Path(HYDRA), SCENE)
     label_names = load_label_space(yaml_path)
     palette = build_palette(label_names)
@@ -46,19 +51,21 @@ def main(out_dir: str = "out/apt_full.vxw") -> None:
     struct, obj_cells = decouple_objects(obsmap)
     print("[full] decoupled %d object voxels from structure" % int(obj_cells.sum()))
 
-    # ①+② 结构补全(平面先验)+ 开口规整挖空 + 粗化 + 去噪
+    # ①+② 结构补全(平面先验)+ 概率规整(形状先验×观测后验)+ 开口挖空 + 粗化去噪
     generators = [SlabFill(3, "floor"), SlabFill(4, "ceiling"),
-                  WallFill(), StairsFill(), OcclusionFill(), OpeningCarve()]
+                  WallFill(), StairsFill(), OcclusionFill(),
+                  PlaneRegularize(), OpeningCarve()]
     obsmap_to_completed_vxw(
         struct, out_dir, generators=generators, palette=palette,
         coarsen_to_m=0.2, clean=True, clean_close_radius=0, clean_keep_largest=True,
     )
 
-    # ④ 模型替换:物体 → mc_item 实体
+    # ④ 模型替换:物体 → mc_item / OBB 实体(带观测色、安装面、bbox 解算)
     entities = extract_object_models(
         obsmap.occupancy_mask(), obsmap.semantic_grid(),
         np.asarray(obsmap.vmin), obsmap.voxel_size,
-        label_names, SUPER_ID_TO_MC_ITEM, min_voxels=80,
+        label_names, SUPER_ID_TO_MC_ITEM, min_voxels=30,
+        rgb=obsmap.rgb, rgb_count=obsmap.rgb_count,
     )
     ent_path = pathlib.Path(out_dir) / "entities.json"
     ent_path.write_text(json.dumps(

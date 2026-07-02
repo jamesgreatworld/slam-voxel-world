@@ -29,6 +29,11 @@ class ObsMap:
     free_thr: float = FREE_THR
     sem_label: np.ndarray = field(default=None)   # uint8 winning super_id per cell (0=unknown)
     sem_count: np.ndarray = field(default=None)   # uint16 winner's running vote count
+    # Observed colour (lazy): running-mean RGB per cell + observation count.
+    # Allocated on the first integrate_frame(point_colors=...) call so colour-
+    # less maps stay lean; old .npz files without these keys load fine.
+    rgb: np.ndarray = field(default=None)         # uint8 (nx,ny,nz,3) running mean
+    rgb_count: np.ndarray = field(default=None)   # uint8 (nx,ny,nz), capped at 255
 
     def __post_init__(self):
         # Transient dirty-region state; not persisted by save/load.
@@ -57,16 +62,24 @@ class ObsMap:
         if "sem_label" in d:
             obj.sem_label = d["sem_label"].astype(np.uint8)
             obj.sem_count = d["sem_count"].astype(np.uint16)
+        if "rgb" in d:
+            obj.rgb = d["rgb"].astype(np.uint8)
+            obj.rgb_count = d["rgb_count"].astype(np.uint8)
         return obj
 
     def save(self, path):
+        extra = {}
+        if self.rgb is not None:
+            extra["rgb"] = self.rgb
+            extra["rgb_count"] = self.rgb_count
         np.savez_compressed(
             path, logodds=self.logodds, vmin=self.vmin, voxel_size=self.voxel_size,
             l_hit=self.l_hit, l_miss=self.l_miss, l_min=self.l_min, l_max=self.l_max,
             occ_thr=self.occ_thr, free_thr=self.free_thr,
-            sem_label=self.sem_label, sem_count=self.sem_count)
+            sem_label=self.sem_label, sem_count=self.sem_count, **extra)
 
-    def integrate_frame(self, origin_m, points_m, point_labels=None, free_margin_m=0.10):
+    def integrate_frame(self, origin_m, points_m, point_labels=None, free_margin_m=0.10,
+                        point_colors=None):
         """Update log-odds from one frame: traversed cells get l_miss, the
         surface endpoint cell gets l_hit, clamped to [l_min, l_max].
 
@@ -79,6 +92,9 @@ class ObsMap:
                 unknown and is skipped.  Must be aligned with rows of points_m
                 BEFORE the keep-filter (the same keep mask is applied).
             free_margin_m: rays shorter than this are discarded.
+            point_colors: optional uint8 array (N, 3) of observed RGB per hit
+                point (aligned like point_labels).  Updates the per-cell
+                running-mean colour channel (allocated lazily).
         """
         origin_m = np.asarray(origin_m, dtype=np.float64)
         pts = np.asarray(points_m, dtype=np.float64)
@@ -90,6 +106,9 @@ class ObsMap:
         lab = None
         if point_labels is not None:
             lab = np.asarray(point_labels)[keep].astype(np.uint8)
+        col = None
+        if point_colors is not None:
+            col = np.asarray(point_colors)[keep].astype(np.uint8)
         if len(lens) == 0:
             return
         units = dirs / lens[:, None]
@@ -148,6 +167,25 @@ class ObsMap:
                     self.sem_count[x, y, z] = 1
                 else:
                     self.sem_count[x, y, z] = cnt - 1   # Boyer-Moore: opposing vote
+        # --- colour update (vectorised per-cell running mean) ---
+        if col is not None and hinb.any():
+            if self.rgb is None:
+                self.rgb = np.zeros(self.logodds.shape + (3,), dtype=np.uint8)
+                self.rgb_count = np.zeros(self.logodds.shape, dtype=np.uint8)
+            cells = hvc[hinb]
+            colors = col[hinb].astype(np.float64)
+            # average this frame's hits per unique cell, then fold into the
+            # running mean: mean_{n+1} = mean_n + (frame_mean - mean_n)/(n+1)
+            uc, inv = np.unique(cells, axis=0, return_inverse=True)
+            csum = np.zeros((len(uc), 3), dtype=np.float64)
+            np.add.at(csum, inv, colors)
+            cmean = csum / np.bincount(inv)[:, None]
+            ix, iy, iz = uc[:, 0], uc[:, 1], uc[:, 2]
+            n = self.rgb_count[ix, iy, iz].astype(np.float64)
+            cur = self.rgb[ix, iy, iz].astype(np.float64)
+            upd = cur + (cmean - cur) / (n + 1.0)[:, None]
+            self.rgb[ix, iy, iz] = np.clip(np.rint(upd), 0, 255).astype(np.uint8)
+            self.rgb_count[ix, iy, iz] = np.minimum(n + 1, 255).astype(np.uint8)
         # --- dirty-box tracking ---
         # touched_parts may hold only zero-row arrays when every traversed/
         # endpoint voxel of this frame fell outside the grid (e.g. the camera

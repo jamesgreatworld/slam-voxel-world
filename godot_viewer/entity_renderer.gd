@@ -145,14 +145,23 @@ func _spawn_one(e: Dictionary, palette_rgb: PackedColorArray) -> Node3D:
     )
 
     var state: String = String(custom_meta.get("state", "off"))
+    # Observed colour (custom_meta.rgb = [r,g,b] 0..255, mean of the cluster's
+    # ObsMap colour channel): per-instance tint so two lamps can differ.
+    var obs_col := Color(-1, -1, -1)
+    if custom_meta.has("rgb"):
+        var rr = custom_meta["rgb"]
+        if rr is Array and rr.size() >= 3:
+            obs_col = Color(float(rr[0]) / 255.0, float(rr[1]) / 255.0, float(rr[2]) / 255.0)
     var behaviors: Array = []
     if use_mc:
         var preset: Dictionary = _item_presets[mc_item_id]
         behaviors = preset.get("behaviors", []) if preset.has("behaviors") else []
-        _build_mc_composite(root, preset, state)
+        _build_mc_composite(root, preset, state, obs_col)
     else:
         var col: Color = Color(0.5, 0.5, 0.5)
-        if label >= 0 and label < palette_rgb.size():
+        if obs_col.r >= 0.0:
+            col = obs_col
+        elif label >= 0 and label < palette_rgb.size():
             col = palette_rgb[label]
         var box_dims = dims if (dims != null and dims.size() >= 3) else [0.5, 0.5, 0.5]
         _build_single_box(root, col, box_dims)
@@ -242,7 +251,8 @@ func _build_single_box(root: Node3D, col: Color, dims) -> void:
 # textured with the dominant_texture (triplanar) or the average face colour.
 # This replaces the previous 6-PlaneMesh approach that produced see-through
 # decals; a BoxMesh is fully solid and visible from all angles.
-func _build_mc_composite(root: Node3D, preset: Dictionary, state: String = "off") -> void:
+func _build_mc_composite(root: Node3D, preset: Dictionary, state: String = "off",
+        obs_col: Color = Color(-1, -1, -1)) -> void:
     var behaviors: Array = preset.get("behaviors", []) if preset.has("behaviors") else []
     var glow_on := state == "on" and behaviors.has("switchable")
     for b in preset.get("boxes", []):
@@ -270,13 +280,17 @@ func _build_mc_composite(root: Node3D, preset: Dictionary, state: String = "off"
         var tex: Texture2D = _load_pack_texture(tex_path) if tex_path != "" else null
         if tex != null:
             mat.albedo_texture = tex
-            mat.albedo_color = Color.WHITE
+            # Textured boxes: gentle tint toward the observed colour so two
+            # lamps of different colours differ without muddying the texture.
+            mat.albedo_color = Color.WHITE if obs_col.r < 0.0 \
+                else Color.WHITE.lerp(obs_col, 0.45)
             mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
             mat.uv1_triplanar = true
             mat.uv1_scale = Vector3(5, 5, 5)
         else:
             var fc: Dictionary = b.get("face_colors") if b.has("face_colors") else {}
-            mat.albedo_color = _avg_color(fc)
+            var base := _avg_color(fc)
+            mat.albedo_color = base if obs_col.r < 0.0 else base.lerp(obs_col, 0.6)
         if glow_on:
             mat.emission_enabled = true
             mat.emission = mat.albedo_color * 1.2

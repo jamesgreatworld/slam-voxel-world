@@ -226,6 +226,9 @@ def main() -> None:
     ap.add_argument("--incremental", action="store_true",
                     help="only meaningful with --live: recompute GVD only in the "
                          "dirty box each batch (fast incremental path, skips rooms)")
+    ap.add_argument("--rgb", action="store_true",
+                    help="also integrate observed colour from /tesse/left_cam/rgb "
+                         "into the ObsMap RGB channel (requires --semantic path)")
     ap.add_argument("--semantic", action="store_true",
                     help="read seg frames in lockstep with depth, feed per-point "
                          "labels into ObsMap, and export semantic-coloured .vxw")
@@ -353,6 +356,11 @@ def main() -> None:
                      if c.topic == "/tesse/seg_cam/rgb/image_raw"][0]
             depth_iter = reader.messages(connections=[dconn])
             seg_iter = reader.messages(connections=[sconn])
+            rgb_iter = None
+            if args.rgb:
+                rconn = [c for c in reader.connections
+                         if c.topic == "/tesse/left_cam/rgb/image_raw"][0]
+                rgb_iter = reader.messages(connections=[rconn])
 
             while True:
                 # Early-exit: if we've passed E there's nothing more to integrate
@@ -362,17 +370,22 @@ def main() -> None:
                 try:
                     _dc, _dt, draw = next(depth_iter)
                     _sc, _st, sraw = next(seg_iter)
+                    rraw = next(rgb_iter)[2] if rgb_iter is not None else None
                 except StopIteration:
                     break
 
                 dm = ts.deserialize_cdr(draw, dconn.msgtype)
                 sm = ts.deserialize_cdr(sraw, sconn.msgtype)
+                rm = ts.deserialize_cdr(rraw, rconn.msgtype) if rraw is not None else None
 
                 if dm.encoding != "32FC1":
                     log.error("unexpected depth encoding: %s", dm.encoding)
                     sys.exit(2)
                 if sm.encoding != "rgb8":
                     log.error("unexpected seg encoding: %s", sm.encoding)
+                    sys.exit(2)
+                if rm is not None and rm.encoding != "rgb8":
+                    log.error("unexpected rgb encoding: %s", rm.encoding)
                     sys.exit(2)
 
                 fi_current = fi
@@ -385,9 +398,15 @@ def main() -> None:
                     dm.height, dm.width)
                 seg = np.frombuffer(sm.data, dtype=np.uint8).reshape(
                     sm.height, sm.width, 3)
+                rgb_img = None
+                if rm is not None:
+                    rgb_img = np.frombuffer(rm.data, dtype=np.uint8).reshape(
+                        rm.height, rm.width, 3)
                 if stride > 1:
                     depth = depth[::stride, ::stride]
                     seg = seg[::stride, ::stride]
+                    if rgb_img is not None:
+                        rgb_img = rgb_img[::stride, ::stride]
 
                 t_frame = dm.header.stamp.sec + dm.header.stamp.nanosec * 1e-9
                 T_world_body = _interp_T_world_body(t_frame, odom_t, odom_p, odom_q)
@@ -395,7 +414,9 @@ def main() -> None:
                     frames_skipped += 1
                     continue
 
-                T_world_cam = T_world_body @ T_body_cam
+                # einsum, not @: the pixi env's numpy BLAS delay-load is broken (matmul/inv
+                # crash natively); einsum is pure-C and numerically identical here.
+                T_world_cam = np.einsum('ij,jk->ik', T_world_body, T_body_cam)
 
                 xyz_cam, valid = unproject_depth(
                     depth,
@@ -409,18 +430,20 @@ def main() -> None:
 
                 # Align seg labels to unprojected points via the valid mask
                 seg_labels = seg_pixels_to_labels(seg, color_to_id, valid)
+                point_colors = rgb_img[valid] if rgb_img is not None else None
 
                 xyz_h = np.concatenate(
                     [xyz_cam, np.ones((xyz_cam.shape[0], 1), dtype=np.float32)], axis=1
                 )
-                xyz_world = (xyz_h @ T_world_cam.T.astype(np.float32))[:, :3]
+                xyz_world = np.einsum('nj,kj->nk', xyz_h, T_world_cam.astype(np.float32))[:, :3]
                 P_m = ros_zup_to_vxw_yup(xyz_world.astype(np.float64))
 
                 origin_ros = T_world_cam[:3, 3:4].T
                 O_m = ros_zup_to_vxw_yup(origin_ros)[0]
 
                 obs.integrate_frame(O_m, P_m, point_labels=seg_labels,
-                                    free_margin_m=args.free_margin)
+                                    free_margin_m=args.free_margin,
+                                    point_colors=point_colors)
                 frames_integrated += 1
 
                 if frames_integrated % 50 == 0:
@@ -474,7 +497,9 @@ def main() -> None:
                     frames_skipped += 1
                     continue
 
-                T_world_cam = T_world_body @ T_body_cam
+                # einsum, not @: the pixi env's numpy BLAS delay-load is broken (matmul/inv
+                # crash natively); einsum is pure-C and numerically identical here.
+                T_world_cam = np.einsum('ij,jk->ik', T_world_body, T_body_cam)
 
                 xyz_cam, _valid = unproject_depth(
                     depth,
@@ -490,7 +515,7 @@ def main() -> None:
                 xyz_h = np.concatenate(
                     [xyz_cam, np.ones((xyz_cam.shape[0], 1), dtype=np.float32)], axis=1
                 )
-                xyz_world = (xyz_h @ T_world_cam.T.astype(np.float32))[:, :3]
+                xyz_world = np.einsum('nj,kj->nk', xyz_h, T_world_cam.astype(np.float32))[:, :3]
                 P_m = ros_zup_to_vxw_yup(xyz_world.astype(np.float64))
 
                 # Camera origin: same coordinate swap as points

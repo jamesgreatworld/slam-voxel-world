@@ -21,7 +21,8 @@ _CC8 = ndimage.generate_binary_structure(2, 2)
 
 class OpeningCarve:
     stage = 2
-    depends_on = ["wall_fill"]
+    # plane_regularize 在场时先跑(它的补格也要能被挖);不在场时该依赖被忽略。
+    depends_on = ["wall_fill", "plane_regularize"]
     default_binding = "persistent"
 
     def __init__(self, min_area_m2: float = 0.35, max_area_m2: float = 4.0,
@@ -56,8 +57,10 @@ class OpeningCarve:
         self._vs_cells = (int(round(self.max_area_m2 / (vs * vs))),
                           int(round(self.max_extent_m / vs)))
         T = max(1, int(np.ceil(self.thickness_m / vs - 1e-9)))
+        # 可挖的补格 = 任何前序 generator 的墙质 add(wall_fill 补墙、
+        # plane_regularize 概率补格),不只 wall_fill。
         added = {d.idx for d in ctx.overlay.voxels
-                 if d.generator == "wall_fill" and d.op == "add"}
+                 if d.op == "add" and d.sem == WALL_LABEL}
         deltas = []
         emitted = set()
         nx, ny, nz = occ.shape
