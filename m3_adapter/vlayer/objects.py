@@ -169,9 +169,6 @@ def extract_object_models(occ, sem, vmin, voxel_size, label_names,
 # 模型实例必须满足:不插进地板、不嵌进墙、互不重叠。数据驱动,任何场景通用。
 # ---------------------------------------------------------------------------
 
-# 允许嵌套的类对(小件塞进大件下方是物理合法的):椅子 ↔ 桌/家具/床。
-# AABB 是实体体积的粗代理——椅子塞进桌下时两 AABB 重叠但实体并不相交。
-_NESTABLE = {frozenset({5, 16}), frozenset({5, 9}), frozenset({5, 14})}
 
 
 def resolve_placements(ents, occ, sem, vmin, vs, max_push_m=0.5,
@@ -204,17 +201,52 @@ def resolve_placements(ents, occ, sem, vmin, vs, max_push_m=0.5,
     margin = int(round(0.4 / vs))       # 横向外扩:自身遮挡地板时用周边地板
     depth = int(round(3.0 / vs))        # 纵深:整层楼高内找支撑面
 
+    # 观测几何存底:父子(支撑)判定必须依据**观测**位置——谁的观测底面贴着
+    # 谁的观测顶面,谁就坐在谁上;吸附后再按父件的最终顶面落座。
     for e in ents:
-        pos = np.array(e["position"], float)
-        half = rdims(e) / 2.0
-        if e["custom_meta"].get("mount") == "wall":
-            continue          # 壁挂物本来就贴墙:不吸附、不推离
-        # --- 1. 落地 / 贴顶吸附(渲染尺寸 + 外扩搜索,自中心 y 出发) ---
+        e["_obs_pos"] = np.array(e["position"], float)
+        e["_obs_half"] = np.array(e["bbox_dims"], float) / 2.0
+
+    def find_floor_top(pos, half):
         c = to_cell(pos)
         x0, x1 = max(0, int(c[0] - half[0] / vs) - margin), min(nx, int(c[0] + half[0] / vs) + 1 + margin)
         z0, z1 = max(0, int(c[2] - half[2] / vs) - margin), min(nz, int(c[2] + half[2] / vs) + 1 + margin)
         cy = int(np.clip(c[1], 0, ny - 1))
-        if e["custom_meta"].get("mount") == "ceiling":
+        lo = max(0, cy - depth)
+        col = floor[x0:x1, lo:cy + 2, z0:z1]
+        ys = np.where(col.any(axis=(0, 2)))[0]
+        if ys.size:
+            return (lo + int(ys[-1]) + 1 + vmin[1]) * vs
+        # 地板标签缺失(地毯误标/未观测):footprint 内逐列"中心以下最高占据"
+        # 的中位数——对墙/邻物污染鲁棒。
+        sub = occ[x0:x1, :cy + 1, z0:z1]
+        tops = []
+        yy = np.arange(sub.shape[1])
+        for ix in range(sub.shape[0]):
+            for iz in range(sub.shape[2]):
+                colm = yy[sub[ix, :, iz]]
+                if colm.size:
+                    tops.append(int(colm[-1]))
+        if tops:
+            return (int(np.median(tops)) + 1 + vmin[1]) * vs
+        return None
+
+    # --- 1. 支撑感知吸附:按观测底面从低到高放置;支撑候选 = 地板 ∪ 已放
+    #        置家具的最终顶面(观测底面贴其观测顶面 ±0.3m 才算父子)。
+    #        桌上的电脑/台灯从此坐在桌面上,而不是被地板吸附拽到地上。 ---
+    placed = []
+    for e in sorted(ents, key=lambda e: e["_obs_pos"][1] - e["_obs_half"][1]):
+        meta = e["custom_meta"]
+        pos = e["_obs_pos"].copy()
+        half = rdims(e) / 2.0
+        if meta.get("mount") == "wall":
+            placed.append(e)
+            continue          # 壁挂物本来就贴墙:不吸附、不推离
+        if meta.get("mount") == "ceiling":
+            c = to_cell(pos)
+            x0, x1 = max(0, int(c[0] - half[0] / vs) - margin), min(nx, int(c[0] + half[0] / vs) + 1 + margin)
+            z0, z1 = max(0, int(c[2] - half[2] / vs) - margin), min(nz, int(c[2] + half[2] / vs) + 1 + margin)
+            cy = int(np.clip(c[1], 0, ny - 1))
             col = ceil_[x0:x1, cy:min(ny, cy + depth), z0:z1]
             ys = np.where(col.any(axis=(0, 2)))[0]
             if ys.size:
@@ -223,29 +255,29 @@ def resolve_placements(ents, occ, sem, vmin, vs, max_push_m=0.5,
                     ceil_under = np.floor(ceil_under / coarse_vs) * coarse_vs
                 pos[1] = ceil_under - half[1]
         else:
-            lo = max(0, cy - depth)
-            col = floor[x0:x1, lo:cy + 2, z0:z1]
-            ys = np.where(col.any(axis=(0, 2)))[0]
-            floor_top = None
-            if ys.size:
-                floor_top = (lo + int(ys[-1]) + 1 + vmin[1]) * vs
-            else:
-                # 地板标签缺失(地毯误标/未观测):回退到 footprint 内逐列
-                # "中心以下最高占据" 的中位数——对墙/邻物污染鲁棒。
-                sub = occ[x0:x1, :cy + 1, z0:z1]
-                tops = []
-                yy = np.arange(sub.shape[1])
-                for ix in range(sub.shape[0]):
-                    for iz in range(sub.shape[2]):
-                        colm = yy[sub[ix, :, iz]]
-                        if colm.size:
-                            tops.append(int(colm[-1]))
-                if tops:
-                    floor_top = (int(np.median(tops)) + 1 + vmin[1]) * vs
-            if floor_top is not None:
-                if coarse_vs:                        # 对齐显示层粗块顶面
-                    floor_top = np.ceil(floor_top / coarse_vs - 1e-9) * coarse_vs
-                pos[1] = floor_top + half[1]
+            obs_bottom = float(e["_obs_pos"][1] - e["_obs_half"][1])
+            target = find_floor_top(pos, half)
+            if target is not None and coarse_vs:     # 地板对齐显示层粗块顶面
+                target = float(np.ceil(target / coarse_vs - 1e-9) * coarse_vs)
+            parent = None
+            for f in placed:
+                if f["custom_meta"].get("mount") == "wall":
+                    continue
+                fh = rdims(f) / 2.0
+                fp = np.array(f["position"], float)
+                if abs(pos[0] - fp[0]) > fh[0] + 0.05 or abs(pos[2] - fp[2]) > fh[2] + 0.05:
+                    continue
+                f_obs_top = float(f["_obs_pos"][1] + f["_obs_half"][1])
+                # 观测底面贴着/悬在 f 顶面上方(吊灯悬于餐桌也算)= 坐在 f 上
+                if -0.35 <= obs_bottom - f_obs_top <= 0.75:
+                    f_top = float(fp[1] + fh[1])
+                    if target is None or f_top > target:
+                        target = f_top
+                        parent = f
+            if target is not None:
+                pos[1] = target + half[1]
+                if parent is not None:
+                    meta["support_id"] = parent["id"]
         # --- 2. 推出墙体(沿重叠更薄的水平轴,推向远离墙心一侧) ---
         c = to_cell(pos)
         y0, y1 = max(0, int(c[1] - half[1] / vs) + 1), min(ny, int(c[1] + half[1] / vs))
@@ -264,21 +296,110 @@ def resolve_placements(ents, occ, sem, vmin, vs, max_push_m=0.5,
             push = float(np.clip(push_cells * vs, -max_push_m, max_push_m))
             pos[0 if axis == 0 else 2] += push
         e["position"] = [float(pos[0]), float(pos[1]), float(pos[2])]
+        placed.append(e)
 
-    # --- 3. 两两分离(渲染尺寸;大的不动,小的沿最小平移轴推开)。
-    #     可嵌套类对(椅↔桌等)跳过:塞进桌下的椅子是合法摆放,不是互嵌。 ---
+    # --- 3. 两两分离(渲染尺寸;大的不动,小的沿最小平移轴推开;迭代收敛)。
+    #     支撑对跳过(电脑坐在桌上不是互嵌);椅↔桌要分离:椅背(1.125m)
+    #     高过桌面(0.875m),"塞桌下"在渲染上必然穿模——宁可摆桌边。 ---
     order = sorted(range(len(ents)),
                    key=lambda i: -float(np.prod(rdims(ents[i]))))
-    for ii, i in enumerate(order):
-        for j in order[ii + 1:]:
-            a, b = ents[i], ents[j]
-            if frozenset({int(a["label"]), int(b["label"])}) in _NESTABLE:
+
+    def _overlaps_any(k, pos_k):
+        hk = rdims(ents[k]) / 2
+        for m in order:
+            if m == k:
                 continue
-            pa = np.array(a["position"]); pb = np.array(b["position"])
-            ha = rdims(a) / 2; hb = rdims(b) / 2
-            overlap = (ha + hb) - np.abs(pa - pb)
-            if (overlap > 1e-6).all():
-                ax = int(np.argmin(overlap[[0, 2]])) * 2   # 只沿水平轴推
-                sign = 1.0 if pb[ax] >= pa[ax] else -1.0
-                pb[ax] += sign * float(min(overlap[ax], max_push_m))
-                b["position"] = [float(v) for v in pb]
+            om = (hk + rdims(ents[m]) / 2) - np.abs(pos_k - np.array(ents[m]["position"]))
+            if (om > 1e-6).all():
+                return True
+        return False
+
+    for _ in range(3):
+        moved = False
+        for ii, i in enumerate(order):
+            for j in order[ii + 1:]:
+                a, b = ents[i], ents[j]
+                if a["custom_meta"].get("support_id") == b["id"] or \
+                   b["custom_meta"].get("support_id") == a["id"]:
+                    continue
+                pa = np.array(a["position"]); pb = np.array(b["position"])
+                ha = rdims(a) / 2; hb = rdims(b) / 2
+                overlap = (ha + hb) - np.abs(pa - pb)
+                if (overlap > 1e-6).all():
+                    # 先试重叠薄的水平轴;若推过去撞上第三件(乒乓),换另一轴
+                    axes = [0, 2] if overlap[0] <= overlap[2] else [2, 0]
+                    done = False
+                    for ax in axes:
+                        sign = 1.0 if pb[ax] >= pa[ax] else -1.0
+                        cand = pb.copy()
+                        cand[ax] += sign * float(min(overlap[ax], max_push_m))
+                        if not _overlaps_any(j, cand):
+                            b["position"] = [float(v) for v in cand]
+                            done = True
+                            break
+                    if not done:               # 两轴都堵:仍推薄轴(至少解本对)
+                        ax = axes[0]
+                        sign = 1.0 if pb[ax] >= pa[ax] else -1.0
+                        pb[ax] += sign * float(min(overlap[ax], max_push_m))
+                        b["position"] = [float(v) for v in pb]
+                    moved = True
+        if not moved:
+            break
+
+    # 子件跟随父件的分离位移(父被推走,坐在其上的物件同步平移)
+    by_id = {e["id"]: e for e in ents}
+    for e in ents:
+        pid = e["custom_meta"].get("support_id")
+        if pid and pid in by_id:
+            f = by_id[pid]
+            fp = np.array(f["position"]); fh = rdims(f) / 2.0
+            pos = np.array(e["position"], float)
+            pos[1] = fp[1] + fh[1] + rdims(e)[1] / 2.0
+            e["position"] = [float(v) for v in pos]
+
+    for e in ents:
+        e.pop("_obs_pos", None)
+        e.pop("_obs_half", None)
+
+
+def snap_small_to_support(small_ents, furn_ents, preset_extents=None,
+                          max_drop_m=1.5):
+    """小物体的父子支撑吸附:书/花瓶应落在家具顶面上,不许悬空。
+
+    小物体保持的是原始观测位置,但其支撑家具在摆放解算中可能被吸附/推移,
+    书就悬在原地(父子关系断裂)。此后处理对每个小物体:
+      · 若其在某件家具**渲染盒内部**(书柜隔层里的书)→ 不动(在柜内合法);
+      · 否则在其 (x,z) 正下方找最近的家具顶面(渲染尺寸、解算后位置),
+        1.5m 内有 → 底面吸附上去;找不到 → 保持观测位(可能在地板/窗台上)。
+    """
+    preset_extents = preset_extents or {}
+
+    def rdims(e):
+        mc = e["custom_meta"].get("mc_item")
+        ext = preset_extents.get(mc)
+        return np.array(ext if ext else e["bbox_dims"], float)
+
+    for s in small_ents:
+        pos = np.array(s["position"], float)
+        half_h = float(s["bbox_dims"][1]) / 2.0
+        bottom = pos[1] - half_h
+        best_top = None
+        inside = False
+        for f in furn_ents:
+            fp = np.array(f["position"], float)
+            fh = rdims(f) / 2.0
+            if abs(pos[0] - fp[0]) > fh[0] or abs(pos[2] - fp[2]) > fh[2]:
+                continue
+            top = fp[1] + fh[1]
+            bot = fp[1] - fh[1]
+            if bot - 0.02 < pos[1] < top + 0.02:
+                inside = True                      # 柜体/隔层内:合法,不动
+                break
+            if top <= bottom + 0.05 and (best_top is None or top > best_top):
+                best_top = top
+        if inside:
+            continue
+        if best_top is not None and bottom - best_top <= max_drop_m:
+            pos[1] = best_top + half_h
+            s["position"] = [float(v) for v in pos]
+            s["custom_meta"]["support"] = "furniture"

@@ -78,12 +78,15 @@ def main(out_dir: str = "out/apt_full.vxw") -> None:
         rgb=obsmap.rgb, rgb_count=obsmap.rgb_count, preset_extents=presets,
         coarse_vs=0.2,
     )
-    # 小物体点级实例(--small-objects 流式产物)并入同一份 entities.json
+    # 小物体点级实例(--small-objects 流式产物)并入,先做父子支撑吸附:
+    # 支撑家具被解算挪动后,书要跟着落在新的家具顶面上,不许悬空。
+    from m3_adapter.vlayer.objects import snap_small_to_support
     sp = pathlib.Path(src).parent / "small_objects.json"
     if sp.exists():
         small = json.loads(sp.read_text())["entities"]
+        snap_small_to_support(small, entities, preset_extents=presets)
         entities.extend(small)
-        print("[full] + %d small-object instances (point-level channel)" % len(small))
+        print("[full] + %d small-object instances (support-snapped)" % len(small))
     ent_path = pathlib.Path(out_dir) / "entities.json"
     ent_path.write_text(json.dumps(
         {"format_version": "1.0", "entities": entities}, indent=2))
