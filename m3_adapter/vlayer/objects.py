@@ -81,7 +81,7 @@ def _merge_overlapping_components(comps, gap_vox=2):
     return merged
 
 
-def _mount_of(cells, occ, sem, reach=4):
+def _mount_of(cells, occ, sem, reach=8):
     """判断簇的安装方式(数据驱动,任何场景通用):
       ceiling — 上方 reach 格内贴结构、下方悬空(吸顶灯)
       wall    — 下方悬空、侧向 reach 格内贴墙(挂画/挂屏)
@@ -108,7 +108,8 @@ def _mount_of(cells, occ, sem, reach=4):
 
 def extract_object_models(occ, sem, vmin, voxel_size, label_names,
                           mc_item_map, min_voxels=30, labels=OBJECT_LABELS,
-                          rgb=None, rgb_count=None):
+                          rgb=None, rgb_count=None, preset_extents=None,
+                          coarse_vs=None):
     """每个物体标签的每个 26-连通分量 → 一个模型实体 dict。
 
     - 所有物体标签都产实体:有 mc_item 预制模型的用模型,没有的保留 OBB 盒
@@ -158,7 +159,8 @@ def extract_object_models(occ, sem, vmin, voxel_size, label_names,
                 "voxel_count": int(len(cells)),
                 "custom_meta": meta,
             })
-    resolve_placements(ents, occ, sem, vmin, voxel_size)
+    resolve_placements(ents, occ, sem, vmin, voxel_size,
+                       preset_extents=preset_extents, coarse_vs=coarse_vs)
     return ents
 
 
@@ -167,38 +169,82 @@ def extract_object_models(occ, sem, vmin, voxel_size, label_names,
 # 模型实例必须满足:不插进地板、不嵌进墙、互不重叠。数据驱动,任何场景通用。
 # ---------------------------------------------------------------------------
 
-def resolve_placements(ents, occ, sem, vmin, vs, max_push_m=0.5):
-    struct = occ & np.isin(sem, STRUCTURE_LABELS)
+# 允许嵌套的类对(小件塞进大件下方是物理合法的):椅子 ↔ 桌/家具/床。
+# AABB 是实体体积的粗代理——椅子塞进桌下时两 AABB 重叠但实体并不相交。
+_NESTABLE = {frozenset({5, 16}), frozenset({5, 9}), frozenset({5, 14})}
+
+
+def resolve_placements(ents, occ, sem, vmin, vs, max_push_m=0.5,
+                       preset_extents=None, coarse_vs=None):
+    """摆放解算必须用**渲染尺寸**(mc 预制模型的 overall_extents),而不是观测
+    bbox——模型比观测簇高/宽时,按观测尺寸吸附会让模型下半截沉进地板(错位的
+    主根源)。preset_extents: mc_item id -> [dx,dy,dz](米)。
+
+    吸附细节(都是踩过的坑):
+    · 参考高度用**中心 y**(不是渲染 bottom):模型初始已沉入地板时,自 bottom
+      向下的搜索窗整个落在地板之下(未知),吸附不触发;
+    · 只认 floor(3)/ceiling(4) 标签:外扩搜索里的墙顶会把"地板面"抬到墙高;
+    · coarse_vs 给定时地板顶向上取整到粗格面:显示层画的是粗块,吸到观测细面
+      会差最多一格(脚陷进粗砖里)。"""
+    floor = occ & (sem == STRUCTURE_LABELS[0])
+    ceil_ = occ & (sem == STRUCTURE_LABELS[1])
     wall = occ & (sem == STRUCTURE_LABELS[2])
     nx, ny, nz = occ.shape
     vmin = np.asarray(vmin, dtype=np.int64)
+    preset_extents = preset_extents or {}
+
+    def rdims(e):
+        mc = e["custom_meta"].get("mc_item")
+        ext = preset_extents.get(mc)
+        return np.array(ext if ext else e["bbox_dims"], float)
 
     def to_cell(p_m):
         return np.floor(np.asarray(p_m) / vs).astype(np.int64) - vmin
 
+    margin = int(round(0.4 / vs))       # 横向外扩:自身遮挡地板时用周边地板
+    depth = int(round(3.0 / vs))        # 纵深:整层楼高内找支撑面
+
     for e in ents:
         pos = np.array(e["position"], float)
-        dims = np.array(e["bbox_dims"], float)
-        half = dims / 2.0
+        half = rdims(e) / 2.0
         if e["custom_meta"].get("mount") == "wall":
             continue          # 壁挂物本来就贴墙:不吸附、不推离
-        # --- 1. 落地 / 贴顶吸附 ---
+        # --- 1. 落地 / 贴顶吸附(渲染尺寸 + 外扩搜索,自中心 y 出发) ---
         c = to_cell(pos)
-        x0, x1 = max(0, int(c[0] - half[0] / vs)), min(nx, int(c[0] + half[0] / vs) + 1)
-        z0, z1 = max(0, int(c[2] - half[2] / vs)), min(nz, int(c[2] + half[2] / vs) + 1)
+        x0, x1 = max(0, int(c[0] - half[0] / vs) - margin), min(nx, int(c[0] + half[0] / vs) + 1 + margin)
+        z0, z1 = max(0, int(c[2] - half[2] / vs) - margin), min(nz, int(c[2] + half[2] / vs) + 1 + margin)
+        cy = int(np.clip(c[1], 0, ny - 1))
         if e["custom_meta"].get("mount") == "ceiling":
-            top = int(min(ny - 1, c[1] + half[1] / vs))
-            col = struct[x0:x1, top:min(ny, top + int(1.0 / vs)), z0:z1]
+            col = ceil_[x0:x1, cy:min(ny, cy + depth), z0:z1]
             ys = np.where(col.any(axis=(0, 2)))[0]
             if ys.size:
-                ceil_under = (top + int(ys[0]) + vmin[1]) * vs      # 天花板下沿
+                ceil_under = (cy + int(ys[0]) + vmin[1]) * vs       # 天花板下沿
+                if coarse_vs:
+                    ceil_under = np.floor(ceil_under / coarse_vs) * coarse_vs
                 pos[1] = ceil_under - half[1]
         else:
-            bot = int(max(0, c[1] - half[1] / vs))
-            col = struct[x0:x1, max(0, bot - int(1.0 / vs)):bot + 1, z0:z1]
+            lo = max(0, cy - depth)
+            col = floor[x0:x1, lo:cy + 2, z0:z1]
             ys = np.where(col.any(axis=(0, 2)))[0]
+            floor_top = None
             if ys.size:
-                floor_top = (max(0, bot - int(1.0 / vs)) + int(ys[-1]) + 1 + vmin[1]) * vs
+                floor_top = (lo + int(ys[-1]) + 1 + vmin[1]) * vs
+            else:
+                # 地板标签缺失(地毯误标/未观测):回退到 footprint 内逐列
+                # "中心以下最高占据" 的中位数——对墙/邻物污染鲁棒。
+                sub = occ[x0:x1, :cy + 1, z0:z1]
+                tops = []
+                yy = np.arange(sub.shape[1])
+                for ix in range(sub.shape[0]):
+                    for iz in range(sub.shape[2]):
+                        colm = yy[sub[ix, :, iz]]
+                        if colm.size:
+                            tops.append(int(colm[-1]))
+                if tops:
+                    floor_top = (int(np.median(tops)) + 1 + vmin[1]) * vs
+            if floor_top is not None:
+                if coarse_vs:                        # 对齐显示层粗块顶面
+                    floor_top = np.ceil(floor_top / coarse_vs - 1e-9) * coarse_vs
                 pos[1] = floor_top + half[1]
         # --- 2. 推出墙体(沿重叠更薄的水平轴,推向远离墙心一侧) ---
         c = to_cell(pos)
@@ -219,14 +265,17 @@ def resolve_placements(ents, occ, sem, vmin, vs, max_push_m=0.5):
             pos[0 if axis == 0 else 2] += push
         e["position"] = [float(pos[0]), float(pos[1]), float(pos[2])]
 
-    # --- 3. 两两分离(大的不动,小的沿最小平移轴推开) ---
+    # --- 3. 两两分离(渲染尺寸;大的不动,小的沿最小平移轴推开)。
+    #     可嵌套类对(椅↔桌等)跳过:塞进桌下的椅子是合法摆放,不是互嵌。 ---
     order = sorted(range(len(ents)),
-                   key=lambda i: -float(np.prod(ents[i]["bbox_dims"])))
+                   key=lambda i: -float(np.prod(rdims(ents[i]))))
     for ii, i in enumerate(order):
         for j in order[ii + 1:]:
             a, b = ents[i], ents[j]
+            if frozenset({int(a["label"]), int(b["label"])}) in _NESTABLE:
+                continue
             pa = np.array(a["position"]); pb = np.array(b["position"])
-            ha = np.array(a["bbox_dims"]) / 2; hb = np.array(b["bbox_dims"]) / 2
+            ha = rdims(a) / 2; hb = rdims(b) / 2
             overlap = (ha + hb) - np.abs(pa - pb)
             if (overlap > 1e-6).all():
                 ax = int(np.argmin(overlap[[0, 2]])) * 2   # 只沿水平轴推

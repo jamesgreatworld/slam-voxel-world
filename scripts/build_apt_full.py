@@ -67,11 +67,16 @@ def main(out_dir: str = "out/apt_full.vxw") -> None:
     from m3_adapter.vlayer.objects import OBJECT_LABELS
     sp = pathlib.Path(src).parent / "small_objects.json"
     voxel_labels = OBJECT_LABELS - SMALL_OBJECT_LABELS if sp.exists() else OBJECT_LABELS
+    # 预制模型的渲染尺寸表:摆放解算必须按渲染尺寸吸附/分离,否则模型沉地/互嵌
+    presets = {p["id"]: p.get("overall_extents_m")
+               for p in json.loads(pathlib.Path(
+                   "m3_adapter/mc_item_pack/_compiled.json").read_text())["presets"]}
     entities = extract_object_models(
         obsmap.occupancy_mask(), obsmap.semantic_grid(),
         np.asarray(obsmap.vmin), obsmap.voxel_size,
         label_names, SUPER_ID_TO_MC_ITEM, min_voxels=30, labels=voxel_labels,
-        rgb=obsmap.rgb, rgb_count=obsmap.rgb_count,
+        rgb=obsmap.rgb, rgb_count=obsmap.rgb_count, preset_extents=presets,
+        coarse_vs=0.2,
     )
     # 小物体点级实例(--small-objects 流式产物)并入同一份 entities.json
     sp = pathlib.Path(src).parent / "small_objects.json"
