@@ -24,7 +24,7 @@ from m3_adapter.uhumans2_to_vxw import (
     _resolve_hydra_paths, load_label_space, build_palette,
 )
 from m3_adapter.vlayer.export import obsmap_to_completed_vxw
-from m3_adapter.vlayer.objects import decouple_objects, extract_object_models
+from m3_adapter.vlayer.objects import extract_object_models
 from m3_adapter.vlayer.generators.slab import SlabFill
 from m3_adapter.vlayer.generators.wall import WallFill
 from m3_adapter.vlayer.generators.stairs import StairsFill
@@ -47,36 +47,42 @@ def main(out_dir: str = "out/apt_full.vxw") -> None:
     label_names = load_label_space(yaml_path)
     palette = build_palette(label_names)
 
-    # ③ 解耦:物体体素退出结构
-    struct, obj_cells = decouple_objects(obsmap)
-    print("[full] decoupled %d object voxels from structure" % int(obj_cells.sum()))
-
-    # ①+② 结构补全(平面先验)+ 概率规整(形状先验×观测后验)+ 开口挖空 + 粗化去噪
-    generators = [SlabFill(3, "floor"), SlabFill(4, "ceiling"),
-                  WallFill(), StairsFill(), OcclusionFill(),
-                  PlaneRegularize(), OpeningCarve()]
-    obsmap_to_completed_vxw(
-        struct, out_dir, generators=generators, palette=palette,
-        coarsen_to_m=0.2, clean=True, clean_close_radius=0, clean_keep_largest=True,
-    )
-
-    # ④ 模型替换:物体 → mc_item / OBB 实体(带观测色、安装面、bbox 解算)。
-    # 小物体类(books/vase)由点级通道实例化,体素通道只解耦、不再出实体,
-    # 否则同一只花瓶会两个通道各一份(双重表示)。
+    # ④ 先做模型抽取(带尺寸门控):只有"模型尺度"的簇被实例化并记入
+    # consumed 掩码;超尺寸簇(爬墙藤蔓/屋顶植被)不实例化——留在结构体素里。
+    # 小物体类(books/vase)由点级通道实例化,体素通道只解耦、不再出实体。
     from m3_adapter.small_objects import SMALL_OBJECT_LABELS
-    from m3_adapter.vlayer.objects import OBJECT_LABELS
+    from m3_adapter.vlayer.objects import (
+        OBJECT_LABELS, DYNAMIC_LABELS, decouple_cells)
     sp = pathlib.Path(src).parent / "small_objects.json"
     voxel_labels = OBJECT_LABELS - SMALL_OBJECT_LABELS if sp.exists() else OBJECT_LABELS
     # 预制模型的渲染尺寸表:摆放解算必须按渲染尺寸吸附/分离,否则模型沉地/互嵌
     presets = {p["id"]: p.get("overall_extents_m")
                for p in json.loads(pathlib.Path(
                    "m3_adapter/mc_item_pack/_compiled.json").read_text())["presets"]}
+    occ0 = obsmap.occupancy_mask()
+    sem0 = obsmap.semantic_grid()
+    consumed = np.zeros(occ0.shape, dtype=bool)
     entities = extract_object_models(
-        obsmap.occupancy_mask(), obsmap.semantic_grid(),
-        np.asarray(obsmap.vmin), obsmap.voxel_size,
+        occ0, sem0, np.asarray(obsmap.vmin), obsmap.voxel_size,
         label_names, SUPER_ID_TO_MC_ITEM, min_voxels=30, labels=voxel_labels,
         rgb=obsmap.rgb, rgb_count=obsmap.rgb_count, preset_extents=presets,
-        coarse_vs=0.2,
+        coarse_vs=0.2, consumed_out=consumed,
+    )
+
+    # ③ 解耦:被实例化的簇 + 点级小物体类 + 动态物(human)退出结构
+    mask = consumed | (occ0 & np.isin(sem0, list(SMALL_OBJECT_LABELS | DYNAMIC_LABELS)))
+    struct, _ = decouple_cells(obsmap, mask)
+    print("[full] decoupled %d voxels (instantiated %d entities; oversized clusters stay voxels)"
+          % (int(mask.sum()), len(entities)))
+
+    # ①+② 结构补全(平面先验)+ 概率规整 + 开口挖空 + 粗化去噪 + 剔无语义砖
+    generators = [SlabFill(3, "floor"), SlabFill(4, "ceiling"),
+                  WallFill(), StairsFill(), OcclusionFill(),
+                  PlaneRegularize(), OpeningCarve()]
+    obsmap_to_completed_vxw(
+        struct, out_dir, generators=generators, palette=palette,
+        coarsen_to_m=0.2, clean=True, clean_close_radius=0, clean_keep_largest=True,
+        drop_unlabelled=True,
     )
     # 小物体点级实例(--small-objects 流式产物)并入,先做父子支撑吸附:
     # 支撑家具被解算挪动后,书要跟着落在新的家具顶面上,不许悬空。

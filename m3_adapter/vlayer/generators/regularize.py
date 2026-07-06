@@ -17,6 +17,8 @@ from scipy import ndimage
 from m3_adapter.vlayer.generators.wall import WALL_LABEL, projection_peaks
 from m3_adapter.vlayer.overlay import VoxelDelta
 
+_CC8_R = ndimage.generate_binary_structure(2, 2)
+
 
 class PlaneRegularize:
     stage = 2
@@ -25,14 +27,23 @@ class PlaneRegularize:
 
     def __init__(self, k_per_cell: float = 0.3, prior_cap: float = 3.0,
                  trim_fill: float = 0.3, min_wall_cells: int = 20,
-                 min_height: int = 4, min_run: int = 4):
+                 min_height: int = 4, min_run: int = 4,
+                 support_m: float = 0.4, keep_comp_m2: float = 0.09):
         # k_per_cell:每格距离贡献的先验 log-odds。与 ObsMap 阈值(occ_thr=0.85,
         # l_max=3.5)配合:补格需 d ≥ occ_thr/k ≈ 3 格深;删强观测格需
         # k·d > l_max - occ_thr ≈ 2.65 → d ≥ 9 格远。
+        #
+        # 真实的墙不是满矩形(L 形/半墙/变高),形状先验必须以观测为条件:
+        # support_m —— 补格必须离观测墙 ≤ support_m(真窟窿四周都是墙,够近;
+        #   大片未观测区的"深处"离证据远,不许脑补成悬空大平面);
+        # keep_comp_m2 —— 矩形外只删小于该面积的孤立碎块(大连通域 = 墙翼,
+        #   是真实结构,先验再强也不许删)。
         self.k = float(k_per_cell); self.cap = float(prior_cap)
         self.trim_fill = float(trim_fill)
         self.min_wall_cells = int(min_wall_cells)
         self.min_height = int(min_height); self.min_run = int(min_run)
+        self.support_m = float(support_m)
+        self.keep_comp_m2 = float(keep_comp_m2)
         self.id = "plane_regularize"; self.generator = "plane_regularize"
 
     def run(self, ctx) -> list:
@@ -42,6 +53,9 @@ class PlaneRegularize:
         wall = occ & (sem == WALL_LABEL)
         if not wall.any():
             return []
+        vs = obs.voxel_size
+        self._support_cells = max(1, int(round(self.support_m / vs)))
+        self._keep_comp_cells = max(4, int(round(self.keep_comp_m2 / (vs * vs))))
         deltas = []
         emitted = set()
         xcount = wall.sum(axis=(1, 2)); zcount = wall.sum(axis=(0, 1))
@@ -70,10 +84,20 @@ class PlaneRegularize:
         prior = np.where(inside, np.minimum(d_in * self.k, self.cap),
                          -np.minimum(d_out * self.k, self.cap))
         post = lo2d + prior
-        # 补:矩形内、未占据、非 observed-free、后验过占据阈
-        fill = inside & ~wall2d & ~free2d & (post >= 0.85)
-        # 删:矩形外的墙格、后验跌破占据阈
+        # 补:矩形内、未占据、非 observed-free、后验过阈,且**离观测墙足够近**
+        # (真窟窿四周都是墙;大片未观测区不许脑补成悬空大平面)
+        near_wall = ndimage.distance_transform_edt(~wall2d) <= self._support_cells
+        fill = inside & ~wall2d & ~free2d & (post >= 0.85) & near_wall
+        # 删:矩形外的墙格、后验跌破阈,且属于**孤立小碎块**(大连通域 = 真实
+        # 墙翼/L 形延伸,先验再强也不许删)
         cut = ~inside & wall2d & (post < 0.85)
+        if cut.any():
+            comp, n = ndimage.label(wall2d & ~inside, structure=_CC8_R)
+            sizes = np.bincount(comp.ravel())
+            big = np.zeros(n + 1, dtype=bool)
+            big[np.flatnonzero(sizes >= self._keep_comp_cells)] = True
+            big[0] = False
+            cut &= ~big[comp]
         for v, h in np.argwhere(fill):
             idx = to_xyz(int(v), int(h))
             if idx not in emitted:

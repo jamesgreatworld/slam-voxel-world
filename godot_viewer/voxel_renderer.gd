@@ -35,6 +35,11 @@ var _collision_body: StaticBody3D = null
 var _collision_shape: CollisionShape3D = null
 # World-voxel cube MultiMesh: one BoxMesh instance per occupied world voxel.
 var _world_mmi: MultiMeshInstance3D = null
+# Wall voxels (material 19) live in their own MMI so x-ray can retarget them.
+var _wall_mmi: MultiMeshInstance3D = null
+var _wall_xray: bool = false
+var _last_render_vsize: float = 0.1
+const WALL_MATERIAL_ID := 19
 # Placed-voxel scratch bucket: a MMI with pre-allocated slots so add_voxel
 # can show a cube immediately, before the next _process tick rebuilds _world_mmi.
 var _placed_mmi: MultiMeshInstance3D = null
@@ -167,69 +172,110 @@ func _rebuild_world_mmi() -> void:
     # Reset placed-count since all placed voxels are now in the world MMI.
     _placed_count = 0
 
+    # Partition voxels: walls (material 19) get their OWN MultiMesh so wall
+    # x-ray (glass material) can be toggled without touching the opaque world.
+    var wall_vis: Array = []
+    var rest_vis: Array = []
+    for vi in all_vis:
+        if int(_voxel_to_instance[vi][2]) == WALL_MATERIAL_ID:
+            wall_vis.append(vi)
+        else:
+            rest_vis.append(vi)
+
+    _last_render_vsize = _voxel_size * lod
+
+    # Replace or create the world + wall MMI nodes.
+    if _world_mmi != null and is_instance_valid(_world_mmi):
+        _world_mmi.queue_free()
+        _world_mmi = null
+    if _wall_mmi != null and is_instance_valid(_wall_mmi):
+        _wall_mmi.queue_free()
+        _wall_mmi = null
+    _world_mmi = _make_cube_mmi(rest_vis, lod, "WorldVoxelCubes")
+    _wall_mmi = _make_cube_mmi(wall_vis, lod, "WallVoxelCubes")
+    _apply_wall_material()
+    print("[renderer] cube MMI: %d + %d wall cells (lod=%d from %d voxels)"
+          % [rest_vis.size(), wall_vis.size(), lod, n])
+
+
+func _make_cube_mmi(vis: Array, lod: int, node_name: String) -> MultiMeshInstance3D:
     var mm := MultiMesh.new()
     mm.transform_format = MultiMesh.TRANSFORM_3D
     mm.use_colors = true
-
     if lod == 1:
-        # --- lod=1: one cube per voxel (original behaviour) ---
         var box := BoxMesh.new()
         box.size = Vector3.ONE * _voxel_size
         mm.mesh = box
-        mm.instance_count = n
-        for i in n:
-            var vi: Vector3i = all_vis[i]
+        mm.instance_count = vis.size()
+        for i in vis.size():
+            var vi: Vector3i = vis[i]
             var mid: int = int(_voxel_to_instance[vi][2])
-            var world_pos := Vector3(vi) * _voxel_size
-            mm.set_instance_transform(i, Transform3D(Basis.IDENTITY, world_pos))
+            mm.set_instance_transform(i, Transform3D(Basis.IDENTITY, Vector3(vi) * _voxel_size))
             mm.set_instance_color(i, _color_for_material(mid))
-        print("[renderer] cube MMI: %d cells (lod=%d from %d voxels)" % [n, lod, n])
     else:
-        # --- lod>1: group into coarse cells ---
-        # coarse_key = floor(vi / lod) for each component.
         var coarse_cells: Dictionary = {}  # Vector3i -> Color (first member's color)
-        for vi in all_vis:
+        for vi in vis:
             var ck := Vector3i(
                 int(floori(float(vi.x) / lod)),
                 int(floori(float(vi.y) / lod)),
                 int(floori(float(vi.z) / lod))
             )
             if not coarse_cells.has(ck):
-                var mid: int = int(_voxel_to_instance[vi][2])
-                coarse_cells[ck] = _color_for_material(mid)
-
-        var cell_count: int = coarse_cells.size()
+                coarse_cells[ck] = _color_for_material(int(_voxel_to_instance[vi][2]))
         var coarse_vsize: float = _voxel_size * lod
         var half := coarse_vsize * 0.5
         var box := BoxMesh.new()
         box.size = Vector3.ONE * coarse_vsize
         mm.mesh = box
-        mm.instance_count = cell_count
+        mm.instance_count = coarse_cells.size()
         var keys: Array = coarse_cells.keys()
-        for i in cell_count:
+        for i in keys.size():
             var ck: Vector3i = keys[i]
-            # Cell centre: coarse_key * coarse_vsize + half_cell offset
-            var world_pos := Vector3(ck) * coarse_vsize + Vector3(half, half, half)
-            mm.set_instance_transform(i, Transform3D(Basis.IDENTITY, world_pos))
+            mm.set_instance_transform(i, Transform3D(
+                Basis.IDENTITY, Vector3(ck) * coarse_vsize + Vector3(half, half, half)))
             mm.set_instance_color(i, coarse_cells[ck])
-        print("[renderer] cube MMI: %d cells (lod=%d from %d voxels)" % [cell_count, lod, n])
-
-    # Determine vsize for the shader parameter
-    var render_vsize_shader: float = _voxel_size * lod
-
-    # Replace or create the world MMI node.
-    if _world_mmi != null and is_instance_valid(_world_mmi):
-        _world_mmi.queue_free()
-        _world_mmi = null
     var mmi := MultiMeshInstance3D.new()
-    mmi.name = "WorldVoxelCubes"
-    var mat := ShaderMaterial.new()
-    mat.shader = VOXEL_GRID_SHADER
-    mat.set_shader_parameter("vsize", render_vsize_shader)
-    mmi.material_override = mat
+    mmi.name = node_name
+    mmi.material_override = _world_shader_material()
     mmi.multimesh = mm
     add_child(mmi)
-    _world_mmi = mmi
+    return mmi
+
+
+func _world_shader_material() -> ShaderMaterial:
+    var mat := ShaderMaterial.new()
+    mat.shader = VOXEL_GRID_SHADER
+    mat.set_shader_parameter("vsize", _last_render_vsize)
+    return mat
+
+
+# --- Wall x-ray: swap the wall MMI to a glass material so room interiors are
+# visible while the wall's presence (faint pane) is still readable. Collision
+# is untouched — walls stay physically solid. ---
+
+func toggle_wall_xray() -> bool:
+    set_wall_xray(not _wall_xray)
+    return _wall_xray
+
+
+func set_wall_xray(on: bool) -> void:
+    _wall_xray = on
+    _apply_wall_material()
+
+
+func _apply_wall_material() -> void:
+    if _wall_mmi == null or not is_instance_valid(_wall_mmi):
+        return
+    if _wall_xray:
+        var g := StandardMaterial3D.new()
+        g.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+        g.albedo_color = Color(0.55, 0.8, 0.92, 0.16)   # 淡青玻璃
+        g.metallic = 0.2
+        g.roughness = 0.05
+        g.cull_mode = BaseMaterial3D.CULL_BACK
+        _wall_mmi.material_override = g
+    else:
+        _wall_mmi.material_override = _world_shader_material()
 
 
 func _color_for_material(material_id: int) -> Color:

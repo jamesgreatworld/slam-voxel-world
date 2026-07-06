@@ -35,6 +35,16 @@ def _stable_uuid(seed: str) -> str:
     return "%s-%s-%s-%s-%s" % (h[:8], h[8:12], h[12:16], h[16:20], h[20:32])
 
 
+def decouple_cells(obsmap, mask):
+    """按显式格掩码解耦(被实例化的簇 + 点级小物体类 + 动态物):
+    掩码格 log-odds 归零(unknown)、语义清零;原 obsmap 不变。
+    与 decouple_objects 的区别:未被实例化的超尺寸簇(藤蔓)留在结构里。"""
+    struct = copy.deepcopy(obsmap)
+    struct.logodds[mask] = 0.0
+    struct.sem_label[mask] = 0
+    return struct, mask
+
+
 def decouple_objects(obsmap, labels=None):
     """返回 (structure_obsmap, obj_cells):物体格从结构中剔除后的 ObsMap 深拷贝
     与被剔除格的布尔掩码。剔除 = log-odds 归零(unknown,既非占据也非 free),
@@ -109,7 +119,7 @@ def _mount_of(cells, occ, sem, reach=8):
 def extract_object_models(occ, sem, vmin, voxel_size, label_names,
                           mc_item_map, min_voxels=30, labels=OBJECT_LABELS,
                           rgb=None, rgb_count=None, preset_extents=None,
-                          coarse_vs=None):
+                          coarse_vs=None, max_extent_m=2.6, consumed_out=None):
     """每个物体标签的每个 26-连通分量 → 一个模型实体 dict。
 
     - 所有物体标签都产实体:有 mc_item 预制模型的用模型,没有的保留 OBB 盒
@@ -137,6 +147,12 @@ def extract_object_models(occ, sem, vmin, voxel_size, label_names,
             cmax = wc.max(axis=0).astype(float)
             centre = (cmin + cmax + 1.0) * 0.5 * voxel_size
             dims = (cmax - cmin + 1.0) * voxel_size
+            # 模型尺度门控:超尺寸簇(爬满整面墙的藤蔓、屋顶植被)不是"一件
+            # 物体",不实例化成盒——留在结构体素里(绿叶砖比灰巨盒诚实得多)。
+            if float(dims.max()) > max_extent_m:
+                continue
+            if consumed_out is not None:
+                consumed_out[cells[:, 0], cells[:, 1], cells[:, 2]] = True
             meta = {}
             mount = _mount_of(cells, occ, sem)
             if mount != "floor":

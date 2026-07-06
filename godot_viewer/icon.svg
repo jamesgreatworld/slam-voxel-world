@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- vxw_viewer icon: isometric voxel block (grass-brick), Minecraft-flavoured -->
+  <rect width="128" height="128" rx="20" fill="#232830"/>
+  <!-- top face -->
+  <polygon points="64,22 106,43 64,64 22,43" fill="#6abe4f"/>
+  <polygon points="64,26 100,44 64,62 28,44" fill="#7dd45f"/>
+  <!-- left face -->
+  <polygon points="22,43 64,64 64,106 22,85" fill="#8a5a34"/>
+  <!-- right face -->
+  <polygon points="106,43 64,64 64,106 106,85" fill="#6e4426"/>
+  <!-- block grid lines -->
+  <polyline points="43,32.5 85,53.5" stroke="#5aa843" stroke-width="2" fill="none"/>
+  <polyline points="85,32.5 43,53.5" stroke="#5aa843" stroke-width="2" fill="none"/>
+  <line x1="43" y1="74.5" x2="43" y2="95.5" stroke="#734b2b" stroke-width="2"/>
+  <line x1="22" y1="64" x2="64" y2="85" stroke="#734b2b" stroke-width="2"/>
+  <line x1="85" y1="74.5" x2="85" y2="95.5" stroke="#5c391f" stroke-width="2"/>
+  <line x1="106" y1="64" x2="64" y2="85" stroke="#5c391f" stroke-width="2"/>
+</svg>

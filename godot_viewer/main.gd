@@ -79,6 +79,12 @@ func _ready() -> void:
     cam_ctl.init_controller(main_cam, stereo_rig, logger)
     ents.toolbar.fly_pressed.connect(cam_ctl.toggle_fly)
     cam_ctl.fly_changed.connect(ents.toolbar.set_fly_state)
+    ents.toolbar.xray_pressed.connect(func():
+        ents.toolbar.set_xray_state(renderer.toggle_wall_xray())
+    )
+    if "--xray" in OS.get_cmdline_user_args():
+        renderer.set_wall_xray(true)
+        ents.toolbar.set_xray_state(true)
     hud_ctl.init_controller(status_label, mode_label, pose_label, ws.world, stereo_rig, cam_ctl, logger)
     snap_ctl.init_controller(stereo_rig, cam_ctl, logger)
     snap_ctl.configure_from_cli(cfg.raw_args)

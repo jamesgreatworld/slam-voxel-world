@@ -57,6 +57,30 @@ def test_far_outside_stray_removed_near_kept():
     assert not occ[20, 37, 5], "远离矩形的飘砖(先验强)应删除"
 
 
+def test_unobserved_expanse_not_hallucinated():
+    """只有四条边观测到、中间大片未知的"矩形":深处离证据远,不许脑补成大平面。"""
+    m = ObsMap.new((60, 40, 12), vmin=(0, 0, 0), voxel_size=0.05)
+    for sl in [np.s_[2:58, 0:2, 5], np.s_[2:58, 34:36, 5],
+               np.s_[2:4, 0:36, 5], np.s_[56:58, 0:36, 5]]:   # 只有边框
+        m.logodds[sl] = m.l_max
+        m.sem_label[sl] = WALL
+    ov = _run(m, PlaneRegularize())
+    occ, _ = compose_structure(m, ov)
+    assert not occ[30, 18, 5], "远离观测证据的深处不许被先验填充"
+    assert not occ[20:40, 10:26, 5].any(), "大片未观测区不许脑补成悬空平面"
+
+
+def test_l_shaped_wall_wing_not_cut():
+    """L 形墙:主矩形外的大墙翼是真实结构,先验再强也不许删。"""
+    m = _wall(nx=80)
+    # 主墙 x[2,38);墙翼:x[38,78) 只有下半 y[0,10)(L 形)
+    m.logodds[38:78, 0:10, 5] = m.l_max
+    m.sem_label[38:78, 0:10, 5] = WALL
+    ov = _run(m, PlaneRegularize())
+    occ, _ = compose_structure(m, ov)
+    assert occ[60, 5, 5], "L 形墙翼(大连通域)必须保留"
+
+
 def test_no_wall_no_deltas():
     m = ObsMap.new((10, 10, 10), vmin=(0, 0, 0), voxel_size=0.05)
     ctx = LcContext(obsmap=m, overlay=Overlay())

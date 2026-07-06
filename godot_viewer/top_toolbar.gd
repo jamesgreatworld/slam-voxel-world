@@ -11,11 +11,13 @@ signal items_pressed
 signal snapshot_pressed
 signal menu_pressed
 signal fly_pressed
+signal xray_pressed
 
 const _BTN_MIN_SIZE := Vector2(96, 32)
 
 var _row: HBoxContainer = null
 var _fly_btn: Button = null
+var _xray_btn: Button = null
 
 
 func _ready() -> void:
@@ -24,7 +26,9 @@ func _ready() -> void:
 
     var anchor := Control.new()
     anchor.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-    anchor.set_offset(SIDE_LEFT, -440)
+    # 5 buttons × 96px + margins — keep the panel wide enough or the last
+    # button silently overflows past the screen edge.
+    anchor.set_offset(SIDE_LEFT, -560)
     anchor.set_offset(SIDE_TOP, 8)
     anchor.set_offset(SIDE_RIGHT, -8)
     anchor.set_offset(SIDE_BOTTOM, 48)
@@ -61,11 +65,24 @@ func _ready() -> void:
     _fly_btn.toggled.connect(func(_p): emit_signal("fly_pressed"))
     _row.add_child(_fly_btn)
 
+    _xray_btn = Button.new()
+    _xray_btn.toggle_mode = true
+    _xray_btn.text = "X-Ray"
+    _xray_btn.custom_minimum_size = _BTN_MIN_SIZE
+    _xray_btn.toggled.connect(func(_p): emit_signal("xray_pressed"))
+    _row.add_child(_xray_btn)
+
 
 func set_fly_state(on: bool) -> void:
     if _fly_btn != null:
         _fly_btn.set_pressed_no_signal(on)
         _fly_btn.text = "Fly: ON  [V]" if on else "Fly  [V]"
+
+
+func set_xray_state(on: bool) -> void:
+    if _xray_btn != null:
+        _xray_btn.set_pressed_no_signal(on)
+        _xray_btn.text = "X-Ray: ON" if on else "X-Ray"
 
 
 func _add_button(text: String, on_pressed: Callable) -> void:

@@ -14,7 +14,7 @@ from m3_adapter.vlayer.pipeline import run_pipeline
 def obsmap_to_completed_vxw(obsmap, out_path, generators,
                             palette=None, chunk_extent=32, coarsen_to_m=None,
                             clean=False, clean_min_component=2, clean_close_radius=1,
-                            clean_keep_largest=False):
+                            clean_keep_largest=False, drop_unlabelled=False):
     """运行补全流水线并导出 .vxw。返回产生的 Overlay。
 
     palette 为 None 时按非语义模式导出(全部 material_id=1);
@@ -32,6 +32,11 @@ def obsmap_to_completed_vxw(obsmap, out_path, generators,
     if coarsen_to_m:
         factor = max(1, round(coarsen_to_m / vs))
         occ, sem, vmin, vs = downsample_occupancy(occ, sem, vmin, vs, factor)
+    if drop_unlabelled:
+        # 无语义(label 0)的占据格 = 只有几何、无类别归属的观测残渣,
+        # 在语义着色的世界里是无名灰砖——按需剔除(在 clean 之前,
+        # 剔除产生的新碎块交给 keep_largest 收拾)。
+        occ = occ & (sem != 0)
     if clean:
         from m3_adapter.vlayer.coarsen import clean_coarse
         occ, sem = clean_coarse(occ, sem, clean_min_component, clean_close_radius,
