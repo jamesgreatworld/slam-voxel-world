@@ -31,6 +31,7 @@ from m3_adapter.vlayer.generators.stairs import StairsFill
 from m3_adapter.vlayer.generators.occlusion import OcclusionFill
 from m3_adapter.vlayer.generators.opening import OpeningCarve
 from m3_adapter.vlayer.generators.regularize import PlaneRegularize
+from m3_adapter.vlayer.generators.roof import RoofCap
 
 # 带 RGB 通道的重建图优先(--rgb 全量重跑的产物);没有时退回旧几何图。
 OBSMAP_RGB = "out/uhumans2_apt_rgb.vxw/obsmap.npz"
@@ -78,11 +79,11 @@ def main(out_dir: str = "out/apt_full.vxw") -> None:
     # ①+② 结构补全(平面先验)+ 概率规整 + 开口挖空 + 粗化去噪 + 剔无语义砖
     generators = [SlabFill(3, "floor"), SlabFill(4, "ceiling"),
                   WallFill(), StairsFill(), OcclusionFill(),
-                  PlaneRegularize(), OpeningCarve()]
+                  PlaneRegularize(), RoofCap(), OpeningCarve()]
     obsmap_to_completed_vxw(
         struct, out_dir, generators=generators, palette=palette,
         coarsen_to_m=0.2, clean=True, clean_close_radius=0, clean_keep_largest=True,
-        drop_unlabelled=True,
+        drop_unlabelled=True, clean_dangle_iters=2,
     )
     # 小物体点级实例(--small-objects 流式产物)并入,先做父子支撑吸附:
     # 支撑家具被解算挪动后,书要跟着落在新的家具顶面上,不许悬空。

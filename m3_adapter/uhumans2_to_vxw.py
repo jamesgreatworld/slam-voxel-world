@@ -90,7 +90,7 @@ _SUPER_COLOURS: dict[int, tuple[int, int, int]] = {
     12: (180, 60, 110),  # painting
     13: (40, 160, 60),   # plant (13 — same family)
     14: (60, 90, 220),   # bed
-    15: (130, 130, 200), # stairs
+    15: (150, 128, 96),  # stairs — 石木色(蓝紫在暖色室内像玻璃,不真实)
     16: (130, 80, 30),   # table
     17: (40, 200, 230),  # screens
     18: (90, 110, 60),   # trashcan

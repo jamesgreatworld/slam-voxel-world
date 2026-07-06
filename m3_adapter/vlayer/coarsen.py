@@ -44,6 +44,23 @@ def downsample_occupancy(occ, sem, vmin, vs, factor, min_fine: int = 1):
 from scipy import ndimage
 
 
+def prune_dangles(occ, sem, iterations: int = 2):
+    """去"钟乳石":迭代移除 6-邻域支撑 ≤1 的占据格(单格尖刺/一格细链的
+    末端)。keep_largest 只能删断开的孤块;贴着主体的细悬突要靠这个。
+    不修改输入。"""
+    occ = occ.copy(); sem = sem.copy()
+    k = np.zeros((3, 3, 3))
+    k[1, 1, 0] = k[1, 1, 2] = k[1, 0, 1] = k[1, 2, 1] = k[0, 1, 1] = k[2, 1, 1] = 1
+    for _ in range(int(iterations)):
+        nb = ndimage.convolve(occ.astype(np.uint8), k, mode="constant")
+        dangle = occ & (nb <= 1)
+        if not dangle.any():
+            break
+        occ &= ~dangle
+        sem = np.where(dangle, np.uint8(0), sem)
+    return occ, sem
+
+
 def clean_coarse(occ, sem, min_component: int = 2, close_radius: int = 1,
                  keep_largest: bool = False):
     """Denoise/heal a coarse occupancy: morphological-close small holes (new cells
