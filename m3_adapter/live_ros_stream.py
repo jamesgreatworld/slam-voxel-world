@@ -1,0 +1,230 @@
+# -*- coding: utf-8 -*-
+"""live_ros_stream.py — Hydra 式在线语义建图节点(订阅话题 + TF,不读 GT)。
+
+订阅(与 Hydra 输入同构):
+  --rgb-topic       sensor_msgs/Image  rgb8      (可选,--use-rgb 开启颜色通道)
+  --depth-topic     sensor_msgs/Image  32FC1     米制深度
+  --seg-topic       sensor_msgs/Image  mono8     原始语义标签 id(TartanGround 风格)
+  --camera-info     sensor_msgs/CameraInfo       内参
+  TF: <map-frame> ← <cam-frame>                  位姿唯一来源 = SLAM(lightning)的 TF 树
+
+流程: ApproximateTimeSync(depth,seg[,rgb]) → tf2 查位姿 → unproject → ObsMap.integrate_frame
+      → 周期快照 obsmap.npz + live.vxw(语义体素),Ctrl-C 时写最终产物。
+
+跨平台注意: rclpy/tf2 仅在 main() 内导入 —— Windows(pixi, 无 ROS)下 import 本模块不报错,
+其余依赖(numpy/yaml + m3_adapter 内部模块)与既有代码一致,不用 cv2/cv_bridge。
+
+用法(VM, 配合 ros2 bag play house_sim_bag + lightning + base→cam 静态 TF):
+  python3 m3_adapter/live_ros_stream.py out/house_live.vxw \
+      --labelspace ~/Semantic_map_ws/src/Hydra/config/label_spaces/tartanground_house_label_space.yaml \
+      --use-rgb --pixel-stride 4 --snapshot-every 50
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_PROJECT_ROOT))
+
+from m3_adapter.common import ros_zup_to_vxw_yup  # noqa: E402
+from m3_adapter.obsmap import ObsMap  # noqa: E402
+from m3_adapter.obsmap_export import occupancy_to_vxw  # noqa: E402
+from m3_adapter.uhumans2_to_vxw import (  # noqa: E402
+    load_label_space, build_palette, unproject_depth,
+)
+
+
+def _quat_to_R(x, y, z, w):
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+    ])
+
+
+def build_argparser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("out_vxw", type=Path, help="输出 .vxw 目录(obsmap.npz 同目录)")
+    ap.add_argument("--labelspace", type=Path, required=True,
+                    help="Hydra 风格 label_space yaml(label id → name)")
+    ap.add_argument("--rgb-topic", default="/tg/rgb")
+    ap.add_argument("--depth-topic", default="/tg/depth")
+    ap.add_argument("--seg-topic", default="/tg/semantic")
+    ap.add_argument("--camera-info-topic", default="/tg/camera_info")
+    ap.add_argument("--map-frame", default="map")
+    ap.add_argument("--cam-frame", default="cam_optical")
+    ap.add_argument("--use-rgb", action="store_true", help="启用逐点 RGB 颜色通道")
+    ap.add_argument("--pixel-stride", type=int, default=4)
+    ap.add_argument("--depth-min", type=float, default=0.2)
+    ap.add_argument("--depth-max", type=float, default=15.0)
+    ap.add_argument("--free-margin", type=float, default=0.10)
+    ap.add_argument("--voxel-size", type=float, default=0.10)
+    ap.add_argument("--bounds", default="-20,-12,-3,8,10,5",
+                    help="地图边界(ROS z-up, 米): x0,y0,z0,x1,y1,z1")
+    ap.add_argument("--snapshot-every", type=int, default=50,
+                    help="每 N 帧写一次 obsmap.npz + live .vxw 快照")
+    ap.add_argument("--tf-timeout", type=float, default=0.15,
+                    help="单帧 TF 查询等待秒数(查不到丢帧)")
+    return ap
+
+
+def main() -> None:
+    args = build_argparser().parse_args()
+
+    # ---- ROS 依赖懒加载(Windows 兼容:无 ROS 环境 import 本文件不炸) ----
+    import rclpy
+    from rclpy.node import Node
+    from rclpy.duration import Duration
+    from rclpy.time import Time
+    from sensor_msgs.msg import Image, CameraInfo
+    from message_filters import Subscriber, ApproximateTimeSynchronizer
+    from tf2_ros import Buffer, TransformListener
+
+    label_names = load_label_space(args.labelspace)
+    palette = build_palette(label_names)
+
+    x0, y0, z0, x1, y1, z1 = [float(v) for v in args.bounds.split(",")]
+    vs = args.voxel_size
+    # ROS z-up → vxw Y-up: (x, z, y)
+    vmin = np.array([int(np.floor(x0 / vs)), int(np.floor(z0 / vs)),
+                     int(np.floor(y0 / vs))], dtype=np.int64)
+    shape = (int(np.ceil((x1 - x0) / vs)), int(np.ceil((z1 - z0) / vs)),
+             int(np.ceil((y1 - y0) / vs)))
+    obs = ObsMap.new(shape, vmin, vs)
+
+    out_dir = args.out_vxw
+    out_dir.mkdir(parents=True, exist_ok=True)
+    obsmap_path = out_dir / "obsmap.npz"
+
+    class LiveMapper(Node):
+        def __init__(self):
+            super().__init__("mc_live_mapper")
+            self.K = None
+            self.n_int = 0
+            self.n_skip_tf = 0
+            self.pending = []
+            self.tfbuf = Buffer(cache_time=Duration(seconds=60.0))
+            self.tflis = TransformListener(self.tfbuf, self)
+            self.create_subscription(CameraInfo, args.camera_info_topic,
+                                     self._on_info, 10)
+            subs = [Subscriber(self, Image, args.depth_topic),
+                    Subscriber(self, Image, args.seg_topic)]
+            if args.use_rgb:
+                subs.append(Subscriber(self, Image, args.rgb_topic))
+            self.sync = ApproximateTimeSynchronizer(subs, queue_size=30, slop=0.02)
+            self.sync.registerCallback(self._on_frame)
+            self.get_logger().info(
+                "listening: depth=%s seg=%s rgb=%s tf=%s<-%s" %
+                (args.depth_topic, args.seg_topic,
+                 args.rgb_topic if args.use_rgb else "-",
+                 args.map_frame, args.cam_frame))
+
+        def _on_info(self, m):
+            if self.K is None:
+                self.K = (m.k[0], m.k[4], m.k[2], m.k[5])
+                self.get_logger().info("camera_info: fx=%.1f fy=%.1f cx=%.1f cy=%.1f"
+                                       % self.K)
+
+        def _on_frame(self, dm, sm, rm=None):
+            # 不能在回调里阻塞等 TF(单线程 executor 收不到 /tf 会死锁):
+            # 帧先入待处理队列,每次回调把"TF 已就绪"的帧消化掉。
+            # 年龄用"入队后经过的墙钟秒数"(time.monotonic)——不能拿节点时钟减
+            # 消息戳:bag 回放时两者时钟域不同(录制时刻 vs 当前),会误杀全部帧。
+            self.pending.append((time.monotonic(), dm, sm, rm))
+            still = []
+            for t_in, dm2, sm2, rm2 in self.pending:
+                st = Time.from_msg(dm2.header.stamp)
+                try:
+                    tr = self.tfbuf.lookup_transform(
+                        args.map_frame, dm2.header.frame_id or args.cam_frame, st)
+                except Exception as e:
+                    if time.monotonic() - t_in < 5.0:
+                        still.append((t_in, dm2, sm2, rm2))   # TF 未到,下轮再试
+                    else:
+                        self.n_skip_tf += 1
+                        if self.n_skip_tf % 25 == 1:
+                            self.get_logger().warn(
+                                "丢帧 %d (TF 5s 未就绪): %s" % (self.n_skip_tf, str(e)[:150]))
+                    continue
+                self._integrate(dm2, sm2, rm2, tr)
+            self.pending = still[-50:]
+
+        def _integrate(self, dm, sm, rm, tr):
+            if self.K is None:
+                return
+            if dm.encoding != "32FC1" or sm.encoding != "mono8":
+                self.get_logger().error("encoding mismatch: depth=%s seg=%s"
+                                        % (dm.encoding, sm.encoding))
+                return
+
+            q = tr.transform.rotation
+            t = tr.transform.translation
+            T = np.eye(4)
+            T[:3, :3] = _quat_to_R(q.x, q.y, q.z, q.w)
+            T[:3, 3] = (t.x, t.y, t.z)
+
+            s = args.pixel_stride
+            depth = np.frombuffer(dm.data, np.float32).reshape(dm.height, dm.width)[::s, ::s]
+            seg = np.frombuffer(sm.data, np.uint8).reshape(sm.height, sm.width)[::s, ::s]
+            rgb = None
+            if rm is not None:
+                rgb = np.frombuffer(rm.data, np.uint8).reshape(rm.height, rm.width, 3)[::s, ::s]
+
+            fx, fy, cx, cy = self.K
+            xyz_cam, valid = unproject_depth(depth, fx / s, fy / s, cx / s, cy / s,
+                                             z_min=args.depth_min, z_max=args.depth_max)
+            if xyz_cam.shape[0] == 0:
+                return
+            labels = seg[valid].astype(np.uint8)
+            colors = rgb[valid] if rgb is not None else None
+
+            xyz_h = np.concatenate([xyz_cam, np.ones((len(xyz_cam), 1), np.float32)], 1)
+            xyz_world = np.einsum("nj,kj->nk", xyz_h, T.astype(np.float32))[:, :3]
+            P_m = ros_zup_to_vxw_yup(xyz_world.astype(np.float64))
+            O_m = ros_zup_to_vxw_yup(T[:3, 3:4].T)[0]
+
+            obs.integrate_frame(O_m, P_m, point_labels=labels,
+                                free_margin_m=args.free_margin,
+                                point_colors=colors)
+            self.n_int += 1
+            if self.n_int % 25 == 0:
+                self.get_logger().info(
+                    "integrated=%d skipped_tf=%d occ=%d free=%d"
+                    % (self.n_int, self.n_skip_tf,
+                       int(obs.occupancy_mask().sum()),
+                       int(obs.observed_free_mask().sum())))
+            if self.n_int % args.snapshot_every == 0:
+                self._snapshot()
+
+        def _snapshot(self):
+            t0 = time.time()
+            obs.save(obsmap_path)
+            occupancy_to_vxw(obs.occupancy_mask(), obs.vmin, obs.voxel_size,
+                             out_dir, semantic_grid=obs.semantic_grid(),
+                             palette=palette)
+            self.get_logger().info("snapshot -> %s (%.2fs)" % (out_dir, time.time() - t0))
+
+    rclpy.init()
+    node = LiveMapper()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.get_logger().info("final export: integrated=%d skipped_tf=%d"
+                               % (node.n_int, node.n_skip_tf))
+        obs.save(obsmap_path)
+        occupancy_to_vxw(obs.occupancy_mask(), obs.vmin, obs.voxel_size,
+                         out_dir, semantic_grid=obs.semantic_grid(),
+                         palette=palette)
+        node.destroy_node()
+
+
+if __name__ == "__main__":
+    main()
