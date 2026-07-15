@@ -71,7 +71,19 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="每 N 帧写一次 obsmap.npz + live .vxw 快照")
     ap.add_argument("--tf-timeout", type=float, default=0.15,
                     help="单帧 TF 查询等待秒数(查不到丢帧)")
+    ap.add_argument("--publish-voxels", action="store_true",
+                    help="增量发布语义着色体素 CUBE_LIST 到 /semantic_voxels")
+    ap.add_argument("--publish-every", type=int, default=10,
+                    help="每积分 N 帧发布一次体素可视化")
     return ap
+
+
+def _label_color(label_id: int):
+    """确定性鲜明配色: 黄金角遍历色相, 同一类跨节点/跨次运行同色。"""
+    import colorsys
+    h = (label_id * 137.508) % 360.0 / 360.0
+    r, g, b = colorsys.hsv_to_rgb(h, 0.75, 0.95)
+    return (r, g, b)
 
 
 def main() -> None:
@@ -82,9 +94,13 @@ def main() -> None:
     from rclpy.node import Node
     from rclpy.duration import Duration
     from rclpy.time import Time
+    from rclpy.qos import QoSProfile, DurabilityPolicy
     from sensor_msgs.msg import Image, CameraInfo
     from message_filters import Subscriber, ApproximateTimeSynchronizer
     from tf2_ros import Buffer, TransformListener
+    from visualization_msgs.msg import Marker, MarkerArray
+    from geometry_msgs.msg import Point
+    from std_msgs.msg import ColorRGBA
 
     label_names = load_label_space(args.labelspace)
     palette = build_palette(label_names)
@@ -119,6 +135,11 @@ def main() -> None:
                 subs.append(Subscriber(self, Image, args.rgb_topic))
             self.sync = ApproximateTimeSynchronizer(subs, queue_size=30, slop=0.02)
             self.sync.registerCallback(self._on_frame)
+            self.vox_pub = None
+            if args.publish_voxels:
+                self.vox_pub = self.create_publisher(
+                    MarkerArray, '/semantic_voxels',
+                    QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
             self.get_logger().info(
                 "listening: depth=%s seg=%s rgb=%s tf=%s<-%s" %
                 (args.depth_topic, args.seg_topic,
@@ -199,8 +220,42 @@ def main() -> None:
                     % (self.n_int, self.n_skip_tf,
                        int(obs.occupancy_mask().sum()),
                        int(obs.observed_free_mask().sum())))
+            if self.vox_pub is not None and self.n_int % args.publish_every == 0:
+                self._publish_voxels()
             if self.n_int % args.snapshot_every == 0:
                 self._snapshot()
+
+        def _publish_voxels(self):
+            occ = obs.occupancy_mask()
+            sem = obs.semantic_grid()
+            idx = np.argwhere(occ)
+            if len(idx) == 0:
+                return
+            # vxw(Godot) -> ROS: ros_zup_to_vxw_yup 的逆 = (x,y,z)_ros = (-Z, -X, Y)_vxw
+            pv = (idx + obs.vmin + 0.5) * obs.voxel_size
+            pw = np.stack([-pv[:, 2], -pv[:, 0], pv[:, 1]], 1)
+            labels = sem[occ]
+            m = Marker()
+            m.header.frame_id = args.map_frame
+            m.ns = 'semantic_voxels'
+            m.id = 0
+            m.type = Marker.CUBE_LIST
+            m.action = Marker.ADD
+            m.pose.orientation.w = 1.0
+            m.scale.x = m.scale.y = m.scale.z = obs.voxel_size * 0.95
+            m.points = [Point(x=float(p[0]), y=float(p[1]), z=float(p[2])) for p in pw]
+            lut = {}
+            cols = []
+            for l in labels:
+                l = int(l)
+                if l not in lut:
+                    r, g, b = _label_color(l)
+                    lut[l] = ColorRGBA(r=r, g=g, b=b, a=1.0)
+                cols.append(lut[l])
+            m.colors = cols
+            arr = MarkerArray()
+            arr.markers = [m]
+            self.vox_pub.publish(arr)
 
         def _snapshot(self):
             t0 = time.time()
