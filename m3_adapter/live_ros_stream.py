@@ -78,6 +78,13 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--see-through", action="store_true",
                     help="结构类体素(墙/顶/地/门窗)半透明, 可透墙看物体")
     ap.add_argument("--structure-alpha", type=float, default=0.28)
+    ap.add_argument("--lidar-carve", action="store_true",
+                    help="订阅 360° 雷达做自由空间雕刻(几何/free 由雷达负责, "
+                         "语义由相机负责) — 房间/GVD 覆盖不再受相机 FOV 限制")
+    ap.add_argument("--lidar-topic", default="/livox/lidar")
+    ap.add_argument("--lidar-frame", default="lidar")
+    ap.add_argument("--lidar-decimate", type=int, default=8)
+    ap.add_argument("--lidar-max-range", type=float, default=20.0)
     return ap
 
 
@@ -86,7 +93,10 @@ STRUCTURE_KEYWORDS = ("wall", "ceiling", "floor", "stair", "door", "window",
 
 
 def _label_color(label_id: int):
-    """确定性鲜明配色: 黄金角遍历色相, 同一类跨节点/跨次运行同色。"""
+    """确定性鲜明配色: 黄金角遍历色相, 同一类跨节点/跨次运行同色。
+    label 0 = 占据但语义未知(如仅被雷达看到) -> 中性灰。"""
+    if label_id == 0:
+        return (0.55, 0.55, 0.55)
     import colorsys
     h = (label_id * 137.508) % 360.0 / 360.0
     r, g, b = colorsys.hsv_to_rgb(h, 0.75, 0.95)
@@ -149,6 +159,45 @@ def main() -> None:
                 self.vox_pub = self.create_publisher(
                     MarkerArray, '/semantic_voxels',
                     QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+            self.pending_lidar = []
+            self.n_lidar = 0
+            if args.lidar_carve:
+                from livox_ros_driver2.msg import CustomMsg
+                self.create_subscription(CustomMsg, args.lidar_topic,
+                                         self._on_lidar, 10)
+
+        def _on_lidar(self, m):
+            d = args.lidar_decimate
+            pts = np.array([(p.x, p.y, p.z) for p in m.points[::d]],
+                           dtype=np.float64)
+            if len(pts) == 0:
+                return
+            r = np.linalg.norm(pts, axis=1)
+            pts = pts[(r > 0.3) & (r < args.lidar_max_range)]
+            self.pending_lidar.append((time.monotonic(), m.header, pts))
+            still = []
+            for t_in, hdr, pw in self.pending_lidar:
+                try:
+                    tr = self.tfbuf.lookup_transform(
+                        args.map_frame, hdr.frame_id or args.lidar_frame,
+                        Time.from_msg(hdr.stamp))
+                except Exception:
+                    if time.monotonic() - t_in < 5.0:
+                        still.append((t_in, hdr, pw))
+                    continue
+                q = tr.transform.rotation
+                t = tr.transform.translation
+                T = np.eye(4)
+                T[:3, :3] = _quat_to_R(q.x, q.y, q.z, q.w)
+                T[:3, 3] = (t.x, t.y, t.z)
+                ph = np.concatenate([pw, np.ones((len(pw), 1))], 1)
+                pw_w = np.einsum("nj,kj->nk", ph, T)[:, :3]
+                P_m = ros_zup_to_vxw_yup(pw_w)
+                O_m = ros_zup_to_vxw_yup(T[:3, 3:4].T)[0]
+                # 纯几何: 只做占据/free 雕刻, 不带语义(语义由相机通道负责)
+                obs.integrate_frame(O_m, P_m, free_margin_m=args.free_margin)
+                self.n_lidar += 1
+            self.pending_lidar = still[-30:]
             self.get_logger().info(
                 "listening: depth=%s seg=%s rgb=%s tf=%s<-%s" %
                 (args.depth_topic, args.seg_topic,
@@ -225,8 +274,8 @@ def main() -> None:
             self.n_int += 1
             if self.n_int % 25 == 0:
                 self.get_logger().info(
-                    "integrated=%d skipped_tf=%d occ=%d free=%d"
-                    % (self.n_int, self.n_skip_tf,
+                    "integrated=%d lidar=%d skipped_tf=%d occ=%d free=%d"
+                    % (self.n_int, self.n_lidar, self.n_skip_tf,
                        int(obs.occupancy_mask().sum()),
                        int(obs.observed_free_mask().sum())))
             if self.vox_pub is not None and self.n_int % args.publish_every == 0:
@@ -259,8 +308,12 @@ def main() -> None:
                 l = int(l)
                 if l not in lut:
                     r, g, b = _label_color(l)
-                    a = (args.structure_alpha if (args.see_through and l in structure_ids)
-                         else 1.0)
+                    if l == 0:                      # 无语义(雷达补的灰体素): 近乎透明
+                        a = 0.04
+                    elif args.see_through and l in structure_ids:
+                        a = args.structure_alpha
+                    else:
+                        a = 1.0
                     lut[l] = ColorRGBA(r=r, g=g, b=b, a=a)
                 cols.append(lut[l])
             m.colors = cols
