@@ -75,7 +75,14 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="增量发布语义着色体素 CUBE_LIST 到 /semantic_voxels")
     ap.add_argument("--publish-every", type=int, default=10,
                     help="每积分 N 帧发布一次体素可视化")
+    ap.add_argument("--see-through", action="store_true",
+                    help="结构类体素(墙/顶/地/门窗)半透明, 可透墙看物体")
+    ap.add_argument("--structure-alpha", type=float, default=0.28)
     return ap
+
+
+STRUCTURE_KEYWORDS = ("wall", "ceiling", "floor", "stair", "door", "window",
+                      "blind", "roof", "beam")
 
 
 def _label_color(label_id: int):
@@ -104,6 +111,8 @@ def main() -> None:
 
     label_names = load_label_space(args.labelspace)
     palette = build_palette(label_names)
+    structure_ids = {i for i, n in label_names.items()
+                     if any(k in n.lower() for k in STRUCTURE_KEYWORDS)}
 
     x0, y0, z0, x1, y1, z1 = [float(v) for v in args.bounds.split(",")]
     vs = args.voxel_size
@@ -250,7 +259,9 @@ def main() -> None:
                 l = int(l)
                 if l not in lut:
                     r, g, b = _label_color(l)
-                    lut[l] = ColorRGBA(r=r, g=g, b=b, a=1.0)
+                    a = (args.structure_alpha if (args.see_through and l in structure_ids)
+                         else 1.0)
+                    lut[l] = ColorRGBA(r=r, g=g, b=b, a=a)
                 cols.append(lut[l])
             m.colors = cols
             arr = MarkerArray()
