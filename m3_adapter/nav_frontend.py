@@ -221,15 +221,15 @@ def main():
                     np.add.at(lv.surf.reshape(-1), flat, 1)
                     lv.z_sum += float(sz[m].sum()); lv.z_cnt += int(m.sum())
 
-            # --- 障碍点: 落在某层 [地面+eps, 地面+robot_h] 高度带 -> 该层挡路 ---
+            # --- 障碍点(墙/家具): 落在某层 [地面+eps, 地面+robot_h] 高度带 -> 该层挡路。
+            # 用该层代表地面高度 rep_z(而非逐格 floor_z): 墙格收不到地面点, 逐格高度
+            # 永远未知会漏掉墙 -> 墙必须能挡路。每点只归属高度最贴合的那一层。 ---
             obm = (~is_surf) & (~is_inval)
             if obm.any() and levels:
                 ox, oy, oz = gx[obm], gy[obm], pz[obm]
                 flat = oy * nx + ox
                 for lv in levels:
-                    fz = lv.floor_z.reshape(-1)[flat]
-                    known = np.isfinite(fz)
-                    band = known & (oz > fz + args.ground_eps) & (oz < fz + args.robot_height)
+                    band = (oz > lv.rep_z + args.ground_eps) & (oz < lv.rep_z + args.robot_height)
                     if band.any():
                         np.add.at(lv.obst.reshape(-1), flat[band], 1)
 
@@ -265,6 +265,7 @@ def main():
             summary = []
             for k, lv in enumerate(levels):
                 walkable, cost = occupancy_from_counts(lv.surf, lv.obst)
+                blocked = lv.obst >= 2
                 # 每层独立代价图, origin.z=该层真实高度 -> rviz 按高度堆叠
                 topic = "/nav/surface_map_L%d" % k
                 if topic not in self.map_pubs:
@@ -272,7 +273,8 @@ def main():
                 self.map_pubs[topic].publish(self._make_grid(cost, lv.rep_z))
 
                 regions, edges, _lab = cluster_surface_places(
-                    walkable, (x0, y0), res, min_cells=15, door_bridge_m=args.door_bridge)
+                    walkable, (x0, y0), res, min_cells=15,
+                    door_bridge_m=args.door_bridge, blocked=blocked)
                 # roadmap 连通分量(该层)
                 adj = {r["id"]: set() for r in regions}
                 for i, j in edges:

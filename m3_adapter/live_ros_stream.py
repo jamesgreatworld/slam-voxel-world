@@ -308,8 +308,8 @@ def main() -> None:
                 l = int(l)
                 if l not in lut:
                     r, g, b = _label_color(l)
-                    if l == 0:                      # 无语义(雷达补的灰体素): 近乎透明
-                        a = 0.04
+                    if l == 0:                      # 无语义(雷达补的灰体素): 淡但可见
+                        a = 0.15
                     elif args.see_through and l in structure_ids:
                         a = args.structure_alpha
                     else:

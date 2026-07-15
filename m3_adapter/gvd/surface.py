@@ -14,7 +14,7 @@ from scipy import ndimage
 
 
 def cluster_surface_places(walkable, origin_xy, res, min_cells=15,
-                           door_bridge_m=0.9):
+                           door_bridge_m=0.9, blocked=None):
     """把 2D 可通行 bool 栅格聚成 surface place 区域。
 
     Args:
@@ -22,16 +22,17 @@ def cluster_surface_places(walkable, origin_xy, res, min_cells=15,
         origin_xy: (x0, y0) 栅格 (0,0) 格中心对应的世界米坐标原点(左下角)。
         res: 米/格。
         min_cells: 小于此格数的区域丢弃(碎片)。
-        door_bridge_m: 判定两区域"经门相邻"的膨胀桥接距离(米)。
+        door_bridge_m: 判定两区域"经门相邻"的桥接距离(米)。
+        blocked: (ny,nx) bool 障碍格(墙/家具)。给定时, 相邻边只能穿"非障碍"
+                 空间(门), 不能穿墙 —— 用测地膨胀实现。
 
     Returns:
         regions: list[dict] {id, centroid_xy, area_m2, cell_count, label_id}
-        edges:   list[(i, j)] 区域间可通行相邻(门口)
+        edges:   list[(i, j)] 区域间经门相邻(绝不穿墙)
         label_img: (ny,nx) int, 每格的区域 label(0=非可走/被丢弃)
     """
     lab, n = ndimage.label(walkable, structure=np.ones((3, 3), np.uint8))
     regions = []
-    keep_label = {}
     for r in range(1, n + 1):
         cells = np.argwhere(lab == r)          # (k, 2) = (row=y, col=x)
         if len(cells) < min_cells:
@@ -40,24 +41,26 @@ def cluster_surface_places(walkable, origin_xy, res, min_cells=15,
         cen = cells.mean(0)                    # (cy, cx) in cells
         wx = origin_xy[0] + (cen[1] + 0.5) * res
         wy = origin_xy[1] + (cen[0] + 0.5) * res
-        rid = len(regions)
-        keep_label[r] = rid
         regions.append({
-            "id": rid,
+            "id": len(regions),
             "centroid_xy": (float(wx), float(wy)),
             "area_m2": float(len(cells) * res * res),
             "cell_count": int(len(cells)),
             "label_id": int(r),
         })
 
-    # 门口相邻: 膨胀每个区域 ~半个门宽, 若与另一区域相交 => 经门连通
+    # 门口相邻: 从每个区域"测地膨胀"(只在非障碍格里扩散), 若够到另一区域 => 经门连通。
+    # 遇墙(blocked)即止 -> 隔墙的两区域不会连出穿墙边; 只有真门(free 缝)能连通。
     edges = []
-    bridge = max(int(round(door_bridge_m / res / 2)), 1)
+    bridge = max(int(round(door_bridge_m / res)), 1)
+    passable = np.ones(walkable.shape, bool) if blocked is None else ~blocked
     struct = ndimage.generate_binary_structure(2, 2)
     masks = {}
     for reg in regions:
         m = (lab == reg["label_id"])
-        masks[reg["id"]] = ndimage.binary_dilation(m, struct, iterations=bridge)
+        for _ in range(bridge):
+            m = ndimage.binary_dilation(m, struct) & passable
+        masks[reg["id"]] = m
     ids = [reg["id"] for reg in regions]
     for ai in range(len(ids)):
         for bi in range(ai + 1, len(ids)):
