@@ -1,6 +1,8 @@
 // objects.cpp — 见 objects.hpp。移植自 m3_adapter/gvd/objects.py + clustering.py。
 #include "semantic_map_core/objects.hpp"
 
+#include "semantic_map_core/features.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -91,7 +93,7 @@ std::vector<ObjectNode> extract_objects(const uint8_t* occ, const uint8_t* sem, 
                                         int ny, int nz,
                                         const std::set<int>& structure_labels,
                                         int min_voxels, double cluster_eps, int min_samples,
-                                        int merge_gap) {
+                                        int merge_gap, double voxel_size) {
   std::vector<ObjectNode> out;
   // 出现的非结构、非 0 类(升序)
   std::set<int> present;
@@ -160,6 +162,10 @@ std::vector<ObjectNode> extract_objects(const uint8_t* occ, const uint8_t* sem, 
       o.ci = (int)std::lrint(cx / m); o.cj = (int)std::lrint(cy / m); o.ck = (int)std::lrint(cz / m);
       o.label = L; o.voxel_count = (int)merged.size();
       for (int a = 0; a < 3; ++a) { o.bmin[a] = lo[a]; o.bmax[a] = hi[a]; }
+      std::vector<std::array<int, 3>> mc;  // 合并簇 cells -> shape 特征(与 Python extract_features 同)
+      mc.reserve(merged.size());
+      for (int pi : merged) mc.push_back(cells[pi]);
+      o.feat = shape_feature(mc, voxel_size);
       out.push_back(o);
     }
   }

@@ -16,6 +16,7 @@ add_library(semantic_map_core STATIC
   src/objects.cpp
   src/scene_graph.cpp
   src/surface.cpp
+  src/features.cpp
 )
 target_include_directories(semantic_map_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -45,3 +46,6 @@ target_link_libraries(bench_scene semantic_map_core)
 
 add_executable(bench_surface bench/bench_surface.cpp)
 target_link_libraries(bench_surface semantic_map_core)
+
+add_executable(bench_feat bench/bench_feat.cpp)
+target_link_libraries(bench_feat semantic_map_core)
