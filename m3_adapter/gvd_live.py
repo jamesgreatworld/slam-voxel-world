@@ -36,6 +36,18 @@ from m3_adapter.uhumans2_to_vxw import load_label_space  # noqa: E402
 ROOM_COLORS = [(255, 80, 80), (80, 255, 80), (80, 80, 255), (255, 255, 80),
                (255, 80, 255), (80, 255, 255), (255, 160, 40), (160, 80, 255),
                (40, 255, 160), (255, 120, 160), (160, 255, 80), (120, 160, 255)]
+# 结构类关键字(不算"物体": 墙/顶/地/建筑本体等大面积结构面) —— 按名字数据驱动,
+# 跨数据集通用, 取代 objects.py 里写死的 uHumans2 数字 id {3,4,19}。
+STRUCT_KW = ("wall", "ceiling", "roof", "building", "floor", "ground",
+             "carpet", "rug", "pillar", "column", "beam", "stair", "sky")
+
+
+def _structure_ids(label_names, extra=()):
+    ids = set(int(x) for x in extra)
+    for i, n in label_names.items():
+        if any(k in str(n).lower() for k in STRUCT_KW):
+            ids.add(int(i))
+    return ids
 BOX_EDGES = [(0, 1), (1, 3), (3, 2), (2, 0), (4, 5), (5, 7), (7, 6), (6, 4),
              (0, 4), (1, 5), (2, 6), (3, 7)]
 
@@ -47,7 +59,8 @@ def yup2ros(p):
 
 def compute_scene_graph(obs, label_names, min_component=30, d_min=0.20,
                         theta_sep=0.40, prune_m=0.3, merge_m=0.2, drop_small=5,
-                        door_clearance_m=0.85, min_room_nodes=8, obj_min_voxels=20):
+                        door_clearance_m=0.85, min_room_nodes=8, obj_min_voxels=20,
+                        exclude_extra=()):
     vs = obs.voxel_size
     occ_full = obs.occupancy_mask()
     if int(occ_full.sum()) < 500:
@@ -83,6 +96,7 @@ def compute_scene_graph(obs, label_names, min_component=30, d_min=0.20,
         nd.room = int(r)
     _merge_nested_rooms(g, vs)
     objs = extract_objects(occ, sem, vs, vmin, label_names=label_names,
+                           structure_labels=_structure_ids(label_names, exclude_extra),
                            min_voxels=obj_min_voxels)
     link_to_places(objs, g)
     surf = _surface_tiles(free, occ, vmin, vs)
