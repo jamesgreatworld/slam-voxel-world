@@ -6,6 +6,8 @@
 #include <set>
 #include <vector>
 
+#include "semantic_map_core/graph.hpp"
+
 namespace smc {
 
 struct ObjectNode {
@@ -14,7 +16,12 @@ struct ObjectNode {
   int voxel_count;
   int bmin[3], bmax[3];
   std::array<double, 3> feat;  // shape 描述子(features.py::extract_features["shape"])
+  int place_id = -1;   // 最近 place 节点(link_to_places 设置; -1=未设)
 };
+
+// 移植 objects.py::link_to_places: 每物体最近 place(质心米距离 argmin, tie 取首个)。就地写 place_id。
+void link_to_places(std::vector<ObjectNode>& objects, const SkelGraph& g,
+                    const long vmin[3], float voxel_size);
 
 // occ/sem: 行主序占据/语义栅格。structure_labels: 不算物体的结构类。
 // voxel_size: 用于 shape 特征(米)。

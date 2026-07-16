@@ -36,6 +36,7 @@ int main() {
   auto objs = extract_objects(occ.data(), sem.data(), nx, ny, nz, structure, 20, 3.0, 5, 2);
 
   const long vmin[3] = {0, 0, 0};
+  link_to_places(objs, g, vmin, vs);
   auto sg = build_scene_graph(g, room, objs, vmin, vs, "apartment", 0.20f);
 
   // dump 图+物体输入(供 Python 用真实类重建, 隔离对拍 build_scene_graph)
@@ -57,14 +58,15 @@ int main() {
 
   int nb = 0, nr = 0, np = 0, no = 0;
   FILE* f = std::fopen((O + "scene_cpp.txt").c_str(), "wb");
-  for (auto& n : sg) {
+  for (auto& id : sg.order) {
+    SceneNode& n = sg.nodes[id];
     if (n.layer == "building") ++nb; else if (n.layer == "room") ++nr;
     else if (n.layer == "place") ++np; else if (n.layer == "object") ++no;
     std::fprintf(f, "%s|%s|%s|%.6f|%.6f|%.6f|%d|%d\n", n.id.c_str(), n.layer.c_str(),
-                 n.parent.c_str(), n.x, n.y, n.z, n.obj_class, n.voxel_count);
+                 n.parent.c_str(), n.pos[0], n.pos[1], n.pos[2], n.obj_class, n.voxel_count);
   }
   std::fclose(f);
   std::printf("C++  scene nodes=%zu  building=%d rooms=%d places=%d objects=%d\n",
-              sg.size(), nb, nr, np, no);
+              sg.order.size(), nb, nr, np, no);
   return 0;
 }

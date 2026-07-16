@@ -78,6 +78,27 @@ std::vector<int> dbscan_labels_int3(const std::vector<std::array<int, 3>>& pts,
   return labels;
 }
 
+void link_to_places(std::vector<ObjectNode>& objects, const SkelGraph& g,
+                    const long vmin[3], float vs) {
+  const int P = (int)g.nodes.size();
+  if (objects.empty() || P == 0) return;
+  std::vector<std::array<double, 3>> ppos(P);
+  for (int i = 0; i < P; ++i)
+    ppos[i] = {(g.nodes[i].i + vmin[0]) * (double)vs, (g.nodes[i].j + vmin[1]) * (double)vs,
+               (g.nodes[i].k + vmin[2]) * (double)vs};
+  for (auto& o : objects) {
+    double ox = (o.ci + vmin[0]) * (double)vs, oy = (o.cj + vmin[1]) * (double)vs,
+           oz = (o.ck + vmin[2]) * (double)vs;
+    double best = 1e30; int bi = -1;
+    for (int i = 0; i < P; ++i) {
+      double d2 = (ppos[i][0]-ox)*(ppos[i][0]-ox) + (ppos[i][1]-oy)*(ppos[i][1]-oy)
+                + (ppos[i][2]-oz)*(ppos[i][2]-oz);
+      if (d2 < best) { best = d2; bi = i; }
+    }
+    o.place_id = bi;
+  }
+}
+
 namespace {
 int bbox_gap(const int* b1min, const int* b1max, const int* b2min, const int* b2max) {
   int gap = 0;
