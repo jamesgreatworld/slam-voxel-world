@@ -13,6 +13,7 @@ add_library(semantic_map_core STATIC
   src/field.cpp
   src/skeletonize.cpp
   src/graph.cpp
+  src/objects.cpp
 )
 target_include_directories(semantic_map_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -33,3 +34,6 @@ target_link_libraries(bench_skel semantic_map_core)
 
 add_executable(bench_rooms bench/bench_rooms.cpp)
 target_link_libraries(bench_rooms semantic_map_core)
+
+add_executable(bench_objects bench/bench_objects.cpp)
+target_link_libraries(bench_objects semantic_map_core)
