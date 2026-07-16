@@ -52,3 +52,6 @@ target_link_libraries(bench_feat semantic_map_core)
 
 add_executable(bench_online bench/bench_online.cpp)
 target_link_libraries(bench_online semantic_map_core)
+
+add_executable(bench_timing bench/bench_timing.cpp)
+target_link_libraries(bench_timing semantic_map_core)
