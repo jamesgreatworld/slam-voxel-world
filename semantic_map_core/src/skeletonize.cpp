@@ -3,6 +3,7 @@
 // padded(1 圈零)-> 双趟删简单点 -> crop。与 skimage.skeletonize 逐格一致为目标。
 #include "semantic_map_core/field.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <vector>
@@ -133,53 +134,90 @@ bool is_simple_point(const uint8_t* nb) {
 
 struct Coord { long p, r, c; };
 
-void find_candidates(const uint8_t* img, long PP, long RR, long CC, int cb,
-                     std::vector<Coord>& out) {
-  out.clear();
-  uint8_t nb[27];
+// 活跃集 = img==1 且 6-邻域内有 0 的点(任意方向 border 的超集), 升序=栅格序。
+// 完备性: 某点成为 cb-border 当且仅当对应 6-邻居为 0 —— 细化只删点(1->0),
+// 所以新 border 只会出现在被删点的 6-邻居上; 初始全扫 + 删点后补邻居即覆盖全部。
+void build_active(const uint8_t* img, long PP, long RR, long CC, std::vector<long>& act) {
+  act.clear();
   for (long p = 1; p < PP - 1; ++p)
     for (long r = 1; r < RR - 1; ++r)
       for (long c = 1; c < CC - 1; ++c) {
         long id = (p * RR + r) * CC + c;
         if (img[id] != 1) continue;
-        bool border =
-            (cb == 1 && img[(p * RR + r) * CC + (c - 1)] == 0) ||
-            (cb == 2 && img[(p * RR + r) * CC + (c + 1)] == 0) ||
-            (cb == 3 && img[(p * RR + (r + 1)) * CC + c] == 0) ||
-            (cb == 4 && img[(p * RR + (r - 1)) * CC + c] == 0) ||
-            (cb == 5 && img[((p + 1) * RR + r) * CC + c] == 0) ||
-            (cb == 6 && img[((p - 1) * RR + r) * CC + c] == 0);
-        if (!border) continue;
-        get_neighborhood(img, RR, CC, p, r, c, nb);
-        if (is_endpoint(nb) || !is_Euler_invariant(nb) || !is_simple_point(nb)) continue;
-        out.push_back({p, r, c});
+        if (img[id - 1] == 0 || img[id + 1] == 0 || img[id - CC] == 0 ||
+            img[id + CC] == 0 || img[id - RR * CC] == 0 || img[id + RR * CC] == 0)
+          act.push_back(id);
       }
+}
+
+// 只遍历活跃集(栅格序), 判定逻辑与全扫描逐位一致 -> 候选序列 bit-exact。
+void find_candidates_act(const uint8_t* img, long RR, long CC,
+                         const std::vector<long>& act, int cb, std::vector<Coord>& out) {
+  out.clear();
+  uint8_t nb[27];
+  const long S = RR * CC;
+  for (long id : act) {
+    if (img[id] != 1) continue;  // 已被删的懒跳过
+    bool border = (cb == 1 && img[id - 1] == 0) || (cb == 2 && img[id + 1] == 0) ||
+                  (cb == 3 && img[id + CC] == 0) || (cb == 4 && img[id - CC] == 0) ||
+                  (cb == 5 && img[id + S] == 0) || (cb == 6 && img[id - S] == 0);
+    if (!border) continue;
+    long p = id / S, rem = id % S, r = rem / CC, c = rem % CC;
+    get_neighborhood(img, RR, CC, p, r, c, nb);
+    if (is_endpoint(nb) || !is_Euler_invariant(nb) || !is_simple_point(nb)) continue;
+    out.push_back({p, r, c});
+  }
 }
 
 void compute_thin(uint8_t* img, long PP, long RR, long CC) {
   const int borders[6] = {4, 3, 2, 1, 5, 6};
   const int num_borders = (PP == 3) ? 4 : 6;
   std::vector<Coord> cand;
+  std::vector<long> act, added;
   uint8_t nb[27];
   int unchanged = 0;
   g_prof = ThinProfile{};
+  const long S = RR * CC;
+  build_active(img, PP, RR, CC, act);
   while (unchanged < num_borders) {
     unchanged = 0;
     for (int j = 0; j < num_borders; ++j) {
       int cb = borders[j];
       auto t0 = Clock::now();
-      find_candidates(img, PP, RR, CC, cb, cand);
+      find_candidates_act(img, RR, CC, act, cb, cand);
       g_prof.find_ms += ms_since(t0);
       g_prof.iters += 1;
       g_prof.candidates += (long)cand.size();
       auto t1 = Clock::now();
       bool no_change = true;
+      added.clear();
       for (auto& pt : cand) {
         get_neighborhood(img, RR, CC, pt.p, pt.r, pt.c, nb);
         if (is_simple_point(nb)) {
-          img[(pt.p * RR + pt.r) * CC + pt.c] = 0;
+          long id = (pt.p * RR + pt.r) * CC + pt.c;
+          img[id] = 0;
           no_change = false;
+          const long nbr6[6] = {id - 1, id + 1, id - CC, id + CC, id - S, id + S};
+          for (long q : nbr6)
+            if (img[q] == 1) added.push_back(q);  // 新增 border 候选
         }
+      }
+      if (!added.empty()) {
+        // 合并进活跃集: 排序去重 + 剔除已删/重复, 保持升序(=栅格序)
+        std::sort(added.begin(), added.end());
+        added.erase(std::unique(added.begin(), added.end()), added.end());
+        std::vector<long> merged;
+        merged.reserve(act.size() + added.size());
+        size_t a = 0, b = 0;
+        while (a < act.size() || b < added.size()) {
+          long v;
+          if (b >= added.size() || (a < act.size() && act[a] <= added[b])) {
+            v = act[a++];
+            if (b < added.size() && added[b] == v) ++b;
+          } else v = added[b++];
+          if (img[v] == 1 && (merged.empty() || merged.back() != v)) merged.push_back(v);
+        }
+        act.swap(merged);
       }
       g_prof.recheck_ms += ms_since(t1);
       if (no_change) ++unchanged;

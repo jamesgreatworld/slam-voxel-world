@@ -25,6 +25,10 @@ int main() {
   compute_esdf(occ.data(), nx, ny, nz, vs, dist, parent);
   auto gvd0 = extract_gvd(free.data(), dist.data(), parent.data(), nx, ny, nz, vs);
   auto gvd = thin_gvd(gvd0.data(), nx, ny, nz);
+  { FILE* f = std::fopen((O + "house_gvd_cpp.bin").c_str(), "wb");
+    std::fwrite(gvd0.data(), 1, N, f); std::fclose(f);
+    f = std::fopen((O + "house_thin_cpp.bin").c_str(), "wb");
+    std::fwrite(gvd.data(), 1, N, f); std::fclose(f); }
 
   auto a = std::chrono::high_resolution_clock::now();
   auto g = skeleton_to_graph(gvd.data(), dist.data(), nx, ny, nz, vs, 0.15f);

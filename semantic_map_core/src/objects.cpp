@@ -33,6 +33,8 @@ std::vector<int> dbscan_labels_int3(const std::vector<std::array<int, 3>>& pts,
 
   std::vector<std::vector<int>> nbrs(n);
   std::vector<char> core(n, 0);
+  // 只读 h, 每 p 独立 -> 并行安全; nbrs[p] 内部顺序不变, 结果与串行一致。
+#pragma omp parallel for schedule(dynamic, 64)
   for (int p = 0; p < n; ++p) {
     int i = pts[p][0], j = pts[p][1], k = pts[p][2];
     int cnt = 0;

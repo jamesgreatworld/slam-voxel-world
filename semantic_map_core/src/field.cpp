@@ -54,32 +54,50 @@ void compute_esdf(const uint8_t* occ, int nx, int ny, int nz, float voxel_size,
   }
 
   const int nmax = std::max(nx, std::max(ny, nz));
-  std::vector<double> fl(nmax), dl(nmax);
-  std::vector<long> sl(nmax), sl2(nmax);
-  std::vector<int> vv(nmax);
-  std::vector<double> zz(nmax + 1);
 
+  // 每条 1D 线独立 -> OpenMP 并行, 每线程私有 scratch, 结果与串行逐位一致。
   // pass X (vary i)
-  for (int j = 0; j < ny; ++j)
-    for (int k = 0; k < nz; ++k) {
-      for (int i = 0; i < nx; ++i) { long id = IDX(i, j, k, ny, nz); fl[i] = f[id]; sl[i] = site[id]; }
-      edt1d(fl.data(), sl.data(), nx, dl.data(), sl2.data(), vv, zz);
-      for (int i = 0; i < nx; ++i) { long id = IDX(i, j, k, ny, nz); f[id] = dl[i]; site[id] = sl2[i]; }
-    }
+#pragma omp parallel
+  {
+    std::vector<double> fl(nmax), dl(nmax), zz(nmax + 1);
+    std::vector<long> sl(nmax), sl2(nmax);
+    std::vector<int> vv(nmax);
+#pragma omp for collapse(2)
+    for (int j = 0; j < ny; ++j)
+      for (int k = 0; k < nz; ++k) {
+        for (int i = 0; i < nx; ++i) { long id = IDX(i, j, k, ny, nz); fl[i] = f[id]; sl[i] = site[id]; }
+        edt1d(fl.data(), sl.data(), nx, dl.data(), sl2.data(), vv, zz);
+        for (int i = 0; i < nx; ++i) { long id = IDX(i, j, k, ny, nz); f[id] = dl[i]; site[id] = sl2[i]; }
+      }
+  }
   // pass Y (vary j)
-  for (int i = 0; i < nx; ++i)
-    for (int k = 0; k < nz; ++k) {
-      for (int j = 0; j < ny; ++j) { long id = IDX(i, j, k, ny, nz); fl[j] = f[id]; sl[j] = site[id]; }
-      edt1d(fl.data(), sl.data(), ny, dl.data(), sl2.data(), vv, zz);
-      for (int j = 0; j < ny; ++j) { long id = IDX(i, j, k, ny, nz); f[id] = dl[j]; site[id] = sl2[j]; }
-    }
+#pragma omp parallel
+  {
+    std::vector<double> fl(nmax), dl(nmax), zz(nmax + 1);
+    std::vector<long> sl(nmax), sl2(nmax);
+    std::vector<int> vv(nmax);
+#pragma omp for collapse(2)
+    for (int i = 0; i < nx; ++i)
+      for (int k = 0; k < nz; ++k) {
+        for (int j = 0; j < ny; ++j) { long id = IDX(i, j, k, ny, nz); fl[j] = f[id]; sl[j] = site[id]; }
+        edt1d(fl.data(), sl.data(), ny, dl.data(), sl2.data(), vv, zz);
+        for (int j = 0; j < ny; ++j) { long id = IDX(i, j, k, ny, nz); f[id] = dl[j]; site[id] = sl2[j]; }
+      }
+  }
   // pass Z (vary k)
-  for (int i = 0; i < nx; ++i)
-    for (int j = 0; j < ny; ++j) {
-      for (int k = 0; k < nz; ++k) { long id = IDX(i, j, k, ny, nz); fl[k] = f[id]; sl[k] = site[id]; }
-      edt1d(fl.data(), sl.data(), nz, dl.data(), sl2.data(), vv, zz);
-      for (int k = 0; k < nz; ++k) { long id = IDX(i, j, k, ny, nz); f[id] = dl[k]; site[id] = sl2[k]; }
-    }
+#pragma omp parallel
+  {
+    std::vector<double> fl(nmax), dl(nmax), zz(nmax + 1);
+    std::vector<long> sl(nmax), sl2(nmax);
+    std::vector<int> vv(nmax);
+#pragma omp for collapse(2)
+    for (int i = 0; i < nx; ++i)
+      for (int j = 0; j < ny; ++j) {
+        for (int k = 0; k < nz; ++k) { long id = IDX(i, j, k, ny, nz); fl[k] = f[id]; sl[k] = site[id]; }
+        edt1d(fl.data(), sl.data(), nz, dl.data(), sl2.data(), vv, zz);
+        for (int k = 0; k < nz; ++k) { long id = IDX(i, j, k, ny, nz); f[id] = dl[k]; site[id] = sl2[k]; }
+      }
+  }
 
   dist.resize(N);
   parent.resize(N);
@@ -104,6 +122,8 @@ std::vector<uint8_t> extract_gvd(const uint8_t* free, const float* dist,
   const int dims[3] = {nx, ny, nz};
   for (int ax = 0; ax < 3; ++ax) {
     long st = strides[ax];
+    // 并行安全: 只写 gvd[..]=1(幂等单字节), 结果与串行一致。
+#pragma omp parallel for collapse(2)
     for (int i = 0; i < nx; ++i)
       for (int j = 0; j < ny; ++j)
         for (int k = 0; k < nz; ++k) {

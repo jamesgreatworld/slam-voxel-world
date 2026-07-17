@@ -37,9 +37,39 @@ field/thin 的 Python 版本就是编译库,单线程 C++ 追平即正常。**C+
 
 ## 执行顺序
 
-1. **先移植完剩余模块**(objects / scene_graph / surface),全部 bit 对齐 —— 铺满地基。
+1. **先移植完剩余模块**(objects / scene_graph / surface),全部 bit 对齐 —— 铺满地基。✅ 已完成(含 features/merge/consolidate 在线层)
 2. 再统一上 **层2 增量 GVD**(在线痛点)。
-3. 顺手加 **层1 OpenMP**(ESDF/GVD 免费,thin 需保候选序)。
+3. 顺手加 **层1 OpenMP**(ESDF/GVD 免费,thin 需保候选序)。✅ 已完成
 4. 最后 **层3 微优化**。
 
 原则:先功能对齐、再优化,不边移植边调优。每步优化后仍需与 Python 对拍验证不破坏一致性。
+
+---
+
+## 已实测(2026-07-16/17, VM 2核)
+
+### 各模块 C++ vs 自研 Python 提速(单核 pin)
+- features(41 物体 shape): 2.06→0.039ms(**~53×**);merge_observation: 20.3→0.80ms(**~25×**);
+  consolidate: 0.55→0.079ms(~6.9×)。在线层已全部 <1ms,非瓶颈。
+
+### 2026-07-17 优化落地(全部对拍零误差保持: gvd/thin 逐字节一致, scene/merge/consolidate/rooms PASS)
+1. **thin border-worklist**:`find_candidates` 全网格扫描 → 活跃集(img==1 且 6-邻域有 0;升序=栅格序,
+   候选序列 bit-exact;完备性:border 判定只依赖 6-邻域,删点后补被删点的 6-邻居即可)。thin 110→**77ms**。
+2. **OpenMP**:ESDF 每条 1D 线独立(线程私有 scratch)、GVD 幂等写 1、objects DBSCAN 邻居扫描只读。
+   2 核:esdf 36→26、gvd 29→18。泰山派 4 核收益更大。
+3. **fullpipe(House 全图产出场景图)228 → 170ms(2核)/ 196ms(单核)** → 全图重算 ~5.9Hz。
+4. obsmap 每帧积分(C++, 13.2k 点合成帧): **31.7ms/帧** ≈ 31fps 能力。
+
+### 端到端(House 完整数据集 356 帧/35.6s, VM 2核)
+| | MIT Hydra | 自研 Python | 自研 C++ |
+|---|---|---|---|
+| 总耗时 | **281s**(83 关键帧, 丢半) | **40s** 原速跟播(积分 100/356) | 在线可 35.6s 实时零丢帧(投影);离线纯算 ~17s |
+| 每帧 | frontend 637ms/kf(max 2s, 越跑越慢) | 积分 ~0.4s/帧 + cycle 0.6-0.9s | 积分 31.7ms + 全图 DSG 170ms |
+| 峰值 RSS | 2979 MB | 488 MB | 22 MB(bench) |
+
+### 剩余优化空间(按收益)
+- **objects 43ms**:DBSCAN 逐类 cells 收集是全网格扫描 → 一次扫描按类分桶;合并簇 bbox 并查集 O(n²) 可 R-tree。
+- **thin 77ms 再降**:剩余大头是 recheck 的 is_simple_point(octree 递归)→ 迭代化/查表;find 部分可 OpenMP(按序拼回)。
+- **增量(层2)**:obsmap 已有 dirty-box(`pop_dirty_bbox`);场景图层=周期全图重算+merge 时序增量。室内规模
+  全图 170ms 已够;真 dirty-box 窗口化(pad≥距离影响半径,边界正确性要单独对拍)留给大场景。
+- **GVD parent 三数组免除法**(层3)。

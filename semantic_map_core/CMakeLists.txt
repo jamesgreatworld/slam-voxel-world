@@ -8,6 +8,12 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG")
 
+find_package(OpenMP QUIET)
+if(OpenMP_CXX_FOUND)
+  add_compile_options(${OpenMP_CXX_FLAGS})
+  link_libraries(OpenMP::OpenMP_CXX)
+endif()
+
 add_library(semantic_map_core STATIC
   src/obsmap.cpp
   src/field.cpp
@@ -55,3 +61,6 @@ target_link_libraries(bench_online semantic_map_core)
 
 add_executable(bench_timing bench/bench_timing.cpp)
 target_link_libraries(bench_timing semantic_map_core)
+
+add_executable(bench_fullpipe bench/bench_fullpipe.cpp)
+target_link_libraries(bench_fullpipe semantic_map_core)
