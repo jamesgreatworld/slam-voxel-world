@@ -1,0 +1,188 @@
+Panels:
+- Class: rviz_common/Displays
+  Name: Displays
+Visualization Manager:
+  Class: ''
+  Displays:
+  - Class: rviz_default_plugins/Grid
+    Enabled: true
+    Name: Grid
+    Plane Cell Count: 40
+  - Class: rviz_default_plugins/TF
+    Enabled: true
+    Name: TFTree
+    Marker Scale: 0.6
+    Show Arrows: false
+    Show Axes: true
+    Show Names: true
+    Frame Timeout: 9999
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: SemanticVoxels
+    Namespaces: {}
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /semantic_voxels
+    Value: true
+  - Class: rviz_default_plugins/Path
+    Enabled: true
+    Name: LightningPath
+    Color: 25; 255; 25
+    Line Style: Billboards
+    Line Width: 0.04
+    Topic:
+      Depth: 10
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /lightning/path
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: Rooms
+    Namespaces: {}
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /dsg/rooms
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: Places
+    Namespaces: {}
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /dsg/places
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: Objects
+    Namespaces: {}
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /dsg/objects
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: false
+    Name: GVD
+    Namespaces: {}
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /dsg/gvd
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: Surface3D
+    Namespaces: {}
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /dsg/surface
+    Value: true
+  - Class: rviz_default_plugins/Map
+    Enabled: true
+    Name: Costmap_L0
+    Color Scheme: costmap
+    Draw Behind: false
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /nav/surface_map_L0
+    Value: true
+  - Class: rviz_default_plugins/Map
+    Enabled: true
+    Name: Costmap_L1
+    Color Scheme: costmap
+    Draw Behind: false
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /nav/surface_map_L1
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: SurfacePlaces
+    Namespaces: {}
+    Topic:
+      Depth: 1
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /nav/surface_places
+    Value: true
+  - Class: rviz_default_plugins/Image
+    Enabled: true
+    Name: RGB
+    Topic:
+      Depth: 2
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /tg/rgb
+    Value: true
+  - Class: rviz_default_plugins/PointCloud2
+    Enabled: true
+    Name: LightningScan
+    Decay Time: 10
+    Axis: Z
+    Color Transformer: AxisColor
+    Position Transformer: XYZ
+    Use Fixed Frame: true
+    Size (m): 0.025
+    Style: Points
+    Autocompute Intensity Bounds: false
+    Max Intensity: 2.5
+    Min Intensity: -1.5
+    Topic:
+      Depth: 2
+      Durability Policy: Volatile
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /lightning/scan
+    Value: true
+  Global Options:
+    Background Color: 25; 25; 30
+    Fixed Frame: odom
+    Frame Rate: 30
+  Tools:
+  - Class: rviz_default_plugins/MoveCamera
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 22
+      Name: Current View
+      Pitch: 0.75
+      Yaw: 0.85
+      Focal Point:
+        X: -5
+        Y: 0
+        Z: 0
+    Saved: null
+Window Geometry:
+  Height: 950
+  RGB:
+    collapsed: false
+  Width: 1500
+  X: 40
+  Y: 30
