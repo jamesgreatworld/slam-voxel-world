@@ -198,6 +198,8 @@ class SmcLiveNode : public rclcpp::Node {
     ny_ = (int)std::ceil((kBounds[5] - kBounds[2]) / kVs);
     nz_ = (int)std::ceil((kBounds[4] - kBounds[1]) / kVs);
     obs_ = std::make_unique<ObsMap>(nx_, ny_, nz_, vmin_, (float)kVs);
+    if (system((std::string("mkdir -p ") + kMapDir).c_str()) != 0)
+      RCLCPP_WARN(get_logger(), "无法创建存档目录 %s", kMapDir);
     ls_ = load_labelspace(kLabelspace);
     structure_ids_ = ls_.structure;
     RCLCPP_INFO(get_logger(), "grid %dx%dx%d vmin=(%ld,%ld,%ld) labels=%zu structure=%zu surface=%zu",
@@ -342,6 +344,11 @@ class SmcLiveNode : public rclcpp::Node {
       obs_->integrate_frame(origin, pts.data(), (int)labels.size(), labels.data(), (float)kFreeMargin);
     }
     ++n_int_;
+    // 机器人实时位姿(ROS odom 系, 传感器原点≈机器人)-> 供 MCP 查询
+    if (n_int_ % 10 == 0) {
+      std::ofstream pf(std::string(kMapDir) + "/robot_pose.txt");
+      if (pf) pf << tx << " " << ty << " " << tz << " " << dm.header.stamp.sec << "\n";
+    }
     double ms = ms_between(t0, Clk::now());
     int_ms_sum_ += ms;
     if (ms > int_ms_max_) int_ms_max_ = ms;
