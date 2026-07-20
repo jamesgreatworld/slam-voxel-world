@@ -52,44 +52,39 @@ class Scene:
         self.names = load_labelnames(labelspace)
         self.robot = None
         self.map_dir = map_dir
-        self._load_dsg(os.path.join(map_dir, "dsg.txt"))
-        self._load_pose(os.path.join(map_dir, "robot_pose.txt"))
+        self.meta = {}
+        self._load_dsg(os.path.join(map_dir, "dsg.json"))
+        self._load_pose(os.path.join(map_dir, "robot_pose.json"))
 
     def _load_dsg(self, path):
-        if not os.path.exists(path):
+        """读节点每周期原子写的 dsg.json(vxw y-up)-> 转 ROS z-up。"""
+        try:
+            with open(path) as f:
+                d = json.load(f)
+        except Exception:
             return
-        with open(path) as f:
-            first = f.readline()          # id_counter N
-            if not first.startswith("id_counter"):
-                f.seek(0)
-            for line in f:
-                parts = line.rstrip("\n").split("\t")
-                if len(parts) < 8:
-                    continue
-                nid, layer, parent = parts[0], parts[1], parts[2]
-                pos = [float(v) for v in parts[3].split()]
-                attrs = [int(float(v)) for v in parts[4].split()]
-                bmin_m = [float(v) for v in parts[6].split()]
-                bmax_m = [float(v) for v in parts[7].split()]
-                rp = yup2ros(pos)
-                a, b = yup2ros(bmin_m), yup2ros(bmax_m)
-                lo = [min(a[i], b[i]) for i in range(3)]
-                hi = [max(a[i], b[i]) for i in range(3)]
-                self.nodes[nid] = {
-                    "id": nid, "layer": layer,
-                    "parent": None if parent == "-" else parent,
-                    "children": [],
-                    "position": {"x": round(rp[0], 3), "y": round(rp[1], 3), "z": round(rp[2], 3)},
-                    "class_id": attrs[0] if attrs else -1,
-                    "name": self.names.get(attrs[0], str(attrs[0])) if layer == "object" else None,
-                    "voxel_count": attrs[1] if len(attrs) > 1 else 0,
-                    "place_id": attrs[2] if len(attrs) > 2 else -1,
-                    "misses": attrs[3] if len(attrs) > 3 else 0,
-                    "seen_count": attrs[4] if len(attrs) > 4 else 0,
-                    "bbox_min": [round(v, 3) for v in lo] if layer == "object" else None,
-                    "bbox_max": [round(v, 3) for v in hi] if layer == "object" else None,
-                }
-                self.order.append(nid)
+        self.meta = {k: d.get(k) for k in ("stamp_sec", "cycle", "id_counter")}
+        for nd in d.get("nodes", []):
+            nid, layer = nd["id"], nd["layer"]
+            rp = yup2ros(nd.get("pos", [0, 0, 0]))
+            lo = hi = None
+            if layer == "object" and "bbox_min_m" in nd:
+                a, b = yup2ros(nd["bbox_min_m"]), yup2ros(nd["bbox_max_m"])
+                lo = [round(min(a[i], b[i]), 3) for i in range(3)]
+                hi = [round(max(a[i], b[i]), 3) for i in range(3)]
+            cls = nd.get("class", -1)
+            self.nodes[nid] = {
+                "id": nid, "layer": layer, "parent": nd.get("parent"), "children": [],
+                "position": {"x": round(rp[0], 3), "y": round(rp[1], 3), "z": round(rp[2], 3)},
+                "class_id": cls,
+                "name": nd.get("name", self.names.get(cls, str(cls))) if layer == "object" else None,
+                "voxel_count": nd.get("voxel_count", 0),
+                "place_id": nd.get("place_id", -1),
+                "misses": nd.get("misses", 0),
+                "seen_count": nd.get("seen_count", 0),
+                "bbox_min": lo, "bbox_max": hi,
+            }
+            self.order.append(nid)
         for nid, n in self.nodes.items():
             p = n["parent"]
             if p and p in self.nodes:
@@ -98,9 +93,9 @@ class Scene:
     def _load_pose(self, path):
         try:
             with open(path) as f:
-                v = f.readline().split()
-            self.robot = {"x": round(float(v[0]), 3), "y": round(float(v[1]), 3),
-                          "z": round(float(v[2]), 3), "stamp_sec": int(v[3])}
+                d = json.load(f)
+            self.robot = {"x": round(d["x"], 3), "y": round(d["y"], 3), "z": round(d["z"], 3),
+                          "stamp_sec": d.get("stamp_sec"), "integrated": d.get("integrated")}
         except Exception:
             self.robot = None
 
@@ -221,6 +216,7 @@ def t_scene_summary(sc, _):
         counts[n["layer"]] = counts.get(n["layer"], 0) + 1
     stacked = [n for n in sc.by_layer("object") if (n["parent"] or "").startswith("object")]
     return {"layers": counts,
+            "dsg_meta": sc.meta,
             "robot_available": sc.robot is not None,
             "objects_on_other_objects": [
                 {"id": n["id"], "name": n["name"], "on_top_of": n["parent"],

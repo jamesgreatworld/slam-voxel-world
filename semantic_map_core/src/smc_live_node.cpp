@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <fstream>
 #include <map>
@@ -61,7 +62,8 @@ static const int kStride = 6;
 static const double kDepthMin = 0.2, kDepthMax = 15.0, kFreeMargin = 0.10;
 static const double kVs = 0.1;  // double, 与 Python voxel_size 同精度
 static const double kBounds[6] = {-20, -12, -3, 8, 10, 5};  // ROS z-up
-static const double kCycleInterval = 10.0;
+static const double kCycleInterval = 5.0;   // 场景图重算周期(应答延迟上界)
+static const int kHeavySaveEvery = 3;        // 重存档(obsmap/nav)每 N 个 cycle 一次
 static const char* kLabelspace =
     "/home/james/Semantic_map_ws/src/Hydra/config/label_spaces/tartanground_house_label_space.yaml";
 // nav 2D 前端(nav_frontend.py 同参): 平面范围/分层
@@ -129,6 +131,26 @@ static LabelSpace load_labelspace(const std::string& path) {
   }
   if (ls.invalid.empty()) ls.invalid.insert(0);
   return ls;
+}
+
+// 原子写: 先写 .tmp 再 rename, 保证 MCP 侧永远读不到半截文件
+static bool write_atomic(const std::string& path, const std::string& body) {
+  std::string tmp = path + ".tmp";
+  { std::ofstream f(tmp); if (!f) return false; f << body; }
+  return std::rename(tmp.c_str(), path.c_str()) == 0;
+}
+static std::string jnum(double v) {
+  char b[40]; std::snprintf(b, sizeof(b), "%.4g", v); return b;
+}
+static std::string jvec(const double* v, int n) {
+  std::string s = "[";
+  for (int i = 0; i < n; ++i) { if (i) s += ","; s += jnum(v[i]); }
+  return s + "]";
+}
+static std::string jvec(const int* v, int n) {
+  std::string s = "[";
+  for (int i = 0; i < n; ++i) { if (i) s += ","; s += std::to_string(v[i]); }
+  return s + "]";
 }
 
 // 黄金角 HSV 配色(与 Python _label_color/room_color 同式)
@@ -344,10 +366,16 @@ class SmcLiveNode : public rclcpp::Node {
       obs_->integrate_frame(origin, pts.data(), (int)labels.size(), labels.data(), (float)kFreeMargin);
     }
     ++n_int_;
-    // 机器人实时位姿(ROS odom 系, 传感器原点≈机器人)-> 供 MCP 查询
-    if (n_int_ % 10 == 0) {
-      std::ofstream pf(std::string(kMapDir) + "/robot_pose.txt");
-      if (pf) pf << tx << " " << ty << " " << tz << " " << dm.header.stamp.sec << "\n";
+    // 机器人实时位姿(ROS odom 系, 传感器原点≈机器人)-> 供 MCP 查询。
+    // 每帧原子写(文件 ~120B, 开销可忽略) => MCP 侧位姿延迟 = 一帧(~0.1s)
+    {
+      double q[4] = {qx, qy, qz, qw};
+      std::string body = std::string("{\"frame\":\"") + kMapFrame + "\",\"x\":" + jnum(tx) +
+                         ",\"y\":" + jnum(ty) + ",\"z\":" + jnum(tz) +
+                         ",\"quat_xyzw\":" + jvec(q, 4) +
+                         ",\"stamp_sec\":" + std::to_string(dm.header.stamp.sec) +
+                         ",\"integrated\":" + std::to_string(n_int_) + "}\n";
+      write_atomic(std::string(kMapDir) + "/robot_pose.json", body);
     }
     double ms = ms_between(t0, Clk::now());
     int_ms_sum_ += ms;
@@ -575,21 +603,7 @@ class SmcLiveNode : public rclcpp::Node {
         std::fclose(f);
       }
     }
-    if (have_sg_) {
-      std::ofstream f(dir + "/dsg.txt");
-      f << "id_counter " << id_counter_ << "\n";
-      for (auto& id : sg_.order) {
-        SceneNode& n = sg_.nodes[id];
-        f << n.id << "\t" << n.layer << "\t" << (n.parent.empty() ? "-" : n.parent) << "\t"
-          << n.pos[0] << " " << n.pos[1] << " " << n.pos[2] << "\t" << n.obj_class << " "
-          << n.voxel_count << " " << n.place_id << " " << n.misses << " " << n.seen_count << "\t"
-          << n.bmin[0] << " " << n.bmin[1] << " " << n.bmin[2] << " "
-          << n.bmax[0] << " " << n.bmax[1] << " " << n.bmax[2] << "\t"
-          << n.bmin_m[0] << " " << n.bmin_m[1] << " " << n.bmin_m[2] << " "
-          << n.bmax_m[0] << " " << n.bmax_m[1] << " " << n.bmax_m[2] << "\t"
-          << n.feat[0] << " " << n.feat[1] << " " << n.feat[2] << "\n";
-      }
-    }
+    // DSG 已由 dump_dsg() 每 cycle 原子写成 dsg.json(同一份即存档)
   }
 
   bool load_map() {
@@ -621,39 +635,74 @@ class SmcLiveNode : public rclcpp::Node {
         std::fclose(nf);
       }
     }
-    std::ifstream f(dir + "/dsg.txt");
-    if (f) {
-      std::string line;
-      if (std::getline(f, line)) {
-        std::istringstream ss(line); std::string tag; ss >> tag >> id_counter_;
-      }
-      sg_ = SceneGraph{};
-      std::vector<std::pair<std::string, std::string>> parents;
-      while (std::getline(f, line)) {
-        std::istringstream ss(line);
-        SceneNode n;
-        std::string parent, seg;
-        std::getline(ss, n.id, '\t');
-        std::getline(ss, n.layer, '\t');
-        std::getline(ss, parent, '\t');
-        std::getline(ss, seg, '\t');
-        { std::istringstream v(seg); v >> n.pos[0] >> n.pos[1] >> n.pos[2]; }
-        std::getline(ss, seg, '\t');
-        { std::istringstream v(seg); v >> n.obj_class >> n.voxel_count >> n.place_id >> n.misses >> n.seen_count; }
-        std::getline(ss, seg, '\t');
-        { std::istringstream v(seg); v >> n.bmin[0] >> n.bmin[1] >> n.bmin[2] >> n.bmax[0] >> n.bmax[1] >> n.bmax[2]; }
-        std::getline(ss, seg, '\t');
-        { std::istringstream v(seg); v >> n.bmin_m[0] >> n.bmin_m[1] >> n.bmin_m[2] >> n.bmax_m[0] >> n.bmax_m[1] >> n.bmax_m[2]; }
-        std::getline(ss, seg, '\t');
-        { std::istringstream v(seg); v >> n.feat[0] >> n.feat[1] >> n.feat[2]; }
-        sg_.add_node(n);
-        if (parent != "-") parents.push_back({n.id, parent});
-      }
-      for (auto& pr : parents)
-        if (sg_.nodes.count(pr.second)) sg_.set_parent(pr.first, pr.second);
-      have_sg_ = !sg_.order.empty();
-    }
+    load_dsg_json(dir + "/dsg.json");
     return true;
+  }
+
+  // 轻量 JSON 解析(只认本节点自产的 dsg.json 结构, 零依赖)
+  void load_dsg_json(const std::string& path) {
+    std::ifstream f(path);
+    if (!f) return;
+    std::stringstream buf; buf << f.rdbuf();
+    const std::string s = buf.str();
+    auto num_after = [&](size_t from, const std::string& key, double& out) {
+      size_t k = s.find("\"" + key + "\":", from);
+      if (k == std::string::npos) return false;
+      out = std::atof(s.c_str() + k + key.size() + 3);
+      return true;
+    };
+    auto str_after = [&](size_t from, const std::string& key, std::string& out) {
+      size_t k = s.find("\"" + key + "\":", from);
+      if (k == std::string::npos) return false;
+      size_t q = s.find('"', k + key.size() + 3);
+      if (q == std::string::npos) return false;
+      size_t e = s.find('"', q + 1);
+      out = s.substr(q + 1, e - q - 1);
+      return true;
+    };
+    auto arr_after = [&](size_t from, const std::string& key, double* out, int n) {
+      size_t k = s.find("\"" + key + "\":[", from);
+      if (k == std::string::npos) return false;
+      const char* p = s.c_str() + k + key.size() + 4;
+      for (int i = 0; i < n; ++i) { out[i] = std::atof(p); p = std::strchr(p, i + 1 < n ? ',' : ']'); if (!p) return false; ++p; }
+      return true;
+    };
+    { double v; if (num_after(0, "id_counter", v)) id_counter_ = (int)v; }
+    sg_ = SceneGraph{};
+    std::vector<std::pair<std::string, std::string>> parents;
+    size_t pos = s.find("\"nodes\"");
+    while (true) {
+      size_t b = s.find("{\"id\":", pos);
+      if (b == std::string::npos) break;
+      size_t e = s.find('}', b);
+      if (e == std::string::npos) break;
+      SceneNode n;
+      double v, a3[3];
+      str_after(b, "id", n.id);
+      str_after(b, "layer", n.layer);
+      { size_t k = s.find("\"parent\":", b);
+        if (k != std::string::npos && k < e && s.compare(k + 9, 4, "null") != 0)
+          str_after(b, "parent", n.parent); }
+      if (arr_after(b, "pos", a3, 3)) { n.pos[0] = a3[0]; n.pos[1] = a3[1]; n.pos[2] = a3[2]; }
+      if (num_after(b, "class", v)) n.obj_class = (int)v;
+      if (num_after(b, "voxel_count", v)) n.voxel_count = (int)v;
+      if (num_after(b, "place_id", v)) n.place_id = (int)v;
+      if (num_after(b, "misses", v)) n.misses = (int)v;
+      if (num_after(b, "seen_count", v)) n.seen_count = (int)v;
+      if (n.layer == "object") {
+        if (arr_after(b, "bbox_min", a3, 3)) for (int i = 0; i < 3; ++i) n.bmin[i] = (int)a3[i];
+        if (arr_after(b, "bbox_max", a3, 3)) for (int i = 0; i < 3; ++i) n.bmax[i] = (int)a3[i];
+        arr_after(b, "bbox_min_m", n.bmin_m, 3);
+        arr_after(b, "bbox_max_m", n.bmax_m, 3);
+        if (arr_after(b, "shape", a3, 3)) n.feat = {a3[0], a3[1], a3[2]};
+      }
+      sg_.add_node(n);
+      if (!n.parent.empty()) parents.push_back({n.id, n.parent});
+      pos = e + 1;
+    }
+    for (auto& pr : parents)
+      if (sg_.nodes.count(pr.second)) sg_.set_parent(pr.first, pr.second);
+    have_sg_ = !sg_.order.empty();
   }
 
   // ---------- 周期场景图线程(gvd_live 链路) ----------
@@ -770,8 +819,8 @@ class SmcLiveNode : public rclcpp::Node {
     last_rooms_ = nr; last_places_ = np; last_objects_ = no;
     publish_dsg(g, room, surf, vmin_c, gvd_cells);
     publish_nav();   // 每周期重发代价地图(不依赖新帧, 重启/无播包时 rviz 也能收到)
-    dump_dsg();
-    save_map();  // 每周期存档(占据图+DSG+nav层), 重启可恢复
+    dump_dsg();      // 每周期原子写 dsg.json(MCP 数据源, 轻)
+    if (n_cycle_ % kHeavySaveEvery == 0) save_map();  // 重存档(obsmap 34MB/nav)降频
     RCLCPP_INFO(get_logger(), "cycle rooms=%d places=%d objects=%d merge={m=%d a=%d r=%d c=%d}",
                 nr, np, no, st.matched, st.added, st.removed, st.carried);
     return true;
@@ -1081,14 +1130,43 @@ class SmcLiveNode : public rclcpp::Node {
     dsg_pub_->publish(all);
   }
 
-  void dump_dsg() {
-    std::ofstream f("/mnt/hgfs/Shared/claude_jobs/cpp_dsg.txt");
+  // DSG -> JSON(权威交换格式, 供 MCP 服务 / 重载)。每 cycle 原子写, 开销 ~ms。
+  std::string dsg_json() {
+    std::string s = "{\n  \"stamp_sec\": " + std::to_string((long)now().seconds()) +
+                    ",\n  \"cycle\": " + std::to_string(n_cycle_) +
+                    ",\n  \"id_counter\": " + std::to_string(id_counter_) +
+                    ",\n  \"frame\": \"" + kMapFrame + "\"" +
+                    ",\n  \"coords\": \"vxw_yup\"" +
+                    ",\n  \"nodes\": [\n";
+    bool first = true;
     for (auto& id : sg_.order) {
-      auto& n = sg_.nodes[id];
-      f << n.id << "|" << n.layer << "|" << n.parent << "|" << n.pos[0] << "," << n.pos[1]
-        << "," << n.pos[2] << "|" << n.obj_class << "|" << n.voxel_count << "|misses=" << n.misses
-        << "|seen=" << n.seen_count << "\n";
+      SceneNode& n = sg_.nodes[id];
+      if (!first) s += ",\n";
+      first = false;
+      s += "    {\"id\":\"" + n.id + "\",\"layer\":\"" + n.layer + "\",\"parent\":" +
+           (n.parent.empty() ? std::string("null") : "\"" + n.parent + "\"") +
+           ",\"pos\":" + jvec(n.pos, 3) +
+           ",\"class\":" + std::to_string(n.obj_class) +
+           ",\"voxel_count\":" + std::to_string(n.voxel_count) +
+           ",\"place_id\":" + std::to_string(n.place_id) +
+           ",\"misses\":" + std::to_string(n.misses) +
+           ",\"seen_count\":" + std::to_string(n.seen_count);
+      if (n.layer == "object") {
+        s += ",\"bbox_min\":" + jvec(n.bmin, 3) + ",\"bbox_max\":" + jvec(n.bmax, 3) +
+             ",\"bbox_min_m\":" + jvec(n.bmin_m, 3) + ",\"bbox_max_m\":" + jvec(n.bmax_m, 3) +
+             ",\"shape\":" + jvec(n.feat.data(), 3);
+        auto it = ls_.names.find(n.obj_class);
+        if (it != ls_.names.end()) s += ",\"name\":\"" + it->second + "\"";
+      }
+      s += "}";
     }
+    return s + "\n  ]\n}\n";
+  }
+
+  void dump_dsg() {
+    std::string body = dsg_json();
+    write_atomic(std::string(kMapDir) + "/dsg.json", body);
+    write_atomic("/mnt/hgfs/Shared/claude_jobs/cpp_dsg.json", body);
   }
 
   struct Pending {
