@@ -58,28 +58,29 @@ static double ms_between(Clk::time_point a, Clk::time_point b) {
   return std::chrono::duration<double, std::milli>(b - a).count();
 }
 
-// ---------- 配置(与 Python 实跑一致) ----------
-static const char* kDepthTopic = "/tg/depth";
-static const char* kSegTopic = "/tg/semantic";
-static const char* kRgbTopic = "/tg/rgb";
-static const char* kInfoTopic = "/tg/camera_info";
-static const char* kMapFrame = "odom";
-static const int kStride = 6;
-static const double kDepthMin = 0.2, kDepthMax = 15.0, kFreeMargin = 0.10;
-static const double kVs = 0.1;  // double, 与 Python voxel_size 同精度
-static const double kBounds[6] = {-20, -12, -3, 8, 10, 5};  // ROS z-up
-static const double kCycleInterval = 5.0;   // 场景图重算周期(应答延迟上界)
-static const int kHeavySaveEvery = 3;        // 重存档(obsmap/nav)每 N 个 cycle 一次
-static const char* kLabelspace =
+// ---------- 默认配置: 全部可被 ROS 参数覆盖(真机移植只改参数, 不改代码)----------
+// 见 DEPLOY.md / config/real_robot.yaml
+static std::string kDepthTopic = "/tg/depth";
+static std::string kSegTopic = "/tg/semantic";     // 实时分割节点输出(mono8 = 类别 id)
+static std::string kRgbTopic = "/tg/rgb";
+static std::string kInfoTopic = "/tg/camera_info";
+static std::string kMapFrame = "odom";             // SLAM(lightning) 固定帧
+static int kStride = 6;                            // 像素抽稀(算力/精度权衡)
+static double kDepthMin = 0.2, kDepthMax = 15.0, kFreeMargin = 0.10;
+static double kVs = 0.1;                           // 体素边长(米)
+static double kBounds[6] = {-20, -12, -3, 8, 10, 5};  // 地图范围 ROS z-up
+static double kCycleInterval = 5.0;   // 场景图重算周期(查询新鲜度上界)
+static int kHeavySaveEvery = 3;       // 重存档(obsmap/nav)每 N 个 cycle 一次
+static std::string kLabelspace =
     "/home/james/Semantic_map_ws/src/Hydra/config/label_spaces/tartanground_house_label_space.yaml";
-// nav 2D 前端(nav_frontend.py 同参): 平面范围/分层
-static const double kNavX0 = -16, kNavY0 = -9, kNavX1 = 5, kNavY1 = 8;
-static const int kNavNX = 210, kNavNY = 170;  // ceil((x1-x0)/vs), ceil((y1-y0)/vs)
-static const double kRobotH = 0.5, kGroundEps = 0.08, kLevelGap = 0.8;
-static const int kLevelMinPts = 200, kMaxLevels = 4;
+// nav 2D 导航层(多楼层代价图)
+static double kNavX0 = -16, kNavY0 = -9, kNavX1 = 5, kNavY1 = 8;
+static int kNavNX = 210, kNavNY = 170;  // 由 nav bounds/vs 推出
+static double kRobotH = 0.5, kGroundEps = 0.08, kLevelGap = 0.8;
+static int kLevelMinPts = 200, kMaxLevels = 4;
 // 地图存档目录(占据图+DSG, 启动时存在则恢复)
-static const char* kMapDir = "/home/james/semantic_map_core/maps/house_live";
-static const int kQueryPort = 18080;  // 场景图查询 RPC(MCP 服务连它, 直查内存)
+static std::string kMapDir = "/home/james/semantic_map_core/maps/house_live";
+static int kQueryPort = 18080;  // 场景图查询 RPC(MCP 服务连它, 直查内存)
 static const char* kStructKw[] = {"wall", "ceiling", "roof", "building", "floor", "ground",
                                   "carpet", "rug", "pillar", "column", "beam", "stair", "sky"};
 
@@ -220,6 +221,7 @@ class SmcLiveNode : public rclcpp::Node {
       : Node("smc_live_node"),
         tfbuf_(get_clock(), tf2::durationFromSec(60.0)),
         tflis_(tfbuf_) {
+    load_params();
     // vxw 网格: ROS(x,y,z) -> vxw(x,z,y)
     vmin_ = {(long)std::floor(kBounds[0] / kVs), (long)std::floor(kBounds[2] / kVs),
              (long)std::floor(kBounds[1] / kVs)};
@@ -228,7 +230,7 @@ class SmcLiveNode : public rclcpp::Node {
     nz_ = (int)std::ceil((kBounds[4] - kBounds[1]) / kVs);
     obs_ = std::make_unique<ObsMap>(nx_, ny_, nz_, vmin_, (float)kVs);
     if (system((std::string("mkdir -p ") + kMapDir).c_str()) != 0)
-      RCLCPP_WARN(get_logger(), "无法创建存档目录 %s", kMapDir);
+      RCLCPP_WARN(get_logger(), "无法创建存档目录 %s", kMapDir.c_str());
     ls_ = load_labelspace(kLabelspace);
     structure_ids_ = ls_.structure;
     RCLCPP_INFO(get_logger(), "grid %dx%dx%d vmin=(%ld,%ld,%ld) labels=%zu structure=%zu surface=%zu",
@@ -260,7 +262,7 @@ class SmcLiveNode : public rclcpp::Node {
     sp_pub_ = create_publisher<MarkerArray>("/nav/surface_places", latch);
     if (load_map()) {
       RCLCPP_INFO(get_logger(), "已恢复存档: %s (DSG nodes=%zu, id_counter=%d, nav层=%zu)",
-                  kMapDir, sg_.order.size(), id_counter_, levels_.size());
+                  kMapDir.c_str(), sg_.order.size(), id_counter_, levels_.size());
       publish_nav();     // 恢复后立即发一次代价地图
       publish_voxels();  // 恢复后立即发一次语义体素
     }
@@ -290,6 +292,38 @@ class SmcLiveNode : public rclcpp::Node {
  private:
   using Policy = message_filters::sync_policies::ApproximateTime<Image, Image, Image>;
   using Sync = message_filters::Synchronizer<Policy>;
+
+  // 读 ROS 参数覆盖默认值(真机: ros2 run ... --ros-args --params-file real_robot.yaml)
+  void load_params() {
+    auto S = [&](const char* n, std::string& v) { v = declare_parameter<std::string>(n, v); };
+    auto D = [&](const char* n, double& v) { v = declare_parameter<double>(n, v); };
+    auto I = [&](const char* n, int& v) { v = declare_parameter<int>(n, v); };
+    S("depth_topic", kDepthTopic); S("seg_topic", kSegTopic); S("rgb_topic", kRgbTopic);
+    S("camera_info_topic", kInfoTopic); S("map_frame", kMapFrame);
+    S("labelspace", kLabelspace); S("map_dir", kMapDir);
+    I("pixel_stride", kStride); I("query_port", kQueryPort);
+    I("heavy_save_every", kHeavySaveEvery); I("level_min_pts", kLevelMinPts);
+    I("max_levels", kMaxLevels);
+    D("depth_min", kDepthMin); D("depth_max", kDepthMax); D("free_margin", kFreeMargin);
+    D("voxel_size", kVs); D("cycle_interval", kCycleInterval);
+    D("robot_height", kRobotH); D("ground_eps", kGroundEps); D("level_gap", kLevelGap);
+    // 地图/导航范围: 数组参数
+    std::vector<double> b(kBounds, kBounds + 6);
+    b = declare_parameter<std::vector<double>>("bounds", b);
+    if (b.size() == 6) for (int i = 0; i < 6; ++i) kBounds[i] = b[i];
+    std::vector<double> nb{kNavX0, kNavY0, kNavX1, kNavY1};
+    nb = declare_parameter<std::vector<double>>("nav_bounds", nb);
+    if (nb.size() == 4) { kNavX0 = nb[0]; kNavY0 = nb[1]; kNavX1 = nb[2]; kNavY1 = nb[3]; }
+    kNavNX = (int)std::ceil((kNavX1 - kNavX0) / kVs);
+    kNavNY = (int)std::ceil((kNavY1 - kNavY0) / kVs);
+    RCLCPP_INFO(get_logger(),
+                "参数: depth=%s seg=%s info=%s map_frame=%s vs=%.2f stride=%d cycle=%.1fs port=%d",
+                kDepthTopic.c_str(), kSegTopic.c_str(), kInfoTopic.c_str(), kMapFrame.c_str(),
+                kVs, kStride, kCycleInterval, kQueryPort);
+    RCLCPP_INFO(get_logger(), "地图范围 [%.1f,%.1f,%.1f]~[%.1f,%.1f,%.1f]  nav %dx%d  存档 %s",
+                kBounds[0], kBounds[1], kBounds[2], kBounds[3], kBounds[4], kBounds[5],
+                kNavNX, kNavNY, kMapDir.c_str());
+  }
 
   void on_frame(Image::ConstSharedPtr d, Image::ConstSharedPtr s, Image::ConstSharedPtr r) {
     pending_.push_back({Clk::now(), d, s, r});

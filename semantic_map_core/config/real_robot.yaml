@@ -1,0 +1,41 @@
+# 真机部署参数模板 —— 只改这里, 不动代码。
+# 用法: ros2 run semantic_map_core smc_live_node --ros-args --params-file real_robot.yaml
+#   或: ./smc_live_node --ros-args --params-file real_robot.yaml
+smc_live_node:
+  ros__parameters:
+    # ---- 输入话题(改成你机器人上的真实话题名)----
+    depth_topic: "/camera/depth/image_rect_raw"   # sensor_msgs/Image, 32FC1(米)
+    seg_topic: "/seg/labels"                      # sensor_msgs/Image, mono8 = 类别 id ← 实时分割节点输出
+    rgb_topic: "/camera/color/image_raw"          # sensor_msgs/Image, rgb8
+    camera_info_topic: "/camera/color/camera_info"
+    # ---- 坐标系: 位姿唯一来源 = lightning 的 TF ----
+    map_frame: "odom"        # lightning 发布的固定帧(map 或 odom)
+    # 相机帧用 depth 消息自带的 frame_id; 需保证 TF: map_frame <- <depth.frame_id> 可查
+
+    # ---- 语义标签表(必须与分割模型的输出类别一致)----
+    labelspace: "/opt/smc/labelspace.yaml"
+
+    # ---- 地图范围(ROS z-up, 米): x0,y0,z0,x1,y1,z1。按你的场地改 ----
+    # 内存 ≈ (dx/vs)*(dy/vs)*(dz/vs)*7 字节; 例 28x22x8m @0.1 ≈ 34MB
+    bounds: [-20.0, -12.0, -3.0, 8.0, 10.0, 5.0]
+    voxel_size: 0.1
+
+    # ---- 算力/精度权衡 ----
+    pixel_stride: 6          # 深度图抽稀; 算力紧张调大(8/10), 精度优先调小(4)
+    depth_min: 0.2
+    depth_max: 15.0          # 超过此距离的深度丢弃(远处噪声大)
+    free_margin: 0.10
+    cycle_interval: 5.0      # 场景图重算周期(秒) = 查询新鲜度上界; 算力足可降到 2
+    heavy_save_every: 3      # 每 N 个 cycle 存一次完整地图(obsmap 较大)
+
+    # ---- 2D 导航层(多楼层代价图)----
+    nav_bounds: [-16.0, -9.0, 5.0, 8.0]   # xmin,ymin,xmax,ymax
+    robot_height: 0.5        # 地面上方多高内的障碍算挡路
+    ground_eps: 0.08
+    level_gap: 0.8           # 楼层高度差阈值(单层场地设大, 如 100.0 即禁用分层)
+    level_min_pts: 200
+    max_levels: 4
+
+    # ---- 存档 & 查询服务 ----
+    map_dir: "/var/lib/smc/map"   # 地图存档(重启自动恢复)
+    query_port: 18080             # MCP 服务连这个端口查场景图
