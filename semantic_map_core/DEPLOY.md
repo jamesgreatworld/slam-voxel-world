@@ -48,13 +48,50 @@ make -j4            # 产出 build/smc_live_node
 
 三路图像走 ApproximateTime 同步,**stamp 必须一致**——分割节点务必原样复制 RGB 的 header。
 
-### 2.2 TF(位姿唯一来源)
-必须能查到 `map_frame ← depth.header.frame_id`。lightning 发 `odom→base`,再加一条静态 `base→camera` 外参:
+### 2.2 TF(位姿唯一来源)与两处外参 ★换传感器必改★
+
+TF 链:`map --(回环修正)--> odom --(100Hz IMU)--> base --(静态)--> {lidar, camera}`
+建图节点只要求能查到 `map_frame ← depth.header.frame_id`。
+
+外参分两处标定,**任何一处错了,语义地图就和点云/结构对不齐**——这是真机最常见的坑:
+
+**① 雷达 ↔ IMU 外参 —— 在 lightning 配置里**(`assets/lightning_default_tg_house.yaml`):
+```yaml
+fasterlio:
+  extrinsic_est_en: false      # true = 在线估计外参(初值差时可先打开跑一段)
+  extrinsic_T: [0, 0, 0]       # 雷达原点在 IMU 系下的平移(米)
+  extrinsic_R: [ 0, 1, 0,      # 雷达 -> IMU 的旋转矩阵(行主序 3x3)
+                -1, 0, 0,      # 本例 = 绕 Z 轴 +90°(数据集雷达系为 x右y前z上)
+                 0, 0, 1 ]
+```
+同一文件还要按你的硬件改:
+```yaml
+common:
+  livox_lidar_topic: "/livox/lidar"   # 你的雷达话题
+  imu_topic: "/tg/imu"                # 你的 IMU 话题
+fasterlio:
+  lidar_type: 1        # 1=Livox 2=Velodyne 3=Ouster
+  scan_line: 6         # 线数(Livox AVIA=6)
+  blind: 0.5           # 盲区(米)
+  acc_cov/gyr_cov/b_acc_cov/b_gyr_cov   # IMU 噪声, 按你的 IMU 手册/静置标定调
+g2p5:
+  lidar_height: 0.0    # 雷达安装高度(离地)
+pub_topics:
+  frame_base: "base"   # 若你的导航栈用 base_link, 改这里
+  frame_lidar: "lidar"
+  pub_static_lidar_tf: true   # 已有 URDF 提供 base->lidar 时设 false
+```
+
+**② 相机 ↔ base 外参 —— 用 static_transform_publisher**:
 ```bash
 ros2 run tf2_ros static_transform_publisher --x .. --y .. --z .. \
   --qx .. --qy .. --qz .. --qw .. --frame-id base --child-frame-id camera_link
 ```
-**外参不准 = 语义地图和点云对不齐**,这是最常见的坑。
+本数据集用的是纯旋转(相机光学系 x右y下z前 相对 base 的 FLU):
+`--qx -0.5 --qy 0.5 --qz -0.5 --qw 0.5`,真机需按实际安装量测/标定(平移别漏)。
+
+> 自查:rviz 打开 TFTree + LightningScan + SemanticVoxels,如果语义体素与雷达点云
+> 有固定角度/平移偏差,基本就是这两处外参之一错了。
 
 ### 2.3 labelspace(类别表)
 yaml 里每行 `- {label: 31, name: floor}`。三处必须一致:分割模型输出 → label_map 映射 → labelspace。
