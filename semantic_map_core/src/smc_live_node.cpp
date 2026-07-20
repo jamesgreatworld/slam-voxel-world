@@ -230,7 +230,8 @@ class SmcLiveNode : public rclcpp::Node {
     if (load_map()) {
       RCLCPP_INFO(get_logger(), "已恢复存档: %s (DSG nodes=%zu, id_counter=%d, nav层=%zu)",
                   kMapDir, sg_.order.size(), id_counter_, levels_.size());
-      publish_nav();  // 恢复后立即发一次代价地图
+      publish_nav();     // 恢复后立即发一次代价地图
+      publish_voxels();  // 恢复后立即发一次语义体素
     }
     cycle_thread_ = std::thread([this] { cycle_loop(); });
   }
@@ -822,7 +823,84 @@ class SmcLiveNode : public rclcpp::Node {
     }
     m_places.push_back(pn);
 
-    // ---- rooms: 抬高球 + 文字标签 + 垂/斜线连成员 places ----
+    // ---- 分层平面(Hydra 式): 楼层地面 + 物体层(+2.8m 同平面) + 房间层(+4.8m 同平面) ----
+    const double kObjLayer = 2.8, kRoomLayer = 4.8;
+    std::vector<double> floor_z;  // 各楼层地面高度(ROS z)
+    {
+      std::lock_guard<std::mutex> lk(nav_mtx_);
+      for (auto& lv : levels_) floor_z.push_back(lv.rep_z());
+    }
+    if (floor_z.empty()) floor_z.push_back(-3.0);
+    auto floor_of = [&](double z) {
+      int b = 0; double bd = 1e18;
+      for (size_t i = 0; i < floor_z.size(); ++i) {
+        double d = std::fabs(z - floor_z[i]);
+        if (d < bd) { bd = d; b = (int)i; }
+      }
+      return b;
+    };
+
+    // ---- rooms: 同层同平面的球+标签 + **实际轮廓**(可走瓦片按最近 place 归房, 边界格边) ----
+    // 每层 places(ROS x,y) 列表
+    std::vector<std::vector<int>> places_by_floor(floor_z.size());
+    std::vector<std::array<double, 3>> ppos_ros(g.nodes.size());
+    for (size_t i = 0; i < g.nodes.size(); ++i) {
+      double x, y, z; npos((int)i, x, y, z);
+      ppos_ros[i] = {x, y, z};
+      places_by_floor[floor_of(z)].push_back((int)i);
+    }
+    // 瓦片 -> 房间归属(取该层最近 place 的房间; 该层无 place 则全局最近)
+    std::map<std::array<int, 3>, int> tile_room;  // (lvl, i, k) -> rid
+    for (auto& t : surf) {
+      int lvl = (int)t[3];
+      double rx, ry, rz; yup2ros(t[0], t[1], t[2], rx, ry, rz);
+      const std::vector<int>* cand = (lvl < (int)places_by_floor.size() &&
+                                      !places_by_floor[lvl].empty())
+                                         ? &places_by_floor[lvl] : nullptr;
+      double bd = 1e18; int best = -1;
+      if (cand) {
+        for (int i : *cand) {
+          double dx = ppos_ros[i][0] - rx, dy = ppos_ros[i][1] - ry;
+          double d = dx * dx + dy * dy;
+          if (d < bd) { bd = d; best = i; }
+        }
+      } else {
+        for (size_t i = 0; i < ppos_ros.size(); ++i) {
+          double dx = ppos_ros[i][0] - rx, dy = ppos_ros[i][1] - ry;
+          double d = dx * dx + dy * dy;
+          if (d < bd) { bd = d; best = (int)i; }
+        }
+      }
+      if (best < 0) continue;
+      int ig = (int)std::lround(t[0] / kVs - vmin_c[0] - 0.5);
+      int kg = (int)std::lround(t[2] / kVs - vmin_c[2] - 0.5);
+      tile_room[{lvl, ig, kg}] = room[best];
+    }
+    // 实际轮廓: 与邻格房间不同(或无格)的格边 -> 线段(画在该层房间平面)
+    Marker routline = mk(Marker::LINE_LIST, "room_outline");
+    routline.scale.x = 0.03;
+    for (auto& kv : tile_room) {
+      int lvl = kv.first[0], ig = kv.first[1], kg = kv.first[2], rid = kv.second;
+      double zl = floor_z[std::min((size_t)lvl, floor_z.size() - 1)] + kRoomLayer;
+      double vx = (ig + vmin_c[0] + 0.5) * kVs, vz = (kg + vmin_c[2] + 0.5) * kVs;
+      static const int D[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+      for (auto& d : D) {
+        auto nb = tile_room.find({lvl, ig + d[0], kg + d[1]});
+        if (nb != tile_room.end() && nb->second == rid) continue;
+        // 边: 垂直于 d 方向, 过格边中点(vxw XZ 平面)
+        double ex = vx + d[0] * 0.5 * kVs, ez = vz + d[1] * 0.5 * kVs;
+        double ax, az, bx, bz;
+        if (d[0] != 0) { ax = ex; az = ez - 0.5 * kVs; bx = ex; bz = ez + 0.5 * kVs; }
+        else { ax = ex - 0.5 * kVs; az = ez; bx = ex + 0.5 * kVs; bz = ez; }
+        double r1x, r1y, r1z, r2x, r2y, r2z;
+        yup2ros(ax, 0, az, r1x, r1y, r1z); yup2ros(bx, 0, bz, r2x, r2y, r2z);
+        geometry_msgs::msg::Point pa, pb;
+        pa.x = r1x; pa.y = r1y; pa.z = zl; pb.x = r2x; pb.y = r2y; pb.z = zl;
+        routline.points.push_back(pa); routline.points.push_back(pb);
+        routline.colors.push_back(room_rgba(rid, 0.95f));
+        routline.colors.push_back(room_rgba(rid, 0.95f));
+      }
+    }
     Marker rlines = mk(Marker::LINE_LIST, "room_edges");
     rlines.scale.x = 0.01;
     for (auto& id : sg_.order) {
@@ -830,7 +908,7 @@ class SmcLiveNode : public rclcpp::Node {
       if (n.layer != "room") continue;
       int rid = std::atoi(n.id.c_str() + 5);
       double x, y, z; to_ros(n.pos, x, y, z);
-      double zl = z + 3.0;
+      double zl = floor_z[floor_of(z)] + kRoomLayer;  // 同层房间同一平面
       Marker s = mk(Marker::SPHERE, "rooms");
       s.pose.position.x = x; s.pose.position.y = y; s.pose.position.z = zl;
       s.scale.x = s.scale.y = s.scale.z = 0.45;
@@ -853,6 +931,7 @@ class SmcLiveNode : public rclcpp::Node {
       }
     }
     m_rooms.push_back(rlines);
+    m_rooms.push_back(routline);
 
     // ---- objects: 类别色 bbox + 名称文字 + 头顶矩形块 + 连线(物体/所属place) + 支撑线 ----
     static const int E[12][2] = {{0,1},{1,3},{3,2},{2,0},{4,5},{5,7},{7,6},{6,4},{0,4},{1,5},{2,6},{3,7}};
@@ -890,9 +969,9 @@ class SmcLiveNode : public rclcpp::Node {
       t.text = nit != ls_.names.end() ? nit->second : std::to_string(n.obj_class);
       t.color.r = 1.0f; t.color.g = 0.8f; t.color.b = 0.4f; t.color.a = 1.0f;
       m_objects.push_back(t);
-      // 头顶矩形块(Hydra 式物体节点)
+      // 头顶矩形块(Hydra 式物体节点): 同层物体统一放"物体层平面"(空旷带)
       Marker nc = mk(Marker::CUBE, "object_nodes");
-      double nz = hi[2] + 0.8;
+      double nz = floor_z[floor_of(hi[2])] + kObjLayer;
       nc.pose.position.x = cx; nc.pose.position.y = cy; nc.pose.position.z = nz;
       nc.scale.x = nc.scale.y = nc.scale.z = 0.14;
       nc.color = col;
