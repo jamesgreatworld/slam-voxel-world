@@ -55,4 +55,17 @@ std::vector<int> partition_rooms_clearance(const SkelGraph& g,
                                            float door_clearance_m = 0.85f,
                                            int min_room_nodes = 8);
 
+// ---- 图清理变换(移植自 graph.py, gvd_live 在线链路用)----
+// 迭代删除 度=1 且唯一边 < max_len_m 的毛刺节点。
+SkelGraph prune_spurs(const SkelGraph& g, double max_len_m);
+// 世界距离 <= radius_m 的节点聚成一个(代表=簇内最大 clearance), 重连边保最短。
+// vs 用 double(与 Python voxel_size 同精度, 边界判定一致)。
+SkelGraph merge_close(const SkelGraph& g, double radius_m, const long vmin[3], double vs);
+// 删除节点数 < min_nodes 的整个连通分量。
+SkelGraph drop_small_components(const SkelGraph& g, int min_nodes);
+// 房间不得嵌套: 小房间 places 的 XZ 包围盒被大房间包含(margin 容差)则并入。
+// 就地改 room_of(不重编号, 与 Python 一致)。移植自 gvd_live._merge_nested_rooms。
+void merge_nested_rooms(const SkelGraph& g, std::vector<int>& room_of, double vs,
+                        double margin_m = 0.3);
+
 }  // namespace smc

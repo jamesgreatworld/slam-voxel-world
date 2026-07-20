@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <functional>
 #include <map>
 #include <queue>
 #include <set>
@@ -349,6 +350,194 @@ std::vector<int> partition_rooms_clearance(const SkelGraph& g, float door_cleara
   for (int r : uniq) remap[r] = k++;
   for (auto& r : room_of) r = remap[r];
   return room_of;
+}
+
+// ===================== 图清理变换(graph.py)=====================
+namespace {
+
+// 邻接表: 有序 map 复刻 Python dict(边表按 (a,b) 升序 -> 插入即升序)。
+std::vector<std::map<int, float>> build_adj(const SkelGraph& g) {
+  std::vector<std::map<int, float>> adj(g.nodes.size());
+  for (auto& e : g.edges) { adj[e.a][e.b] = e.length_m; adj[e.b][e.a] = e.length_m; }
+  return adj;
+}
+
+void degree_type(int n, const std::vector<SkelEdge>& edges, std::vector<int>& deg,
+                 std::vector<int>& types) {
+  deg.assign(n, 0);
+  for (auto& e : edges) { deg[e.a]++; deg[e.b]++; }
+  types.resize(n);
+  for (int i = 0; i < n; ++i)
+    types[i] = deg[i] >= 3 ? 0 : deg[i] == 2 ? 1 : deg[i] == 1 ? 2 : 3;
+}
+
+// _rebuild: 存活节点重编号 + 边去重(结果按 (a,b) 升序, 与 Python 生成序等价)。
+SkelGraph rebuild(const SkelGraph& g, const std::vector<std::map<int, float>>& adj,
+                  const std::vector<char>& alive) {
+  SkelGraph out;
+  std::vector<int> old2new(g.nodes.size(), -1);
+  for (size_t i = 0; i < g.nodes.size(); ++i)
+    if (alive[i]) { old2new[i] = (int)out.nodes.size(); out.nodes.push_back(g.nodes[i]); }
+  std::map<std::pair<int, int>, float> uniq;
+  for (size_t a = 0; a < g.nodes.size(); ++a) {
+    if (!alive[a]) continue;
+    for (auto& kv : adj[a]) {
+      int b = kv.first;
+      if (b < 0 || b >= (int)g.nodes.size() || !alive[b]) continue;
+      int na = old2new[a], nb = old2new[b];
+      auto key = std::make_pair(std::min(na, nb), std::max(na, nb));
+      if (!uniq.count(key)) uniq[key] = kv.second;
+    }
+  }
+  for (auto& kv : uniq) out.edges.push_back({kv.first.first, kv.first.second, kv.second});
+  std::vector<int> deg, types;
+  degree_type((int)out.nodes.size(), out.edges, deg, types);
+  for (size_t i = 0; i < out.nodes.size(); ++i) {
+    out.nodes[i].degree = deg[i];
+    out.nodes[i].type = types[i];
+  }
+  return out;
+}
+
+}  // namespace
+
+SkelGraph prune_spurs(const SkelGraph& g, double max_len_m) {
+  if (max_len_m <= 0 || g.nodes.empty()) return g;
+  auto adj = build_adj(g);
+  std::vector<char> alive(g.nodes.size(), 1);
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (size_t n = 0; n < g.nodes.size(); ++n) {   // list(adj.keys()) 升序快照
+      if (!alive[n] || adj[n].size() != 1) continue;
+      int nbr = adj[n].begin()->first;
+      double ln = adj[n].begin()->second;
+      if (ln < max_len_m) {
+        adj[nbr].erase((int)n);
+        adj[n].clear();
+        alive[n] = 0;
+        changed = true;
+      }
+    }
+  }
+  bool any = false;
+  for (char a : alive) if (a) { any = true; break; }
+  if (!any) return g;  // 全剪光(退化)-> 保留原图
+  return rebuild(g, adj, alive);
+}
+
+SkelGraph merge_close(const SkelGraph& g, double radius_m, const long vmin[3], double vs) {
+  const int n = (int)g.nodes.size();
+  if (radius_m <= 0 || n < 2) return g;
+  // 世界坐标(double, 与 Python positions_m 同精度)
+  std::vector<std::array<double, 3>> pos(n);
+  for (int i = 0; i < n; ++i)
+    pos[i] = {(g.nodes[i].i + (double)vmin[0]) * vs, (g.nodes[i].j + (double)vmin[1]) * vs,
+              (g.nodes[i].k + (double)vmin[2]) * vs};
+  // DBSCAN min_samples=1 = eps 连通分量; 并查集按 min root, label 按 root 首现序
+  const double eps2 = radius_m * radius_m;
+  std::vector<int> par(n);
+  for (int i = 0; i < n; ++i) par[i] = i;
+  std::function<int(int)> find = [&](int x) {
+    while (par[x] != x) { par[x] = par[par[x]]; x = par[x]; }
+    return x;
+  };
+  for (int a = 0; a < n; ++a)
+    for (int b = a + 1; b < n; ++b) {
+      double dx = pos[a][0] - pos[b][0], dy = pos[a][1] - pos[b][1], dz = pos[a][2] - pos[b][2];
+      if (dx * dx + dy * dy + dz * dz <= eps2) {
+        int ra = find(a), rb = find(b);
+        if (ra != rb) par[std::max(ra, rb)] = std::min(ra, rb);
+      }
+    }
+  std::vector<int> labels(n, -1);
+  std::unordered_map<int, int> r2l;
+  for (int i = 0; i < n; ++i) {
+    int r = find(i);
+    auto it = r2l.find(r);
+    if (it == r2l.end()) { int lb = (int)r2l.size(); r2l[r] = lb; labels[i] = lb; }
+    else labels[i] = it->second;
+  }
+  int n_clusters = (int)r2l.size();
+  if (n_clusters == n) return g;  // 没有可合并的
+
+  // 代表 = 簇内最大 clearance(首个最大); 簇按 label 升序
+  SkelGraph out;
+  for (int c = 0; c < n_clusters; ++c) {
+    int best = -1;
+    for (int i = 0; i < n; ++i)
+      if (labels[i] == c && (best < 0 || g.nodes[i].clearance_m > g.nodes[best].clearance_m))
+        best = i;
+    SkelNode nd = g.nodes[best];
+    nd.degree = 0;
+    out.nodes.push_back(nd);
+  }
+  std::map<std::pair<int, int>, float> edge_len;
+  for (auto& e : g.edges) {
+    int ca = labels[e.a], cb = labels[e.b];
+    if (ca == cb) continue;
+    auto key = std::make_pair(std::min(ca, cb), std::max(ca, cb));
+    auto it = edge_len.find(key);
+    if (it == edge_len.end() || e.length_m < it->second) edge_len[key] = e.length_m;
+  }
+  for (auto& kv : edge_len) out.edges.push_back({kv.first.first, kv.first.second, kv.second});
+  std::vector<int> deg, types;
+  degree_type(n_clusters, out.edges, deg, types);
+  for (int i = 0; i < n_clusters; ++i) { out.nodes[i].degree = deg[i]; out.nodes[i].type = types[i]; }
+  return out;
+}
+
+SkelGraph drop_small_components(const SkelGraph& g, int min_nodes) {
+  if (min_nodes <= 1 || g.nodes.empty()) return g;
+  auto adj = build_adj(g);
+  const int n = (int)g.nodes.size();
+  std::vector<char> seen(n, 0), keep(n, 0);
+  bool any_keep = false;
+  for (int s = 0; s < n; ++s) {
+    if (seen[s]) continue;
+    std::vector<int> comp{s}, stack{s};
+    seen[s] = 1;
+    while (!stack.empty()) {
+      int u = stack.back(); stack.pop_back();
+      for (auto& kv : adj[u])
+        if (!seen[kv.first]) { seen[kv.first] = 1; stack.push_back(kv.first); comp.push_back(kv.first); }
+    }
+    if ((int)comp.size() >= min_nodes) { for (int i : comp) keep[i] = 1; any_keep = true; }
+  }
+  if (!any_keep) return g;
+  return rebuild(g, adj, keep);
+}
+
+void merge_nested_rooms(const SkelGraph& g, std::vector<int>& room_of, double vs,
+                        double margin_m) {
+  struct Box { double lo[2] = {1e9, 1e9}, hi[2] = {-1e9, -1e9}; int cnt = 0; };
+  while (true) {
+    std::vector<int> order;                 // 房间首现序(复刻 dict 插入序)
+    std::unordered_map<int, Box> boxes;
+    for (size_t i = 0; i < g.nodes.size(); ++i) {
+      int r = room_of[i];
+      if (!boxes.count(r)) order.push_back(r);
+      Box& b = boxes[r];
+      double x = g.nodes[i].i * vs, z = g.nodes[i].k * vs;  // (X, Z) 平面
+      b.lo[0] = std::min(b.lo[0], x); b.lo[1] = std::min(b.lo[1], z);
+      b.hi[0] = std::max(b.hi[0], x); b.hi[1] = std::max(b.hi[1], z);
+      b.cnt++;
+    }
+    int small = -1, big = -1;
+    for (int a : order) {
+      for (int b : order) {
+        if (a == b) continue;
+        Box& A = boxes[a]; Box& B = boxes[b];
+        if (A.cnt <= B.cnt && A.lo[0] >= B.lo[0] - margin_m && A.lo[1] >= B.lo[1] - margin_m &&
+            A.hi[0] <= B.hi[0] + margin_m && A.hi[1] <= B.hi[1] + margin_m) {
+          small = a; big = b; break;
+        }
+      }
+      if (small >= 0) break;
+    }
+    if (small < 0) return;
+    for (auto& r : room_of) if (r == small) r = big;
+  }
 }
 
 }  // namespace smc

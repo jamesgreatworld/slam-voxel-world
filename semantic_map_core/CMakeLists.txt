@@ -64,3 +64,24 @@ target_link_libraries(bench_timing semantic_map_core)
 
 add_executable(bench_fullpipe bench/bench_fullpipe.cpp)
 target_link_libraries(bench_fullpipe semantic_map_core)
+
+add_executable(bench_transforms bench/bench_transforms.cpp)
+target_link_libraries(bench_transforms semantic_map_core)
+
+# ---- rclcpp 在线驱动节点(需 source ROS 后 -DBUILD_ROS_NODE=ON)----
+option(BUILD_ROS_NODE "build rclcpp live node" OFF)
+if(BUILD_ROS_NODE)
+  find_package(rclcpp REQUIRED)
+  find_package(sensor_msgs REQUIRED)
+  find_package(visualization_msgs REQUIRED)
+  find_package(geometry_msgs REQUIRED)
+  find_package(std_msgs REQUIRED)
+  find_package(message_filters REQUIRED)
+  find_package(tf2 REQUIRED)
+  find_package(tf2_ros REQUIRED)
+  add_executable(smc_live_node src/smc_live_node.cpp)
+  target_link_libraries(smc_live_node semantic_map_core rclcpp::rclcpp
+    tf2_ros::tf2_ros message_filters::message_filters
+    ${sensor_msgs_TARGETS} ${visualization_msgs_TARGETS}
+    ${geometry_msgs_TARGETS} ${std_msgs_TARGETS})
+endif()
