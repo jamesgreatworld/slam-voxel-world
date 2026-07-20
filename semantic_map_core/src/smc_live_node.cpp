@@ -149,33 +149,39 @@ static void golden_color(int key, double sat, double val, float& r, float& g, fl
   r = (float)rr; g = (float)gg; b = (float)bb;
 }
 
-// _surface_tiles 移植: 地板层(占据 y 的 3% 分位, np.percentile 线性插值后截断)上方
-// clearance_vox 层全 free 的 (X,Z) 列 -> 瓦片中心 vxw 世界坐标
-static std::vector<std::array<double, 3>> surface_tiles(
+// _surface_tiles 多楼层版: 每个楼层地板高度上方 clearance_vox 层全 free 的 (X,Z) 列
+// -> (瓦片中心 vxw 坐标, 层号)。floors_vox 为空时退回单层(占据 y 3% 分位)。
+static std::vector<std::array<double, 4>> surface_tiles(
     const std::vector<uint8_t>& free, const std::vector<uint8_t>& occ, int nx, int ny, int nz,
-    const long vmin[3], double vs, int clearance_vox = 4) {
-  std::vector<std::array<double, 3>> out;
-  std::vector<int> ys;
-  for (long id = 0; id < (long)nx * ny * nz; ++id)
-    if (occ[id]) ys.push_back((int)((id / nz) % ny));
-  if (ys.empty()) return out;
-  std::sort(ys.begin(), ys.end());
-  double q = 0.03 * (ys.size() - 1);
-  size_t lo = (size_t)q;
-  double frac = q - lo;
-  double val = ys[lo] + (lo + 1 < ys.size() ? frac * (ys[lo + 1] - ys[lo]) : 0.0);
-  int y_floor = (int)val;
-  int y0 = y_floor + 1, y1 = y_floor + 1 + clearance_vox;
-  if (y1 > ny) y1 = ny;
-  for (int i = 0; i < nx; ++i)
-    for (int k = 0; k < nz; ++k) {
-      bool all = (y1 > y0);
-      for (int j = y0; j < y1 && all; ++j)
-        if (!free[((long)i * ny + j) * nz + k]) all = false;
-      if (all)
-        out.push_back({(i + vmin[0] + 0.5) * vs, (y_floor + vmin[1] + 1.0) * vs,
-                       (k + vmin[2] + 0.5) * vs});
-    }
+    const long vmin[3], double vs, std::vector<int> floors_vox, int clearance_vox = 4) {
+  std::vector<std::array<double, 4>> out;
+  if (floors_vox.empty()) {  // 单层回退: 3% 分位(np.percentile 线性插值后截断)
+    std::vector<int> ys;
+    for (long id = 0; id < (long)nx * ny * nz; ++id)
+      if (occ[id]) ys.push_back((int)((id / nz) % ny));
+    if (ys.empty()) return out;
+    std::sort(ys.begin(), ys.end());
+    double q = 0.03 * (ys.size() - 1);
+    size_t lo = (size_t)q;
+    double frac = q - lo;
+    double val = ys[lo] + (lo + 1 < ys.size() ? frac * (ys[lo + 1] - ys[lo]) : 0.0);
+    floors_vox.push_back((int)val);
+  }
+  for (size_t lvl = 0; lvl < floors_vox.size(); ++lvl) {
+    int y_floor = floors_vox[lvl];
+    int y0 = y_floor + 1, y1 = y_floor + 1 + clearance_vox;
+    if (y0 < 0) y0 = 0;
+    if (y1 > ny) y1 = ny;
+    for (int i = 0; i < nx; ++i)
+      for (int k = 0; k < nz; ++k) {
+        bool all = (y1 > y0);
+        for (int j = y0; j < y1 && all; ++j)
+          if (!free[((long)i * ny + j) * nz + k]) all = false;
+        if (all)
+          out.push_back({(i + vmin[0] + 0.5) * vs, (y_floor + vmin[1] + 1.0) * vs,
+                         (k + vmin[2] + 0.5) * vs, (double)lvl});
+      }
+  }
   return out;
 }
 
@@ -221,9 +227,11 @@ class SmcLiveNode : public rclcpp::Node {
     gvd_pub_ = create_publisher<MarkerArray>("/dsg/gvd", latch);
     surf_pub_ = create_publisher<MarkerArray>("/dsg/surface", latch);
     sp_pub_ = create_publisher<MarkerArray>("/nav/surface_places", latch);
-    if (load_map())
-      RCLCPP_INFO(get_logger(), "已恢复存档: %s (DSG nodes=%zu, id_counter=%d)",
-                  kMapDir, sg_.order.size(), id_counter_);
+    if (load_map()) {
+      RCLCPP_INFO(get_logger(), "已恢复存档: %s (DSG nodes=%zu, id_counter=%d, nav层=%zu)",
+                  kMapDir, sg_.order.size(), id_counter_, levels_.size());
+      publish_nav();  // 恢复后立即发一次代价地图
+    }
     cycle_thread_ = std::thread([this] { cycle_loop(); });
   }
 
@@ -322,6 +330,11 @@ class SmcLiveNode : public rclcpp::Node {
     }
     if (pts.empty()) return;
     nav_feed(nav_surf, nav_obst);
+    if (n_int_ % 25 == 0) {
+      std::lock_guard<std::mutex> lk(nav_mtx_);
+      RCLCPP_INFO(get_logger(), "nav: surf_pts=%zu obst_pts=%zu levels=%zu",
+                  nav_surf.size(), nav_obst.size(), levels_.size());
+    }
     float origin[3] = {(float)(-ty), (float)tz, (float)(-tx)};
     {
       std::lock_guard<std::mutex> lk(map_mtx_);
@@ -408,6 +421,7 @@ class SmcLiveNode : public rclcpp::Node {
 
   void nav_feed(const std::vector<std::array<double, 3>>& surf_pts,
                 const std::vector<std::array<double, 3>>& obst_pts) {
+    std::lock_guard<std::mutex> lk(nav_mtx_);
     // surface 点: 就近层(|z-rep|<=gap), 剩余最低簇开新层(需 >=min_pts)
     std::vector<char> assigned(surf_pts.size(), 0);
     for (int iter = 0; iter <= kMaxLevels; ++iter) {
@@ -450,10 +464,15 @@ class SmcLiveNode : public rclcpp::Node {
         if (p[2] > rz + kGroundEps && p[2] < rz + kRobotH) lv.obst[flat]++;
       }
     }
-    if (n_int_ % 15 == 0) publish_nav();
+    if (n_int_ % 15 == 0) publish_nav_locked();
   }
 
   void publish_nav() {
+    std::lock_guard<std::mutex> lk(nav_mtx_);
+    publish_nav_locked();
+  }
+
+  void publish_nav_locked() {
     MarkerArray arr;
     Marker wipe; wipe.action = Marker::DELETEALL; arr.markers.push_back(wipe);
     int mid = 0;
@@ -533,6 +552,21 @@ class SmcLiveNode : public rclcpp::Node {
       std::lock_guard<std::mutex> lk(map_mtx_);
       obs_->save(dir + "/obsmap.bin");
     }
+    {  // nav 楼层栅格(代价地图状态)
+      std::lock_guard<std::mutex> lk(nav_mtx_);
+      FILE* f = std::fopen((dir + "/nav.bin").c_str(), "wb");
+      if (f) {
+        int nl = (int)levels_.size();
+        std::fwrite(&nl, 4, 1, f);
+        for (auto& lv : levels_) {
+          std::fwrite(&lv.z_sum, 8, 1, f);
+          std::fwrite(&lv.z_cnt, 8, 1, f);
+          std::fwrite(lv.surf.data(), 4, lv.surf.size(), f);
+          std::fwrite(lv.obst.data(), 4, lv.obst.size(), f);
+        }
+        std::fclose(f);
+      }
+    }
     if (have_sg_) {
       std::ofstream f(dir + "/dsg.txt");
       f << "id_counter " << id_counter_ << "\n";
@@ -559,6 +593,26 @@ class SmcLiveNode : public rclcpp::Node {
       return false;
     }
     obs_ = std::move(m);
+    {  // nav 楼层栅格恢复
+      FILE* nf = std::fopen((dir + "/nav.bin").c_str(), "rb");
+      if (nf) {
+        int nl = 0;
+        if (std::fread(&nl, 4, 1, nf) == 1 && nl >= 0 && nl <= kMaxLevels) {
+          std::lock_guard<std::mutex> lk(nav_mtx_);
+          levels_.clear();
+          for (int i = 0; i < nl; ++i) {
+            NavLevel lv(0);
+            size_t rd = std::fread(&lv.z_sum, 8, 1, nf);
+            rd += std::fread(&lv.z_cnt, 8, 1, nf);
+            rd += std::fread(lv.surf.data(), 4, lv.surf.size(), nf);
+            rd += std::fread(lv.obst.data(), 4, lv.obst.size(), nf);
+            (void)rd;
+            levels_.push_back(std::move(lv));
+          }
+        }
+        std::fclose(nf);
+      }
+    }
     std::ifstream f(dir + "/dsg.txt");
     if (f) {
       std::string line;
@@ -676,7 +730,14 @@ class SmcLiveNode : public rclcpp::Node {
     auto objs = extract_objects(occ.data(), sem.data(), cnx, cny, cnz, structure_ids_,
                                 20, 3.0, 5, 2, kVs);
     link_to_places(objs, g, vmin_c, (float)kVs);
-    auto surf = surface_tiles(fre, occ, cnx, cny, cnz, vmin_c, kVs);
+    // 楼层地板高度(来自 nav 分层的 rep_z, ROS z = vxw y): 每层独立出 3D surface 瓦片
+    std::vector<int> floors_vox;
+    {
+      std::lock_guard<std::mutex> lk(nav_mtx_);
+      for (auto& lv : levels_)
+        floors_vox.push_back((int)std::floor(lv.rep_z() / kVs) - (int)vmin_c[1] - 1);
+    }
+    auto surf = surface_tiles(fre, occ, cnx, cny, cnz, vmin_c, kVs, floors_vox);
 
     MergeStats st{0, 0, 0, 0, 0};
     if (!have_sg_) {
@@ -700,8 +761,9 @@ class SmcLiveNode : public rclcpp::Node {
     }
     last_rooms_ = nr; last_places_ = np; last_objects_ = no;
     publish_dsg(g, room, surf, vmin_c, gvd_cells);
+    publish_nav();   // 每周期重发代价地图(不依赖新帧, 重启/无播包时 rviz 也能收到)
     dump_dsg();
-    save_map();  // 每周期存档(占据图+DSG), 重启可恢复
+    save_map();  // 每周期存档(占据图+DSG+nav层), 重启可恢复
     RCLCPP_INFO(get_logger(), "cycle rooms=%d places=%d objects=%d merge={m=%d a=%d r=%d c=%d}",
                 nr, np, no, st.matched, st.added, st.removed, st.carried);
     return true;
@@ -710,7 +772,7 @@ class SmcLiveNode : public rclcpp::Node {
   // SceneGraph 可视化: 元素分组构建 -> 各自单独话题(/dsg/rooms|places|objects|gvd|surface)
   // + 聚合 /dsg。每组开头 DELETEALL 防残留。复刻 gvd_live.publish_sg 的元素语义。
   void publish_dsg(const SkelGraph& g, const std::vector<int>& room,
-                   const std::vector<std::array<double, 3>>& surf, const long vmin_c[3],
+                   const std::vector<std::array<double, 4>>& surf, const long vmin_c[3],
                    const std::vector<std::array<double, 3>>& gvd_cells) {
     int mid = 0;
     auto mk = [&](int type, const std::string& ns) {
@@ -887,17 +949,26 @@ class SmcLiveNode : public rclcpp::Node {
       m_gvd.push_back(sk);
     }
 
-    // ---- surface: 3D 地面可通行瓦片 ----
+    // ---- surface: 3D 地面可通行瓦片(多楼层, 每层一色)----
     if (!surf.empty()) {
       Marker sm = mk(Marker::CUBE_LIST, "surface_places");
       sm.scale.x = sm.scale.y = 0.095; sm.scale.z = 0.02;
-      std_msgs::msg::ColorRGBA c; c.r = 0.15f; c.g = 0.85f; c.b = 0.75f; c.a = 0.55f;
+      std::map<int, std_msgs::msg::ColorRGBA> lut;
       for (auto& p : surf) {
         geometry_msgs::msg::Point q;
         double rx, ry, rz; yup2ros(p[0], p[1], p[2], rx, ry, rz);
         q.x = rx; q.y = ry; q.z = rz;
         sm.points.push_back(q);
-        sm.colors.push_back(c);
+        int lvl = (int)p[3];
+        auto it = lut.find(lvl);
+        if (it == lut.end()) {
+          std_msgs::msg::ColorRGBA c;
+          if (lvl == 0) { c.r = 0.15f; c.g = 0.85f; c.b = 0.75f; }   // L0 青
+          else golden_color(60 + lvl * 7, 0.6, 1.0, c.r, c.g, c.b);  // 其余层黄金角
+          c.a = 0.55f;
+          it = lut.emplace(lvl, c).first;
+        }
+        sm.colors.push_back(it->second);
       }
       m_surface.push_back(sm);
     }
@@ -956,6 +1027,7 @@ class SmcLiveNode : public rclcpp::Node {
   std::vector<rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr> navmap_pubs_;
   LabelSpace ls_;
   std::vector<NavLevel> levels_;
+  std::mutex nav_mtx_;
   tf2_ros::Buffer tfbuf_;
   tf2_ros::TransformListener tflis_;
   std::thread cycle_thread_;
