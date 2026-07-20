@@ -3,6 +3,8 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <memory>
+#include <string>
 #include <vector>
 
 namespace smc {
@@ -27,6 +29,10 @@ class ObsMap {
   // 占据格 bool(logodds > OCC_THR), 长度 nx*ny*nz, 行主序 (i*ny+j)*nz+k。
   std::vector<uint8_t> occupancy_mask() const;
   std::vector<uint8_t> observed_free_mask() const;  // logodds < FREE_THR
+
+  // 存档/恢复(二进制: header + logodds + sem_label + sem_count)
+  bool save(const std::string& path) const;
+  static std::unique_ptr<ObsMap> load(const std::string& path);
 
   long last_hit_cells = 0;   // 上一帧去重后命中格数(调试)
   long last_miss_cells = 0;  // 上一帧去重后 miss 格数(调试)

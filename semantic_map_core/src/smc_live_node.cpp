@@ -8,10 +8,12 @@
 #include "semantic_map_core/objects.hpp"
 #include "semantic_map_core/obsmap.hpp"
 #include "semantic_map_core/scene_graph.hpp"
+#include "semantic_map_core/surface.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <geometry_msgs/msg/point.hpp>
@@ -28,8 +30,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -60,6 +64,13 @@ static const double kBounds[6] = {-20, -12, -3, 8, 10, 5};  // ROS z-up
 static const double kCycleInterval = 10.0;
 static const char* kLabelspace =
     "/home/james/Semantic_map_ws/src/Hydra/config/label_spaces/tartanground_house_label_space.yaml";
+// nav 2D 前端(nav_frontend.py 同参): 平面范围/分层
+static const double kNavX0 = -16, kNavY0 = -9, kNavX1 = 5, kNavY1 = 8;
+static const int kNavNX = 210, kNavNY = 170;  // ceil((x1-x0)/vs), ceil((y1-y0)/vs)
+static const double kRobotH = 0.5, kGroundEps = 0.08, kLevelGap = 0.8;
+static const int kLevelMinPts = 200, kMaxLevels = 4;
+// 地图存档目录(占据图+DSG, 启动时存在则恢复)
+static const char* kMapDir = "/home/james/semantic_map_core/maps/house_live";
 static const char* kStructKw[] = {"wall", "ceiling", "roof", "building", "floor", "ground",
                                   "carpet", "rug", "pillar", "column", "beam", "stair", "sky"};
 
@@ -73,12 +84,36 @@ static inline void yup2ros(double x, double y, double z, double& rx, double& ry,
   rx = -z; ry = -x; rz = y;
 }
 
-// labelspace yaml: "  - {label: 31, name: floor}" -> 结构类 id 集合
-static std::set<int> load_structure_ids(const std::string& path) {
-  std::set<int> out;
+// labelspace yaml 解析: label 名字表 + 结构类 + surface 类 + invalid 类
+struct LabelSpace {
+  std::map<int, std::string> names;
+  std::set<int> structure;   // 名含 STRUCT_KW -> 不算物体
+  std::set<int> surface;     // surface_places_labels(地面类, nav 用)
+  std::set<int> invalid;     // invalid_labels
+};
+static std::vector<int> parse_int_list(const std::string& s) {
+  std::vector<int> out;
+  int v = 0; bool in = false;
+  for (char c : s) {
+    if (c >= '0' && c <= '9') { v = v * 10 + (c - '0'); in = true; }
+    else { if (in) out.push_back(v); v = 0; in = false; }
+  }
+  if (in) out.push_back(v);
+  return out;
+}
+static LabelSpace load_labelspace(const std::string& path) {
+  LabelSpace ls;
   std::ifstream f(path);
   std::string line;
   while (std::getline(f, line)) {
+    if (line.find("surface_places_labels:") != std::string::npos) {
+      for (int v : parse_int_list(line.substr(line.find('[')))) ls.surface.insert(v);
+      continue;
+    }
+    if (line.find("invalid_labels:") != std::string::npos) {
+      for (int v : parse_int_list(line.substr(line.find('[')))) ls.invalid.insert(v);
+      continue;
+    }
     auto lp = line.find("label:"); auto np = line.find("name:");
     if (lp == std::string::npos || np == std::string::npos) continue;
     int id = std::atoi(line.c_str() + lp + 6);
@@ -86,11 +121,32 @@ static std::set<int> load_structure_ids(const std::string& path) {
     while (!name.empty() && (name.back() == '}' || name.back() == ' ' || name.back() == '\r'))
       name.pop_back();
     while (!name.empty() && name.front() == ' ') name.erase(name.begin());
-    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+    ls.names[id] = name;
+    std::string low = name;
+    std::transform(low.begin(), low.end(), low.begin(), ::tolower);
     for (const char* kw : kStructKw)
-      if (name.find(kw) != std::string::npos) { out.insert(id); break; }
+      if (low.find(kw) != std::string::npos) { ls.structure.insert(id); break; }
   }
-  return out;
+  if (ls.invalid.empty()) ls.invalid.insert(0);
+  return ls;
+}
+
+// 黄金角 HSV 配色(与 Python _label_color/room_color 同式)
+static void golden_color(int key, double sat, double val, float& r, float& g, float& b) {
+  double h = std::fmod(key * 137.508, 360.0) / 360.0;
+  int hi = (int)(h * 6.0) % 6;
+  double f = h * 6.0 - (int)(h * 6.0);
+  double p = val * (1 - sat), q = val * (1 - f * sat), t = val * (1 - (1 - f) * sat);
+  double rr, gg, bb;
+  switch (hi) {
+    case 0: rr = val; gg = t; bb = p; break;
+    case 1: rr = q; gg = val; bb = p; break;
+    case 2: rr = p; gg = val; bb = t; break;
+    case 3: rr = p; gg = q; bb = val; break;
+    case 4: rr = t; gg = p; bb = val; break;
+    default: rr = val; gg = p; bb = q; break;
+  }
+  r = (float)rr; g = (float)gg; b = (float)bb;
 }
 
 // _surface_tiles 移植: 地板层(占据 y 的 3% 分位, np.percentile 线性插值后截断)上方
@@ -136,9 +192,11 @@ class SmcLiveNode : public rclcpp::Node {
     ny_ = (int)std::ceil((kBounds[5] - kBounds[2]) / kVs);
     nz_ = (int)std::ceil((kBounds[4] - kBounds[1]) / kVs);
     obs_ = std::make_unique<ObsMap>(nx_, ny_, nz_, vmin_, (float)kVs);
-    structure_ids_ = load_structure_ids(kLabelspace);
-    RCLCPP_INFO(get_logger(), "grid %dx%dx%d vmin=(%ld,%ld,%ld) structure_ids=%zu",
-                nx_, ny_, nz_, vmin_[0], vmin_[1], vmin_[2], structure_ids_.size());
+    ls_ = load_labelspace(kLabelspace);
+    structure_ids_ = ls_.structure;
+    RCLCPP_INFO(get_logger(), "grid %dx%dx%d vmin=(%ld,%ld,%ld) labels=%zu structure=%zu surface=%zu",
+                nx_, ny_, nz_, vmin_[0], vmin_[1], vmin_[2], ls_.names.size(),
+                structure_ids_.size(), ls_.surface.size());
 
     info_sub_ = create_subscription<CameraInfo>(
         kInfoTopic, 10, [this](CameraInfo::ConstSharedPtr m) {
@@ -153,7 +211,19 @@ class SmcLiveNode : public rclcpp::Node {
     rgb_sub_.subscribe(this, kRgbTopic);
     sync_ = std::make_unique<Sync>(Policy(30), depth_sub_, seg_sub_, rgb_sub_);
     sync_->registerCallback(&SmcLiveNode::on_frame, this);
-    dsg_pub_ = create_publisher<MarkerArray>("/dsg", rclcpp::QoS(1).transient_local());
+    auto latch = rclcpp::QoS(1).transient_local();
+    dsg_pub_ = create_publisher<MarkerArray>("/dsg", latch);
+    vox_pub_ = create_publisher<MarkerArray>("/semantic_voxels", latch);
+    // SceneGraph 元素分话题(rviz 可单独开关)
+    obj_pub_ = create_publisher<MarkerArray>("/dsg/objects", latch);
+    room_pub_ = create_publisher<MarkerArray>("/dsg/rooms", latch);
+    place_pub_ = create_publisher<MarkerArray>("/dsg/places", latch);
+    gvd_pub_ = create_publisher<MarkerArray>("/dsg/gvd", latch);
+    surf_pub_ = create_publisher<MarkerArray>("/dsg/surface", latch);
+    sp_pub_ = create_publisher<MarkerArray>("/nav/surface_places", latch);
+    if (load_map())
+      RCLCPP_INFO(get_logger(), "已恢复存档: %s (DSG nodes=%zu, id_counter=%d)",
+                  kMapDir, sg_.order.size(), id_counter_);
     cycle_thread_ = std::thread([this] { cycle_loop(); });
   }
 
@@ -225,6 +295,7 @@ class SmcLiveNode : public rclcpp::Node {
     std::vector<float> pts;
     std::vector<uint8_t> labels;
     pts.reserve(20000 * 3);
+    std::vector<std::array<double, 3>> nav_surf, nav_obst;  // (gx,gy,z) nav 平面点
     int su = 0;
     for (int v = 0; v < H; v += kStride) {
       int uu = 0;
@@ -238,11 +309,19 @@ class SmcLiveNode : public rclcpp::Node {
         double wz = R[6] * X + R[7] * Y + R[8] * z + tz;
         // ROS -> vxw: X=-y, Y=z, Z=-x
         pts.push_back((float)(-wy)); pts.push_back((float)wz); pts.push_back((float)(-wx));
-        labels.push_back(seg[(long)v * W + u]);
+        int lab = seg[(long)v * W + u];
+        labels.push_back((uint8_t)lab);
+        // nav 2D 层(nav_frontend 逻辑): surface 类 / 障碍类分拣
+        int gx = (int)std::floor((wx - kNavX0) / kVs), gy = (int)std::floor((wy - kNavY0) / kVs);
+        if (gx >= 0 && gx < kNavNX && gy >= 0 && gy < kNavNY) {
+          if (ls_.surface.count(lab)) nav_surf.push_back({(double)gx, (double)gy, wz});
+          else if (!ls_.invalid.count(lab)) nav_obst.push_back({(double)gx, (double)gy, wz});
+        }
       }
       ++su;
     }
     if (pts.empty()) return;
+    nav_feed(nav_surf, nav_obst);
     float origin[3] = {(float)(-ty), (float)tz, (float)(-tx)};
     {
       std::lock_guard<std::mutex> lk(map_mtx_);
@@ -255,6 +334,264 @@ class SmcLiveNode : public rclcpp::Node {
     if (n_int_ % 25 == 0)
       RCLCPP_INFO(get_logger(), "integrated=%ld skipped_tf=%ld pts=%zu int_ms(mean=%.1f max=%.1f)",
                   n_int_, n_skip_, labels.size(), int_ms_sum_ / n_int_, int_ms_max_);
+    if (n_int_ % 10 == 0) publish_voxels();  // 增量语义体素可视化
+  }
+
+  // 语义体素 CUBE_LIST(复刻 live_ros_stream._publish_voxels: 黄金角配色, 结构类半透明)
+  void publish_voxels() {
+    std::vector<uint8_t> occ, sem;
+    {
+      std::lock_guard<std::mutex> lk(map_mtx_);
+      occ = obs_->occupancy_mask();
+      sem = obs_->sem_label();
+    }
+    Marker m;
+    m.header.frame_id = kMapFrame;
+    m.header.stamp = now();
+    m.ns = "semantic_voxels"; m.id = 0;
+    m.type = Marker::CUBE_LIST; m.action = Marker::ADD;
+    m.pose.orientation.w = 1.0;
+    m.scale.x = m.scale.y = m.scale.z = kVs * 0.95;
+    std::map<int, std_msgs::msg::ColorRGBA> lut;
+    for (int i = 0; i < nx_; ++i)
+      for (int j = 0; j < ny_; ++j)
+        for (int k = 0; k < nz_; ++k) {
+          long id = ((long)i * ny_ + j) * nz_ + k;
+          if (!occ[id]) continue;
+          double vx = (i + vmin_[0] + 0.5) * kVs, vy = (j + vmin_[1] + 0.5) * kVs,
+                 vz = (k + vmin_[2] + 0.5) * kVs;
+          geometry_msgs::msg::Point p;
+          double rx, ry, rz; yup2ros(vx, vy, vz, rx, ry, rz);
+          p.x = rx; p.y = ry; p.z = rz;
+          m.points.push_back(p);
+          int l = sem[id];
+          auto it = lut.find(l);
+          if (it == lut.end()) {
+            std_msgs::msg::ColorRGBA c;
+            if (l == 0) { c.r = c.g = c.b = 0.55f; c.a = 0.15f; }
+            else {
+              double h = std::fmod(l * 137.508, 360.0) / 360.0;  // 黄金角色相
+              double s = 0.75, v = 0.95;
+              int hi = (int)(h * 6.0) % 6;
+              double f = h * 6.0 - (int)(h * 6.0);
+              double pq = v * (1 - s), qq = v * (1 - f * s), tq = v * (1 - (1 - f) * s);
+              double r, g, b;
+              switch (hi) {
+                case 0: r = v; g = tq; b = pq; break;
+                case 1: r = qq; g = v; b = pq; break;
+                case 2: r = pq; g = v; b = tq; break;
+                case 3: r = pq; g = qq; b = v; break;
+                case 4: r = tq; g = pq; b = v; break;
+                default: r = v; g = pq; b = qq; break;
+              }
+              c.r = (float)r; c.g = (float)g; c.b = (float)b;
+              c.a = structure_ids_.count(l) ? 0.28f : 1.0f;  // 结构类半透明(透墙看物体)
+            }
+            it = lut.emplace(l, c).first;
+          }
+          m.colors.push_back(it->second);
+        }
+    if (m.points.empty()) return;
+    MarkerArray arr;
+    arr.markers.push_back(m);
+    vox_pub_->publish(arr);
+  }
+
+  // ---------- nav 2D 多楼层前端(nav_frontend.py 逻辑) ----------
+  struct NavLevel {
+    std::vector<int> surf, obst;   // (kNavNY*kNavNX) 行主序 gy*NX+gx
+    double z_sum; long z_cnt;
+    NavLevel(double rep) : surf((size_t)kNavNY * kNavNX, 0), obst((size_t)kNavNY * kNavNX, 0),
+                           z_sum(rep), z_cnt(1) {}
+    double rep_z() const { return z_sum / z_cnt; }
+  };
+
+  void nav_feed(const std::vector<std::array<double, 3>>& surf_pts,
+                const std::vector<std::array<double, 3>>& obst_pts) {
+    // surface 点: 就近层(|z-rep|<=gap), 剩余最低簇开新层(需 >=min_pts)
+    std::vector<char> assigned(surf_pts.size(), 0);
+    for (int iter = 0; iter <= kMaxLevels; ++iter) {
+      bool any_left = false;
+      for (size_t i = 0; i < surf_pts.size(); ++i) {
+        if (assigned[i]) continue;
+        double z = surf_pts[i][2];
+        int best = -1; double bd = 1e18;
+        for (size_t k = 0; k < levels_.size(); ++k) {
+          double d = std::fabs(z - levels_[k].rep_z());
+          if (d < bd) { bd = d; best = (int)k; }
+        }
+        if (best >= 0 && bd <= kLevelGap) {
+          NavLevel& lv = levels_[best];
+          long flat = (long)surf_pts[i][1] * kNavNX + (long)surf_pts[i][0];
+          lv.surf[flat]++;
+          lv.z_sum += z; lv.z_cnt++;
+          assigned[i] = 1;
+        } else any_left = true;
+      }
+      if (!any_left || (int)levels_.size() >= kMaxLevels) break;
+      // 开新层: 未分配点的最低簇
+      std::vector<double> zr;
+      for (size_t i = 0; i < surf_pts.size(); ++i) if (!assigned[i]) zr.push_back(surf_pts[i][2]);
+      if ((int)zr.size() < kLevelMinPts) break;
+      double zmin = *std::min_element(zr.begin(), zr.end());
+      std::vector<double> band;
+      for (double z : zr) if (z <= zmin + kLevelGap) band.push_back(z);
+      if ((int)band.size() < kLevelMinPts) break;
+      std::nth_element(band.begin(), band.begin() + band.size() / 2, band.end());
+      levels_.emplace_back(band[band.size() / 2]);   // rep = median
+      std::sort(levels_.begin(), levels_.end(),
+                [](const NavLevel& a, const NavLevel& b) { return a.rep_z() < b.rep_z(); });
+    }
+    // 障碍点: 落在某层 [rep+eps, rep+robot_h] 高度带 -> 该层挡路
+    for (auto& p : obst_pts) {
+      long flat = (long)p[1] * kNavNX + (long)p[0];
+      for (auto& lv : levels_) {
+        double rz = lv.rep_z();
+        if (p[2] > rz + kGroundEps && p[2] < rz + kRobotH) lv.obst[flat]++;
+      }
+    }
+    if (n_int_ % 15 == 0) publish_nav();
+  }
+
+  void publish_nav() {
+    MarkerArray arr;
+    Marker wipe; wipe.action = Marker::DELETEALL; arr.markers.push_back(wipe);
+    int mid = 0;
+    for (size_t k = 0; k < levels_.size(); ++k) {
+      NavLevel& lv = levels_[k];
+      std::vector<uint8_t> walkable; std::vector<int8_t> cost;
+      occupancy_from_counts(lv.surf.data(), lv.obst.data(), kNavNY * kNavNX, 1, 2, walkable, cost);
+      std::vector<uint8_t> blocked((size_t)kNavNY * kNavNX);
+      for (size_t i = 0; i < blocked.size(); ++i) blocked[i] = lv.obst[i] >= 2 ? 1 : 0;
+      // OccupancyGrid(origin.z = 层高 -> rviz 按真实高度堆叠)
+      if (k >= navmap_pubs_.size())
+        navmap_pubs_.push_back(create_publisher<nav_msgs::msg::OccupancyGrid>(
+            "/nav/surface_map_L" + std::to_string(k), rclcpp::QoS(1).transient_local()));
+      nav_msgs::msg::OccupancyGrid gmap;
+      gmap.header.frame_id = kMapFrame;
+      gmap.header.stamp = now();
+      gmap.info.resolution = (float)kVs;
+      gmap.info.width = kNavNX; gmap.info.height = kNavNY;
+      gmap.info.origin.position.x = kNavX0;
+      gmap.info.origin.position.y = kNavY0;
+      gmap.info.origin.position.z = lv.rep_z();
+      gmap.info.origin.orientation.w = 1.0;
+      gmap.data.assign(cost.begin(), cost.end());
+      navmap_pubs_[k]->publish(gmap);
+      // surface place 区域(球+id/面积文字+经门邻接边)
+      auto res = cluster_surface_places(walkable.data(), kNavNY, kNavNX, kNavX0, kNavY0, kVs,
+                                        15, 0.9, blocked.data());
+      double zc = lv.rep_z() + 0.15;
+      std::map<int, std::pair<double, double>> cen;
+      for (auto& r : res.regions) {
+        cen[r.id] = {r.cx, r.cy};
+        Marker sph;
+        sph.header.frame_id = kMapFrame; sph.header.stamp = now();
+        sph.ns = "L" + std::to_string(k) + "_nodes"; sph.id = mid++;
+        sph.type = Marker::SPHERE; sph.action = Marker::ADD;
+        sph.pose.orientation.w = 1.0;
+        sph.pose.position.x = r.cx; sph.pose.position.y = r.cy; sph.pose.position.z = zc;
+        sph.scale.x = sph.scale.y = sph.scale.z = 0.25;
+        golden_color((int)(r.id + k * 40), 0.55, 1.0, sph.color.r, sph.color.g, sph.color.b);
+        sph.color.a = 0.95f;
+        arr.markers.push_back(sph);
+        Marker txt = sph;
+        txt.ns = "L" + std::to_string(k) + "_labels"; txt.id = mid++;
+        txt.type = Marker::TEXT_VIEW_FACING;
+        txt.pose.position.z = zc + 0.3;
+        txt.scale.z = 0.20;
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "L%zu.S%d %.1fm2", k, r.id, r.area_m2);
+        txt.text = buf;
+        txt.color.r = txt.color.g = txt.color.b = 1.0f; txt.color.a = 1.0f;
+        arr.markers.push_back(txt);
+      }
+      Marker eln;
+      eln.header.frame_id = kMapFrame; eln.header.stamp = now();
+      eln.ns = "L" + std::to_string(k) + "_edges"; eln.id = mid++;
+      eln.type = Marker::LINE_LIST; eln.action = Marker::ADD;
+      eln.pose.orientation.w = 1.0; eln.scale.x = 0.03;
+      for (auto& e : res.edges) {
+        geometry_msgs::msg::Point a, b;
+        a.x = cen[e.first].first; a.y = cen[e.first].second; a.z = zc;
+        b.x = cen[e.second].first; b.y = cen[e.second].second; b.z = zc;
+        eln.points.push_back(a); eln.points.push_back(b);
+        std_msgs::msg::ColorRGBA c; c.r = 0.2f; c.g = 1.0f; c.b = 0.4f; c.a = 0.9f;
+        eln.colors.push_back(c); eln.colors.push_back(c);
+      }
+      arr.markers.push_back(eln);
+    }
+    if (arr.markers.size() > 1) sp_pub_->publish(arr);
+  }
+
+  // ---------- 地图存档/恢复(占据图 + DSG + id 计数) ----------
+  void save_map() {
+    std::string dir(kMapDir);
+    std::ofstream mk_dir;  // 确保目录存在
+    (void)system(("mkdir -p " + dir).c_str());
+    {
+      std::lock_guard<std::mutex> lk(map_mtx_);
+      obs_->save(dir + "/obsmap.bin");
+    }
+    if (have_sg_) {
+      std::ofstream f(dir + "/dsg.txt");
+      f << "id_counter " << id_counter_ << "\n";
+      for (auto& id : sg_.order) {
+        SceneNode& n = sg_.nodes[id];
+        f << n.id << "\t" << n.layer << "\t" << (n.parent.empty() ? "-" : n.parent) << "\t"
+          << n.pos[0] << " " << n.pos[1] << " " << n.pos[2] << "\t" << n.obj_class << " "
+          << n.voxel_count << " " << n.place_id << " " << n.misses << " " << n.seen_count << "\t"
+          << n.bmin[0] << " " << n.bmin[1] << " " << n.bmin[2] << " "
+          << n.bmax[0] << " " << n.bmax[1] << " " << n.bmax[2] << "\t"
+          << n.bmin_m[0] << " " << n.bmin_m[1] << " " << n.bmin_m[2] << " "
+          << n.bmax_m[0] << " " << n.bmax_m[1] << " " << n.bmax_m[2] << "\t"
+          << n.feat[0] << " " << n.feat[1] << " " << n.feat[2] << "\n";
+      }
+    }
+  }
+
+  bool load_map() {
+    std::string dir(kMapDir);
+    auto m = ObsMap::load(dir + "/obsmap.bin");
+    if (!m) return false;
+    if (m->nx() != nx_ || m->ny() != ny_ || m->nz() != nz_) {
+      RCLCPP_WARN(get_logger(), "存档网格尺寸不符, 忽略存档");
+      return false;
+    }
+    obs_ = std::move(m);
+    std::ifstream f(dir + "/dsg.txt");
+    if (f) {
+      std::string line;
+      if (std::getline(f, line)) {
+        std::istringstream ss(line); std::string tag; ss >> tag >> id_counter_;
+      }
+      sg_ = SceneGraph{};
+      std::vector<std::pair<std::string, std::string>> parents;
+      while (std::getline(f, line)) {
+        std::istringstream ss(line);
+        SceneNode n;
+        std::string parent, seg;
+        std::getline(ss, n.id, '\t');
+        std::getline(ss, n.layer, '\t');
+        std::getline(ss, parent, '\t');
+        std::getline(ss, seg, '\t');
+        { std::istringstream v(seg); v >> n.pos[0] >> n.pos[1] >> n.pos[2]; }
+        std::getline(ss, seg, '\t');
+        { std::istringstream v(seg); v >> n.obj_class >> n.voxel_count >> n.place_id >> n.misses >> n.seen_count; }
+        std::getline(ss, seg, '\t');
+        { std::istringstream v(seg); v >> n.bmin[0] >> n.bmin[1] >> n.bmin[2] >> n.bmax[0] >> n.bmax[1] >> n.bmax[2]; }
+        std::getline(ss, seg, '\t');
+        { std::istringstream v(seg); v >> n.bmin_m[0] >> n.bmin_m[1] >> n.bmin_m[2] >> n.bmax_m[0] >> n.bmax_m[1] >> n.bmax_m[2]; }
+        std::getline(ss, seg, '\t');
+        { std::istringstream v(seg); v >> n.feat[0] >> n.feat[1] >> n.feat[2]; }
+        sg_.add_node(n);
+        if (parent != "-") parents.push_back({n.id, parent});
+      }
+      for (auto& pr : parents)
+        if (sg_.nodes.count(pr.second)) sg_.set_parent(pr.first, pr.second);
+      have_sg_ = !sg_.order.empty();
+    }
+    return true;
   }
 
   // ---------- 周期场景图线程(gvd_live 链路) ----------
@@ -322,6 +659,13 @@ class SmcLiveNode : public rclcpp::Node {
     auto gvd = thin_gvd(
         extract_gvd(fre.data(), dist.data(), parent.data(), cnx, cny, cnz, (float)kVs, 0.20f, 0.40f).data(),
         cnx, cny, cnz);
+    std::vector<std::array<double, 3>> gvd_cells;  // 骨架体素 vxw 世界坐标(可视化)
+    for (int i = 0; i < cnx; ++i)
+      for (int j = 0; j < cny; ++j)
+        for (int k = 0; k < cnz; ++k)
+          if (gvd[((long)i * cny + j) * cnz + k])
+            gvd_cells.push_back({(i + vmin_c[0] + 0.5) * kVs, (j + vmin_c[1] + 0.5) * kVs,
+                                 (k + vmin_c[2] + 0.5) * kVs});
     auto g = skeleton_to_graph(gvd.data(), dist.data(), cnx, cny, cnz, (float)kVs, 0.15f);
     g = prune_spurs(g, 0.3);
     g = merge_close(g, 0.2, vmin_c, kVs);
@@ -355,101 +699,229 @@ class SmcLiveNode : public rclcpp::Node {
       (void)rooms_set;
     }
     last_rooms_ = nr; last_places_ = np; last_objects_ = no;
-    publish_dsg(g, room, surf, vmin_c);
+    publish_dsg(g, room, surf, vmin_c, gvd_cells);
     dump_dsg();
+    save_map();  // 每周期存档(占据图+DSG), 重启可恢复
     RCLCPP_INFO(get_logger(), "cycle rooms=%d places=%d objects=%d merge={m=%d a=%d r=%d c=%d}",
                 nr, np, no, st.matched, st.added, st.removed, st.carried);
     return true;
   }
 
+  // SceneGraph 可视化: 元素分组构建 -> 各自单独话题(/dsg/rooms|places|objects|gvd|surface)
+  // + 聚合 /dsg。每组开头 DELETEALL 防残留。复刻 gvd_live.publish_sg 的元素语义。
   void publish_dsg(const SkelGraph& g, const std::vector<int>& room,
-                   const std::vector<std::array<double, 3>>& surf, const long vmin_c[3]) {
-    MarkerArray arr;
+                   const std::vector<std::array<double, 3>>& surf, const long vmin_c[3],
+                   const std::vector<std::array<double, 3>>& gvd_cells) {
+    int mid = 0;
     auto mk = [&](int type, const std::string& ns) {
       Marker m;
       m.header.frame_id = kMapFrame;
       m.header.stamp = now();
-      m.ns = ns; m.id = 0; m.type = type; m.action = Marker::ADD;
+      m.ns = ns; m.id = mid++; m.type = type; m.action = Marker::ADD;
       m.pose.orientation.w = 1.0;
       return m;
     };
-    // places 节点 + 边(按房间着色)
-    Marker pn = mk(Marker::SPHERE_LIST, "places");
-    pn.scale.x = pn.scale.y = pn.scale.z = 0.12;
-    Marker pe = mk(Marker::LINE_LIST, "place_edges");
-    pe.scale.x = 0.02;
-    auto add_pt = [&](Marker& m, double vx, double vy, double vz, int rid) {
-      geometry_msgs::msg::Point p;
-      double rx, ry, rz; yup2ros(vx, vy, vz, rx, ry, rz);
-      p.x = rx; p.y = ry; p.z = rz;
-      m.points.push_back(p);
+    auto room_rgba = [&](int rid, float a) {
       std_msgs::msg::ColorRGBA c;
       const float* col = ROOM_COLORS[((rid % 12) + 12) % 12];
-      c.r = col[0]; c.g = col[1]; c.b = col[2]; c.a = 1.0f;
-      m.colors.push_back(c);
+      c.r = col[0]; c.g = col[1]; c.b = col[2]; c.a = a;
+      return c;
     };
+    auto to_ros = [&](const double v[3], double& rx, double& ry, double& rz) {
+      yup2ros(v[0], v[1], v[2], rx, ry, rz);
+    };
+    std::vector<Marker> m_rooms, m_places, m_objects, m_gvd, m_surface;
+
+    // ---- places: 节点球(按房间色)+ roadmap 白线 ----
     auto npos = [&](int i, double& x, double& y, double& z) {
-      x = (g.nodes[i].i + vmin_c[0]) * kVs;
-      y = (g.nodes[i].j + vmin_c[1]) * kVs;
-      z = (g.nodes[i].k + vmin_c[2]) * kVs;
+      double v[3] = {(g.nodes[i].i + vmin_c[0]) * kVs, (g.nodes[i].j + vmin_c[1]) * kVs,
+                     (g.nodes[i].k + vmin_c[2]) * kVs};
+      to_ros(v, x, y, z);
     };
+    Marker road = mk(Marker::LINE_LIST, "roadmap");
+    road.scale.x = 0.015;
+    std_msgs::msg::ColorRGBA rc; rc.r = rc.g = rc.b = 0.9f; rc.a = 0.7f;
+    for (auto& e : g.edges) {
+      double ax, ay, az, bx, by, bz;
+      npos(e.a, ax, ay, az); npos(e.b, bx, by, bz);
+      geometry_msgs::msg::Point pa, pb;
+      pa.x = ax; pa.y = ay; pa.z = az; pb.x = bx; pb.y = by; pb.z = bz;
+      road.points.push_back(pa); road.points.push_back(pb);
+      road.colors.push_back(rc); road.colors.push_back(rc);
+    }
+    m_places.push_back(road);
+    Marker pn = mk(Marker::SPHERE_LIST, "places");
+    pn.scale.x = pn.scale.y = pn.scale.z = 0.12;
     for (size_t i = 0; i < g.nodes.size(); ++i) {
       double x, y, z; npos((int)i, x, y, z);
-      add_pt(pn, x, y, z, room[i]);
+      geometry_msgs::msg::Point p; p.x = x; p.y = y; p.z = z;
+      pn.points.push_back(p);
+      pn.colors.push_back(room_rgba(room[i], 0.95f));
     }
-    for (auto& e : g.edges) {
-      double x, y, z; npos(e.a, x, y, z); add_pt(pe, x, y, z, room[e.a]);
-      npos(e.b, x, y, z); add_pt(pe, x, y, z, room[e.b]);
-    }
-    arr.markers.push_back(pn);
-    arr.markers.push_back(pe);
-    // 房间球 + 物体 bbox(从场景图取)
-    Marker rs = mk(Marker::SPHERE_LIST, "rooms");
-    rs.scale.x = rs.scale.y = rs.scale.z = 0.35;
-    Marker ob = mk(Marker::LINE_LIST, "object_bbox");
-    ob.scale.x = 0.03;
+    m_places.push_back(pn);
+
+    // ---- rooms: 抬高球 + 文字标签 + 垂/斜线连成员 places ----
+    Marker rlines = mk(Marker::LINE_LIST, "room_edges");
+    rlines.scale.x = 0.01;
     for (auto& id : sg_.order) {
       auto& n = sg_.nodes[id];
-      if (n.layer == "room") {
-        int rid = std::atoi(id.c_str() + 5);
-        add_pt(rs, n.pos[0], n.pos[1], n.pos[2], rid);
-      } else if (n.layer == "object") {
-        static const int E[12][2] = {{0,1},{1,3},{3,2},{2,0},{4,5},{5,7},{7,6},{6,4},{0,4},{1,5},{2,6},{3,7}};
-        double c[8][3];
-        for (int v = 0; v < 8; ++v) {
-          c[v][0] = (v & 1) ? n.bmax_m[0] : n.bmin_m[0];
-          c[v][1] = (v & 2) ? n.bmax_m[1] : n.bmin_m[1];
-          c[v][2] = (v & 4) ? n.bmax_m[2] : n.bmin_m[2];
+      if (n.layer != "room") continue;
+      int rid = std::atoi(n.id.c_str() + 5);
+      double x, y, z; to_ros(n.pos, x, y, z);
+      double zl = z + 3.0;
+      Marker s = mk(Marker::SPHERE, "rooms");
+      s.pose.position.x = x; s.pose.position.y = y; s.pose.position.z = zl;
+      s.scale.x = s.scale.y = s.scale.z = 0.45;
+      s.color = room_rgba(rid, 1.0f);
+      m_rooms.push_back(s);
+      Marker t = mk(Marker::TEXT_VIEW_FACING, "room_labels");
+      t.pose.position.x = x; t.pose.position.y = y; t.pose.position.z = zl + 0.4;
+      t.scale.z = 0.35; t.text = n.id;
+      t.color.r = t.color.g = t.color.b = 1.0f; t.color.a = 1.0f;
+      m_rooms.push_back(t);
+      for (auto& cid : n.children) {
+        auto it = sg_.nodes.find(cid);
+        if (it == sg_.nodes.end() || it->second.layer != "place") continue;
+        double cx, cy, cz; to_ros(it->second.pos, cx, cy, cz);
+        geometry_msgs::msg::Point pa, pb;
+        pa.x = x; pa.y = y; pa.z = zl; pb.x = cx; pb.y = cy; pb.z = cz;
+        rlines.points.push_back(pa); rlines.points.push_back(pb);
+        rlines.colors.push_back(room_rgba(rid, 0.35f));
+        rlines.colors.push_back(room_rgba(rid, 0.35f));
+      }
+    }
+    m_rooms.push_back(rlines);
+
+    // ---- objects: 类别色 bbox + 名称文字 + 头顶矩形块 + 连线(物体/所属place) + 支撑线 ----
+    static const int E[12][2] = {{0,1},{1,3},{3,2},{2,0},{4,5},{5,7},{7,6},{6,4},{0,4},{1,5},{2,6},{3,7}};
+    Marker wire = mk(Marker::LINE_LIST, "object_bbox");
+    wire.scale.x = 0.02;
+    for (auto& id : sg_.order) {
+      auto& n = sg_.nodes[id];
+      if (n.layer != "object") continue;
+      double a1, a2, a3, b1, b2, b3;
+      to_ros(n.bmin_m, a1, a2, a3); to_ros(n.bmax_m, b1, b2, b3);
+      double lo[3] = {std::min(a1, b1), std::min(a2, b2), std::min(a3, b3)};
+      double hi[3] = {std::max(a1, b1), std::max(a2, b2), std::max(a3, b3)};
+      std_msgs::msg::ColorRGBA col;
+      golden_color(n.obj_class, 0.75, 0.95, col.r, col.g, col.b);
+      col.a = 1.0f;
+      double corners[8][3];
+      for (int v = 0; v < 8; ++v) {
+        corners[v][0] = (v & 1) ? hi[0] : lo[0];
+        corners[v][1] = (v & 2) ? hi[1] : lo[1];
+        corners[v][2] = (v & 4) ? hi[2] : lo[2];
+      }
+      for (auto& ed : E)
+        for (int t = 0; t < 2; ++t) {
+          geometry_msgs::msg::Point p;
+          p.x = corners[ed[t]][0]; p.y = corners[ed[t]][1]; p.z = corners[ed[t]][2];
+          wire.points.push_back(p);
+          wire.colors.push_back(col);
         }
-        for (auto& ed : E) {
-          for (int t = 0; t < 2; ++t) {
-            geometry_msgs::msg::Point p;
-            double rx, ry, rz;
-            yup2ros(c[ed[t]][0], c[ed[t]][1], c[ed[t]][2], rx, ry, rz);
-            p.x = rx; p.y = ry; p.z = rz;
-            ob.points.push_back(p);
-            std_msgs::msg::ColorRGBA cc; cc.r = 1.0f; cc.g = 0.85f; cc.b = 0.1f; cc.a = 1.0f;
-            ob.colors.push_back(cc);
-          }
+      double cx = (lo[0] + hi[0]) / 2, cy = (lo[1] + hi[1]) / 2;
+      // 名称文字
+      Marker t = mk(Marker::TEXT_VIEW_FACING, "object_labels");
+      t.pose.position.x = cx; t.pose.position.y = cy; t.pose.position.z = hi[2] + 0.12;
+      t.scale.z = 0.16;
+      auto nit = ls_.names.find(n.obj_class);
+      t.text = nit != ls_.names.end() ? nit->second : std::to_string(n.obj_class);
+      t.color.r = 1.0f; t.color.g = 0.8f; t.color.b = 0.4f; t.color.a = 1.0f;
+      m_objects.push_back(t);
+      // 头顶矩形块(Hydra 式物体节点)
+      Marker nc = mk(Marker::CUBE, "object_nodes");
+      double nz = hi[2] + 0.8;
+      nc.pose.position.x = cx; nc.pose.position.y = cy; nc.pose.position.z = nz;
+      nc.scale.x = nc.scale.y = nc.scale.z = 0.14;
+      nc.color = col;
+      m_objects.push_back(nc);
+      // 连线: 头顶块->bbox 顶, 头顶块->所属 place
+      Marker el = mk(Marker::LINE_LIST, "object_edges");
+      el.scale.x = 0.012;
+      geometry_msgs::msg::Point p1, p2;
+      p1.x = cx; p1.y = cy; p1.z = nz; p2.x = cx; p2.y = cy; p2.z = hi[2];
+      el.points.push_back(p1); el.points.push_back(p2);
+      el.colors.push_back(col); el.colors.push_back(col);
+      if (n.place_id >= 0) {
+        auto pit = sg_.nodes.find("place:" + std::to_string(n.place_id));
+        if (pit != sg_.nodes.end()) {
+          double px, py, pz; to_ros(pit->second.pos, px, py, pz);
+          geometry_msgs::msg::Point p3; p3.x = px; p3.y = py; p3.z = pz;
+          el.points.push_back(p1); el.points.push_back(p3);
+          std_msgs::msg::ColorRGBA c2 = col; c2.a = 0.45f;
+          el.colors.push_back(c2); el.colors.push_back(c2);
+        }
+      }
+      m_objects.push_back(el);
+      // 支撑父子(杯在桌上): 品红线连两物体中心
+      if (!n.parent.empty()) {
+        auto par = sg_.nodes.find(n.parent);
+        if (par != sg_.nodes.end() && par->second.layer == "object") {
+          Marker se = mk(Marker::LINE_LIST, "support_edges");
+          se.scale.x = 0.03;
+          std_msgs::msg::ColorRGBA sc; sc.r = 1.0f; sc.g = 0.1f; sc.b = 1.0f; sc.a = 0.95f;
+          double ox, oy, oz, px, py, pz;
+          to_ros(n.pos, ox, oy, oz); to_ros(par->second.pos, px, py, pz);
+          geometry_msgs::msg::Point pa, pb;
+          pa.x = ox; pa.y = oy; pa.z = oz; pb.x = px; pb.y = py; pb.z = pz;
+          se.points.push_back(pa); se.points.push_back(pb);
+          se.colors.push_back(sc); se.colors.push_back(sc);
+          m_objects.push_back(se);
         }
       }
     }
-    arr.markers.push_back(rs);
-    arr.markers.push_back(ob);
+    m_objects.push_back(wire);
+
+    // ---- gvd: 骨架体素(青色) ----
+    if (!gvd_cells.empty()) {
+      Marker sk = mk(Marker::CUBE_LIST, "gvd_skeleton");
+      sk.scale.x = sk.scale.y = sk.scale.z = kVs * 0.6;
+      std_msgs::msg::ColorRGBA skc; skc.r = 0.0f; skc.g = 0.9f; skc.b = 0.9f; skc.a = 0.9f;
+      for (auto& c : gvd_cells) {
+        geometry_msgs::msg::Point p;
+        double rx, ry, rz; yup2ros(c[0], c[1], c[2], rx, ry, rz);
+        p.x = rx; p.y = ry; p.z = rz;
+        sk.points.push_back(p);
+        sk.colors.push_back(skc);
+      }
+      m_gvd.push_back(sk);
+    }
+
+    // ---- surface: 3D 地面可通行瓦片 ----
     if (!surf.empty()) {
       Marker sm = mk(Marker::CUBE_LIST, "surface_places");
       sm.scale.x = sm.scale.y = 0.095; sm.scale.z = 0.02;
+      std_msgs::msg::ColorRGBA c; c.r = 0.15f; c.g = 0.85f; c.b = 0.75f; c.a = 0.55f;
       for (auto& p : surf) {
         geometry_msgs::msg::Point q;
         double rx, ry, rz; yup2ros(p[0], p[1], p[2], rx, ry, rz);
         q.x = rx; q.y = ry; q.z = rz;
         sm.points.push_back(q);
-        std_msgs::msg::ColorRGBA c; c.r = 0.15f; c.g = 0.85f; c.b = 0.75f; c.a = 0.55f;
         sm.colors.push_back(c);
       }
-      arr.markers.push_back(sm);
+      m_surface.push_back(sm);
     }
-    dsg_pub_->publish(arr);
+
+    // 分话题发布(各带 DELETEALL)+ 聚合 /dsg
+    auto pub_group = [&](rclcpp::Publisher<MarkerArray>::SharedPtr& pub,
+                         const std::vector<Marker>& ms) {
+      MarkerArray a;
+      Marker w; w.action = Marker::DELETEALL;
+      a.markers.push_back(w);
+      for (auto& m : ms) a.markers.push_back(m);
+      pub->publish(a);
+    };
+    pub_group(room_pub_, m_rooms);
+    pub_group(place_pub_, m_places);
+    pub_group(obj_pub_, m_objects);
+    pub_group(gvd_pub_, m_gvd);
+    pub_group(surf_pub_, m_surface);
+    MarkerArray all;
+    Marker w; w.action = Marker::DELETEALL;
+    all.markers.push_back(w);
+    for (auto* grp : {&m_rooms, &m_places, &m_objects, &m_gvd, &m_surface})
+      for (auto& m : *grp) all.markers.push_back(m);
+    dsg_pub_->publish(all);
   }
 
   void dump_dsg() {
@@ -479,6 +951,11 @@ class SmcLiveNode : public rclcpp::Node {
   message_filters::Subscriber<Image> depth_sub_, seg_sub_, rgb_sub_;
   std::unique_ptr<Sync> sync_;
   rclcpp::Publisher<MarkerArray>::SharedPtr dsg_pub_;
+  rclcpp::Publisher<MarkerArray>::SharedPtr vox_pub_;
+  rclcpp::Publisher<MarkerArray>::SharedPtr obj_pub_, room_pub_, place_pub_, gvd_pub_, surf_pub_, sp_pub_;
+  std::vector<rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr> navmap_pubs_;
+  LabelSpace ls_;
+  std::vector<NavLevel> levels_;
   tf2_ros::Buffer tfbuf_;
   tf2_ros::TransformListener tflis_;
   std::thread cycle_thread_;

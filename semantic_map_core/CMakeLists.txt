@@ -73,6 +73,7 @@ option(BUILD_ROS_NODE "build rclcpp live node" OFF)
 if(BUILD_ROS_NODE)
   find_package(rclcpp REQUIRED)
   find_package(sensor_msgs REQUIRED)
+  find_package(nav_msgs REQUIRED)
   find_package(visualization_msgs REQUIRED)
   find_package(geometry_msgs REQUIRED)
   find_package(std_msgs REQUIRED)
@@ -82,6 +83,6 @@ if(BUILD_ROS_NODE)
   add_executable(smc_live_node src/smc_live_node.cpp)
   target_link_libraries(smc_live_node semantic_map_core rclcpp::rclcpp
     tf2_ros::tf2_ros message_filters::message_filters
-    ${sensor_msgs_TARGETS} ${visualization_msgs_TARGETS}
+    ${sensor_msgs_TARGETS} ${nav_msgs_TARGETS} ${visualization_msgs_TARGETS}
     ${geometry_msgs_TARGETS} ${std_msgs_TARGETS})
 endif()

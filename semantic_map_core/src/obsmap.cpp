@@ -4,6 +4,7 @@
 #include "semantic_map_core/obsmap.hpp"
 
 #include <cmath>
+#include <cstdio>
 #include <unordered_set>
 
 namespace smc {
@@ -90,6 +91,43 @@ std::vector<uint8_t> ObsMap::observed_free_mask() const {
   std::vector<uint8_t> m(static_cast<size_t>(size()));
   for (size_t i = 0; i < m.size(); ++i) m[i] = logodds_[i] <= FREE_THR ? 1 : 0;
   return m;
+}
+
+// ---- 存档/恢复 ----
+static const uint32_t kObsMagic = 0x534D434Fu;  // "OCMS"
+
+bool ObsMap::save(const std::string& path) const {
+  FILE* f = std::fopen(path.c_str(), "wb");
+  if (!f) return false;
+  int32_t hdr[4] = {(int32_t)kObsMagic, nx_, ny_, nz_};
+  std::fwrite(hdr, 4, 4, f);
+  int64_t vm[3] = {vmin_[0], vmin_[1], vmin_[2]};
+  std::fwrite(vm, 8, 3, f);
+  std::fwrite(&voxel_size_, 4, 1, f);
+  const size_t N = (size_t)size();
+  std::fwrite(logodds_.data(), 4, N, f);
+  std::fwrite(sem_label_.data(), 1, N, f);
+  std::fwrite(sem_count_.data(), 2, N, f);
+  std::fclose(f);
+  return true;
+}
+
+std::unique_ptr<ObsMap> ObsMap::load(const std::string& path) {
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f) return nullptr;
+  int32_t hdr[4]; int64_t vm[3]; float vs;
+  size_t rd = std::fread(hdr, 4, 4, f);
+  rd += std::fread(vm, 8, 3, f);
+  rd += std::fread(&vs, 4, 1, f);
+  if (rd != 8 || (uint32_t)hdr[0] != kObsMagic) { std::fclose(f); return nullptr; }
+  auto m = std::make_unique<ObsMap>(hdr[1], hdr[2], hdr[3],
+                                    std::array<long, 3>{(long)vm[0], (long)vm[1], (long)vm[2]}, vs);
+  const size_t N = (size_t)m->size();
+  bool ok = std::fread(m->logodds_.data(), 4, N, f) == N &&
+            std::fread(m->sem_label_.data(), 1, N, f) == N &&
+            std::fread(m->sem_count_.data(), 2, N, f) == N;
+  std::fclose(f);
+  return ok ? std::move(m) : nullptr;
 }
 
 }  // namespace smc
