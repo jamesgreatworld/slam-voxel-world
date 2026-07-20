@@ -25,6 +25,12 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -73,6 +79,7 @@ static const double kRobotH = 0.5, kGroundEps = 0.08, kLevelGap = 0.8;
 static const int kLevelMinPts = 200, kMaxLevels = 4;
 // 地图存档目录(占据图+DSG, 启动时存在则恢复)
 static const char* kMapDir = "/home/james/semantic_map_core/maps/house_live";
+static const int kQueryPort = 18080;  // 场景图查询 RPC(MCP 服务连它, 直查内存)
 static const char* kStructKw[] = {"wall", "ceiling", "roof", "building", "floor", "ground",
                                   "carpet", "rug", "pillar", "column", "beam", "stair", "sky"};
 
@@ -258,11 +265,13 @@ class SmcLiveNode : public rclcpp::Node {
       publish_voxels();  // 恢复后立即发一次语义体素
     }
     cycle_thread_ = std::thread([this] { cycle_loop(); });
+    query_thread_ = std::thread([this] { query_server_loop(); });
   }
 
   ~SmcLiveNode() override {
     running_ = false;
     if (cycle_thread_.joinable()) cycle_thread_.join();
+    if (query_thread_.joinable()) query_thread_.detach();  // accept 阻塞, 进程退出即回收
     dump_stats();
   }
 
@@ -366,8 +375,9 @@ class SmcLiveNode : public rclcpp::Node {
       obs_->integrate_frame(origin, pts.data(), (int)labels.size(), labels.data(), (float)kFreeMargin);
     }
     ++n_int_;
-    // 机器人实时位姿(ROS odom 系, 传感器原点≈机器人)-> 供 MCP 查询。
-    // 每帧原子写(文件 ~120B, 开销可忽略) => MCP 侧位姿延迟 = 一帧(~0.1s)
+    // 机器人实时位姿(ROS odom 系, 传感器原点≈机器人)
+    { std::lock_guard<std::mutex> lk(sg_mtx_); rx_ = tx; ry_ = ty; rz_ = tz; have_pose_ = true; }
+    // 顺带原子写文件(节点不在时可离线查存档; 在线查询直接走内存 RPC)
     {
       double q[4] = {qx, qy, qz, qw};
       std::string body = std::string("{\"frame\":\"") + kMapFrame + "\",\"x\":" + jnum(tx) +
@@ -797,13 +807,16 @@ class SmcLiveNode : public rclcpp::Node {
     auto surf = surface_tiles(fre, occ, cnx, cny, cnz, vmin_c, kVs, floors_vox);
 
     MergeStats st{0, 0, 0, 0, 0};
-    if (!have_sg_) {
-      sg_ = build_scene_graph(g, room, objs, vmin_c, (float)kVs);
-      have_sg_ = true;
-    } else {
-      sg_ = merge_observation(sg_, g, room, objs, vmin_c, (float)kVs, st, id_counter_);
-      tot_matched_ += st.matched; tot_added_ += st.added;
-      tot_removed_ += st.removed; tot_carried_ += st.carried;
+    {
+      std::lock_guard<std::mutex> lk(sg_mtx_);   // 查询线程读 sg_ 期间不被替换
+      if (!have_sg_) {
+        sg_ = build_scene_graph(g, room, objs, vmin_c, (float)kVs);
+        have_sg_ = true;
+      } else {
+        sg_ = merge_observation(sg_, g, room, objs, vmin_c, (float)kVs, st, id_counter_);
+        tot_matched_ += st.matched; tot_added_ += st.added;
+        tot_removed_ += st.removed; tot_carried_ += st.carried;
+      }
     }
     int nr = 0, np = 0, no = 0;
     {
@@ -1163,6 +1176,258 @@ class SmcLiveNode : public rclcpp::Node {
     return s + "\n  ]\n}\n";
   }
 
+  // ================= 场景图查询(直接查内存 sg_, 无中间文件) =================
+  // 沿 parent 链上溯找 room —— 物体叠物体(bookset 在 tv 上)也能正确归房。
+  std::string room_of(const std::string& id) {
+    std::set<std::string> seen;
+    std::string cur = id;
+    while (!cur.empty() && sg_.nodes.count(cur) && !seen.count(cur)) {
+      seen.insert(cur);
+      if (sg_.nodes[cur].layer == "room") return cur;
+      cur = sg_.nodes[cur].parent;
+    }
+    return "";
+  }
+  // 机器人无父节点 -> 走几何: 最近 place 再接结构
+  std::string nearest_place(double rx, double ry, double* dist_out) {
+    std::string best; double bd = 1e18;
+    for (auto& id : sg_.order) {
+      SceneNode& n = sg_.nodes[id];
+      if (n.layer != "place") continue;
+      double px, py, pz; yup2ros(n.pos[0], n.pos[1], n.pos[2], px, py, pz);
+      double d = (px - rx) * (px - rx) + (py - ry) * (py - ry);
+      if (d < bd) { bd = d; best = id; }
+    }
+    if (dist_out) *dist_out = best.empty() ? -1 : std::sqrt(bd);
+    return best;
+  }
+  std::string obj_name(const SceneNode& n) {
+    auto it = ls_.names.find(n.obj_class);
+    return it != ls_.names.end() ? it->second : std::to_string(n.obj_class);
+  }
+  std::string node_json(SceneNode& n, bool with_bbox) {
+    double x, y, z; yup2ros(n.pos[0], n.pos[1], n.pos[2], x, y, z);
+    double p[3] = {x, y, z};
+    std::string s = "{\"id\":\"" + n.id + "\",\"layer\":\"" + n.layer + "\"";
+    if (n.layer == "object") s += ",\"name\":\"" + obj_name(n) + "\"";
+    s += ",\"position\":" + jvec(p, 3);
+    if (n.layer == "object") {
+      s += ",\"voxel_count\":" + std::to_string(n.voxel_count) +
+           ",\"seen_count\":" + std::to_string(n.seen_count) +
+           ",\"misses\":" + std::to_string(n.misses) +
+           ",\"room\":\"" + room_of(n.id) + "\"" +
+           ",\"parent\":" + (n.parent.empty() ? std::string("null") : "\"" + n.parent + "\"");
+      if (!n.parent.empty() && sg_.nodes.count(n.parent) &&
+          sg_.nodes[n.parent].layer == "object")
+        s += ",\"on_top_of\":\"" + obj_name(sg_.nodes[n.parent]) + "\"";
+      if (with_bbox) {
+        double a[3], b[3];
+        yup2ros(n.bmin_m[0], n.bmin_m[1], n.bmin_m[2], a[0], a[1], a[2]);
+        yup2ros(n.bmax_m[0], n.bmax_m[1], n.bmax_m[2], b[0], b[1], b[2]);
+        double lo[3], hi[3];
+        for (int i = 0; i < 3; ++i) { lo[i] = std::min(a[i], b[i]); hi[i] = std::max(a[i], b[i]); }
+        s += ",\"bbox_min\":" + jvec(lo, 3) + ",\"bbox_max\":" + jvec(hi, 3);
+      }
+    }
+    return s + "}";
+  }
+  static std::string jget(const std::string& req, const std::string& key) {
+    size_t k = req.find("\"" + key + "\"");
+    if (k == std::string::npos) return "";
+    size_t c = req.find(':', k);
+    size_t q = req.find('"', c);
+    if (q == std::string::npos) return "";
+    size_t e = req.find('"', q + 1);
+    return req.substr(q + 1, e - q - 1);
+  }
+
+  std::string handle_query(const std::string& req) {
+    const std::string op = jget(req, "op");
+    std::lock_guard<std::mutex> lk(sg_mtx_);   // 与 cycle 线程更新 sg_ 互斥
+    if (!have_sg_) return "{\"error\":\"场景图尚未构建\"}";
+
+    if (op == "get_robot_pose") {
+      if (!have_pose_) return "{\"error\":\"机器人位姿不可用\"}";
+      double p[3] = {rx_, ry_, rz_};
+      return "{\"frame\":\"" + std::string(kMapFrame) + "\",\"position\":" + jvec(p, 3) +
+             ",\"integrated\":" + std::to_string(n_int_) + "}";
+    }
+    if (op == "get_robot_room") {
+      if (!have_pose_) return "{\"error\":\"机器人位姿不可用\"}";
+      double d = 0;
+      std::string pl = nearest_place(rx_, ry_, &d);
+      if (pl.empty()) return "{\"error\":\"场景图中无 place\"}";
+      std::string rid = room_of(pl);
+      std::string objs;
+      int cnt = 0;
+      for (auto& id : sg_.order) {
+        SceneNode& n = sg_.nodes[id];
+        if (n.layer == "object" && room_of(id) == rid) {
+          if (cnt++) objs += ",";
+          objs += node_json(n, false);
+        }
+      }
+      return "{\"room_id\":\"" + rid + "\",\"via_place\":\"" + pl + "\",\"distance_m\":" +
+             jnum(d) + ",\"object_count\":" + std::to_string(cnt) +
+             ",\"objects\":[" + objs + "]}";
+    }
+    if (op == "list_rooms") {
+      std::string out; int nr = 0;
+      for (auto& id : sg_.order) {
+        SceneNode& n = sg_.nodes[id];
+        if (n.layer != "room") continue;
+        int nobj = 0, npl = 0;
+        for (auto& oid : sg_.order) {
+          SceneNode& o = sg_.nodes[oid];
+          if (o.layer == "object" && room_of(oid) == id) ++nobj;
+          else if (o.layer == "place" && o.parent == id) ++npl;
+        }
+        double x, y, z; yup2ros(n.pos[0], n.pos[1], n.pos[2], x, y, z);
+        double p[3] = {x, y, z};
+        if (nr++) out += ",";
+        out += "{\"room_id\":\"" + id + "\",\"center\":" + jvec(p, 3) +
+               ",\"place_count\":" + std::to_string(npl) +
+               ",\"object_count\":" + std::to_string(nobj) + "}";
+      }
+      return "{\"room_count\":" + std::to_string(nr) + ",\"rooms\":[" + out + "]}";
+    }
+    if (op == "room_contents") {
+      std::string rid = jget(req, "room_id");
+      if (!sg_.nodes.count(rid) || sg_.nodes[rid].layer != "room") {
+        std::string avail; int k = 0;
+        for (auto& id : sg_.order)
+          if (sg_.nodes[id].layer == "room") { if (k++) avail += ","; avail += "\"" + id + "\""; }
+        return "{\"error\":\"房间不存在: " + rid + "\",\"available\":[" + avail + "]}";
+      }
+      std::string objs; int cnt = 0;
+      for (auto& id : sg_.order) {
+        SceneNode& n = sg_.nodes[id];
+        if (n.layer == "object" && room_of(id) == rid) {
+          if (cnt++) objs += ",";
+          objs += node_json(n, true);
+        }
+      }
+      return "{\"room_id\":\"" + rid + "\",\"object_count\":" + std::to_string(cnt) +
+             ",\"objects\":[" + objs + "]}";
+    }
+    if (op == "find_object") {
+      std::string q = jget(req, "name");
+      std::transform(q.begin(), q.end(), q.begin(), ::tolower);
+      std::string out; int cnt = 0;
+      for (auto& id : sg_.order) {
+        SceneNode& n = sg_.nodes[id];
+        if (n.layer != "object") continue;
+        std::string nm = obj_name(n);
+        std::string low = nm;
+        std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+        if (low.find(q) == std::string::npos) continue;
+        if (cnt++) out += ",";
+        out += node_json(n, true);
+      }
+      return "{\"query\":\"" + q + "\",\"match_count\":" + std::to_string(cnt) +
+             ",\"matches\":[" + out + "]}";
+    }
+    if (op == "get_object") {
+      std::string oid = jget(req, "object_id");
+      if (!sg_.nodes.count(oid) || sg_.nodes[oid].layer != "object")
+        return "{\"error\":\"物体不存在: " + oid + "\"}";
+      SceneNode& n = sg_.nodes[oid];
+      std::string ch; int k = 0;
+      for (auto& c : n.children)
+        if (sg_.nodes.count(c)) { if (k++) ch += ","; ch += "\"" + c + "\""; }
+      std::string s = node_json(n, true);
+      s.pop_back();
+      return s + ",\"class_id\":" + std::to_string(n.obj_class) +
+             ",\"nearest_place\":\"place:" + std::to_string(n.place_id) + "\"" +
+             ",\"children\":[" + ch + "]}";
+    }
+    if (op == "get_relations") {
+      std::string nid = jget(req, "node_id");
+      if (!sg_.nodes.count(nid)) return "{\"error\":\"节点不存在: " + nid + "\"}";
+      SceneNode& n = sg_.nodes[nid];
+      std::string anc; int k = 0;
+      std::string cur = n.parent;
+      std::set<std::string> seen;
+      while (!cur.empty() && sg_.nodes.count(cur) && !seen.count(cur)) {
+        seen.insert(cur);
+        if (k++) anc += ",";
+        anc += "{\"id\":\"" + cur + "\",\"layer\":\"" + sg_.nodes[cur].layer + "\"}";
+        cur = sg_.nodes[cur].parent;
+      }
+      std::string ch; k = 0;
+      for (auto& c : n.children)
+        if (sg_.nodes.count(c)) {
+          if (k++) ch += ",";
+          ch += "{\"id\":\"" + c + "\",\"layer\":\"" + sg_.nodes[c].layer + "\"}";
+        }
+      return "{\"id\":\"" + nid + "\",\"layer\":\"" + n.layer + "\",\"parent\":" +
+             (n.parent.empty() ? std::string("null") : "\"" + n.parent + "\"") +
+             ",\"ancestors\":[" + anc + "],\"children\":[" + ch + "]}";
+    }
+    if (op == "scene_summary") {
+      int nb = 0, nr = 0, np = 0, no = 0;
+      std::string stacked; int k = 0;
+      for (auto& id : sg_.order) {
+        SceneNode& n = sg_.nodes[id];
+        if (n.layer == "building") ++nb;
+        else if (n.layer == "room") ++nr;
+        else if (n.layer == "place") ++np;
+        else if (n.layer == "object") {
+          ++no;
+          if (!n.parent.empty() && sg_.nodes.count(n.parent) &&
+              sg_.nodes[n.parent].layer == "object") {
+            if (k++) stacked += ",";
+            stacked += "{\"id\":\"" + id + "\",\"name\":\"" + obj_name(n) +
+                       "\",\"on_top_of\":\"" + obj_name(sg_.nodes[n.parent]) + "\"}";
+          }
+        }
+      }
+      return "{\"layers\":{\"building\":" + std::to_string(nb) + ",\"room\":" + std::to_string(nr) +
+             ",\"place\":" + std::to_string(np) + ",\"object\":" + std::to_string(no) + "}" +
+             ",\"cycle\":" + std::to_string(n_cycle_) +
+             ",\"robot_available\":" + (have_pose_ ? "true" : "false") +
+             ",\"objects_on_other_objects\":[" + stacked + "]}";
+    }
+    return "{\"error\":\"未知 op: " + op + "\"}";
+  }
+
+  // TCP 短连接: 一行 JSON 请求 -> 一行 JSON 响应(本地回环)
+  void query_server_loop() {
+    int srv = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (srv < 0) return;
+    int one = 1;
+    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = inet_addr("127.0.0.1");
+    a.sin_port = htons(kQueryPort);
+    if (::bind(srv, (sockaddr*)&a, sizeof(a)) < 0 || ::listen(srv, 8) < 0) {
+      RCLCPP_WARN(get_logger(), "查询服务无法监听 127.0.0.1:%d", kQueryPort);
+      ::close(srv);
+      return;
+    }
+    RCLCPP_INFO(get_logger(), "场景图查询服务: 127.0.0.1:%d (直查内存)", kQueryPort);
+    while (running_) {
+      int c = ::accept(srv, nullptr, nullptr);
+      if (c < 0) continue;
+      std::string req;
+      char buf[1024];
+      ssize_t n;
+      while ((n = ::recv(c, buf, sizeof(buf), 0)) > 0) {
+        req.append(buf, n);
+        if (req.find('\n') != std::string::npos) break;
+      }
+      std::string resp;
+      try { resp = handle_query(req); }
+      catch (const std::exception& e) { resp = std::string("{\"error\":\"") + e.what() + "\"}"; }
+      resp += "\n";
+      ssize_t sent = ::send(c, resp.data(), resp.size(), MSG_NOSIGNAL);
+      (void)sent;
+      ::close(c);
+    }
+    ::close(srv);
+  }
+
   void dump_dsg() {
     std::string body = dsg_json();
     write_atomic(std::string(kMapDir) + "/dsg.json", body);
@@ -1200,6 +1465,10 @@ class SmcLiveNode : public rclcpp::Node {
   SceneGraph sg_;
   bool have_sg_ = false;
   int id_counter_ = 0;
+  std::mutex sg_mtx_;                 // sg_ 读写互斥(cycle 线程 vs 查询线程)
+  std::thread query_thread_;
+  double rx_ = 0, ry_ = 0, rz_ = 0;   // 机器人实时位姿(ROS odom)
+  bool have_pose_ = false;
   // 统计
   long n_int_ = 0, n_skip_ = 0, n_cycle_ = 0;
   double int_ms_sum_ = 0, int_ms_max_ = 0, cyc_ms_sum_ = 0, cyc_ms_max_ = 0;

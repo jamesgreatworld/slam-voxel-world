@@ -224,6 +224,28 @@ def t_scene_summary(sc, _):
             "map_dir": sc.map_dir}
 
 
+# ---------------- 在线通道: 直连节点内存(TCP RPC, 亚毫秒) ----------------
+class LiveRPC:
+    """连 smc_live_node 的查询端口, 直接查它内存里的 SceneGraph。
+    节点没跑 -> 抛异常, 上层回退到读存档(离线查询)。"""
+
+    def __init__(self, host="127.0.0.1", port=18080, timeout=1.5):
+        self.host, self.port, self.timeout = host, port, timeout
+
+    def call(self, op, **kw):
+        import socket
+        req = dict(kw); req["op"] = op
+        with socket.create_connection((self.host, self.port), self.timeout) as s:
+            s.sendall((json.dumps(req) + "\n").encode())
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+        return json.loads(buf.decode())
+
+
 TOOLS = [
     ("get_robot_pose", "获取机器人当前位置坐标(ROS odom 系)", {}, t_get_robot_pose),
     ("get_robot_room", "查询机器人当前所在房间及该房间内的物体", {}, t_get_robot_room),
@@ -253,7 +275,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--map-dir", default=DEF_MAP)
     ap.add_argument("--labelspace", default=DEF_LS)
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=18080)
+    ap.add_argument("--offline", action="store_true", help="只读存档, 不连节点")
     a = ap.parse_args()
+    rpc = LiveRPC(a.host, a.port)
 
     def respond(rid, result=None, error=None):
         msg = {"jsonrpc": "2.0", "id": rid}
@@ -288,8 +314,19 @@ def main():
                 respond(rid, error={"code": -32601, "message": "unknown tool: %s" % name})
                 continue
             try:
-                sc = Scene(a.map_dir, a.labelspace)      # 每次调用重新读盘 = 实时
-                out = TOOLMAP[name][3](sc, args)
+                # 优先在线: 直查节点内存(亚毫秒, 数据即当前 cycle)
+                out, src = None, "live_rpc"
+                if not a.offline:
+                    try:
+                        out = rpc.call(name, **args)
+                    except Exception:
+                        out, src = None, "archive"
+                if out is None:                          # 兜底: 节点没跑 -> 读存档
+                    sc = Scene(a.map_dir, a.labelspace)
+                    out = TOOLMAP[name][3](sc, args)
+                    src = "archive"
+                if isinstance(out, dict):
+                    out["_source"] = src
                 respond(rid, {"content": [{"type": "text",
                                            "text": json.dumps(out, ensure_ascii=False, indent=2)}]})
             except Exception as e:
