@@ -3,6 +3,8 @@
 #include "semantic_map_core/vlayer.hpp"
 #include "semantic_map_core/vlayer_generators.hpp"
 
+// 统计各 generator 单独产出(诊断: 看哪些在 House 上非空)
+
 #include <cstdint>
 #include <cstdio>
 #include <set>
@@ -28,16 +30,17 @@ int main() {
   // 用 floor+ceiling 两个 slab 走完整 toposort。ceiling label 用 31(同类, 只测 side 分支)。
   SlabFill sfloor(31, "floor", 0.6, 0.5, 2);
   SlabFill sceil(31, "ceiling", 0.6, 0.5, 2);
-  std::vector<const Generator*> gens{&sfloor, &sceil};
+  WallFill wall(0.10, 20, 4, 4, 2);
+  OcclusionFill occl(5, 19);
+  std::vector<const Generator*> gens{&sfloor, &sceil, &wall, &occl};
   Overlay ov = run_pipeline(m, gens);
 
   std::vector<uint8_t> cocc, csem;
   compose_structure(m, ov, cocc, csem);
 
-  long add = 0;
-  for (auto& d : ov.voxels) if (d.op == DeltaOp::ADD) ++add;
-  std::printf("C++ vlayer: deltas=%zu (add=%ld)  occ_after=%ld\n",
-              ov.voxels.size(), add, [&] { long c = 0; for (uint8_t v : cocc) c += v; return c; }());
+  std::printf("C++ per-gen: slab_floor=%zu slab_ceil=%zu wall=%zu occl=%zu  total=%zu  occ_after=%ld\n",
+              sfloor.run(m).size(), sceil.run(m).size(), wall.run(m).size(), occl.run(m).size(),
+              ov.voxels.size(), [&] { long c = 0; for (uint8_t v : cocc) c += v; return c; }());
 
   // dump deltas(x,y,z,op,sem) 排序集合无关 + compose 网格
   FILE* f = std::fopen((O + "vlayer_cpp.bin").c_str(), "wb");
@@ -49,5 +52,24 @@ int main() {
   std::fwrite(cocc.data(), 1, N, f);
   std::fwrite(csem.data(), 1, N, f);
   std::fclose(f);
+
+  // ---- 合成墙(带 3x3 洞)覆盖 WallFill 非空路径 ----
+  const int SX = 24, SY = 24, SZ = 40;
+  std::vector<uint8_t> so((size_t)SX * SY * SZ, 0), ss(so.size(), 0), sf(so.size(), 0);
+  auto sid = [&](int x, int y, int z) { return ((long)x * SY + y) * SZ + z; };
+  for (int y = 3; y <= 20; ++y)
+    for (int z = 3; z <= 35; ++z) { so[sid(12, y, z)] = 1; ss[sid(12, y, z)] = 19; }
+  for (int y = 9; y <= 11; ++y)
+    for (int z = 9; z <= 11; ++z) { so[sid(12, y, z)] = 0; ss[sid(12, y, z)] = 0; }  // 洞
+  for (int x = 13; x <= 20; ++x)
+    for (int y = 3; y <= 20; ++y)
+      for (int z = 3; z <= 35; ++z) sf[sid(x, y, z)] = 1;  // +x 侧房间
+  MapView sm{so.data(), ss.data(), sf.data(), SX, SY, SZ, 0.1f};
+  auto wd = wall.run(sm);
+  std::printf("C++ synth wall deltas=%zu\n", wd.size());
+  FILE* g = std::fopen((O + "vlayer_synth_cpp.bin").c_str(), "wb");
+  int wn = (int)wd.size(); std::fwrite(&wn, 4, 1, g);
+  for (auto& d : wd) { int v[5] = {d.idx[0], d.idx[1], d.idx[2], (int)d.op, d.sem}; std::fwrite(v, 4, 5, g); }
+  std::fclose(g);
   return 0;
 }
