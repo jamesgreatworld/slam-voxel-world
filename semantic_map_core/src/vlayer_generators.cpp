@@ -343,6 +343,164 @@ std::vector<VoxelDelta> RoofCap::run(const MapView& m, const Overlay&) const {
   return out;
 }
 
+// 2D 精确平方距离场(到 mask=1 的最近格), Felzenszwalb 两趟。返回 d²(int 值域)。
+static void edt2d_sq(const std::vector<uint8_t>& mask, int NV, int NH, std::vector<double>& d2) {
+  const double BIG = 1e18;
+  d2.assign((size_t)NV * NH, BIG);
+  // 趟1: 沿 v(列内) 1D 距离
+  for (int h = 0; h < NH; ++h) {
+    double d = BIG;
+    for (int v = 0; v < NV; ++v) {
+      if (mask[(long)v * NH + h]) d = 0; else if (d < BIG) d += 1;
+      d2[(long)v * NH + h] = d;
+    }
+    d = BIG;
+    for (int v = NV - 1; v >= 0; --v) {
+      if (mask[(long)v * NH + h]) d = 0; else if (d < BIG) d += 1;
+      double& c = d2[(long)v * NH + h];
+      if (d < c) c = d;
+    }
+  }
+  for (long i = 0; i < (long)NV * NH; ++i) if (d2[i] < BIG) d2[i] *= d2[i];
+  // 趟2: 沿 h 抛物线包络
+  std::vector<double> f(NH), out(NH), zz(NH + 1);
+  std::vector<int> vv(NH);
+  for (int v = 0; v < NV; ++v) {
+    for (int h = 0; h < NH; ++h) f[h] = d2[(long)v * NH + h];
+    int k = 0; vv[0] = 0; zz[0] = -BIG; zz[1] = BIG;
+    for (int q = 1; q < NH; ++q) {
+      double s = ((f[q] + (double)q * q) - (f[vv[k]] + (double)vv[k] * vv[k])) / (2.0 * q - 2.0 * vv[k]);
+      while (s <= zz[k]) {
+        --k;
+        s = ((f[q] + (double)q * q) - (f[vv[k]] + (double)vv[k] * vv[k])) / (2.0 * q - 2.0 * vv[k]);
+      }
+      ++k; vv[k] = q; zz[k] = s; zz[k + 1] = BIG;
+    }
+    k = 0;
+    for (int q = 0; q < NH; ++q) {
+      while (zz[k + 1] < (double)q) ++k;
+      out[q] = (double)(q - vv[k]) * (q - vv[k]) + f[vv[k]];
+    }
+    for (int h = 0; h < NH; ++h) d2[(long)v * NH + h] = out[h];
+  }
+}
+
+// ===================== PlaneRegularize =====================
+static void robust_rect(const std::vector<uint8_t>& comp, int NH, double trim,
+                        int& v0, int& v1, int& h0, int& h1);  // 定义在 OpeningCarve 节
+
+PlaneRegularize::PlaneRegularize(double k_per_cell, double prior_cap, double trim_fill,
+                                 int min_wall_cells, int min_height, int min_run,
+                                 double support_m, double keep_comp_m2)
+    : k_(k_per_cell), cap_(prior_cap), trim_fill_(trim_fill), support_m_(support_m),
+      keep_comp_m2_(keep_comp_m2), min_wall_cells_(min_wall_cells), min_height_(min_height),
+      min_run_(min_run) {
+  id = "plane_regularize"; stage = 2; depends_on = {"wall_fill"};
+  default_binding = "persistent";
+}
+
+std::vector<VoxelDelta> PlaneRegularize::run(const MapView& m, const Overlay&) const {
+  const int nx = m.nx, ny = m.ny, nz = m.nz;
+  const int WALL = 19;
+  std::vector<VoxelDelta> out;
+  if (!m.logodds) return out;
+  std::vector<uint8_t> wall((size_t)nx * ny * nz, 0);
+  bool any = false;
+  for (long i = 0; i < (long)nx * ny * nz; ++i)
+    if (m.occ[i] && m.sem[i] == WALL) { wall[i] = 1; any = true; }
+  if (!any) return out;
+  const double vs = m.voxel_size;
+  int support_cells = std::max(1, (int)std::lround(support_m_ / vs));
+  int keep_comp_cells = std::max(4, (int)std::lround(keep_comp_m2_ / (vs * vs)));
+  std::set<long> emitted;
+
+  std::vector<long> xcount(nx, 0), zcount(nz, 0);
+  for (int x = 0; x < nx; ++x)
+    for (int y = 0; y < ny; ++y)
+      for (int z = 0; z < nz; ++z)
+        if (wall[m.id(x, y, z)]) { xcount[x]++; zcount[z]++; }
+
+  auto regularize = [&](bool axis_x, int c0) {
+    const int NV = ny, NH = axis_x ? nz : nx;
+    auto W2 = [&](int v, int h) { return axis_x ? wall[m.id(c0, v, h)] : wall[m.id(h, v, c0)]; };
+    auto F2 = [&](int v, int h) { return axis_x ? m.free[m.id(c0, v, h)] : m.free[m.id(h, v, c0)]; };
+    auto L2 = [&](int v, int h) {
+      return axis_x ? m.logodds[m.id(c0, v, h)] : m.logodds[m.id(h, v, c0)];
+    };
+    long wsum = 0; int v0 = NV, v1 = -1, h0 = NH, h1 = -1;
+    std::vector<uint8_t> wall2d((size_t)NV * NH, 0);
+    for (int v = 0; v < NV; ++v)
+      for (int h = 0; h < NH; ++h)
+        if (W2(v, h)) {
+          wall2d[(long)v * NH + h] = 1; wsum++;
+          v0 = std::min(v0, v); v1 = std::max(v1, v);
+          h0 = std::min(h0, h); h1 = std::max(h1, h);
+        }
+    if (wsum < min_wall_cells_) return;
+    if ((v1 - v0 + 1) < min_height_ || (h1 - h0 + 1) < min_run_) return;
+    int rv0 = v0, rv1 = v1, rh0 = h0, rh1 = h1;
+    robust_rect(wall2d, NH, trim_fill_, rv0, rv1, rh0, rh1);
+    // near_wall = EDT(~wall2d) <= support_cells(平方比较, 与 float sqrt 等价)
+    std::vector<double> d2;
+    edt2d_sq(wall2d, NV, NH, d2);
+    const double s2 = (double)support_cells * support_cells;
+    // cut 大分量保护: wall2d & ~inside 的 8 连通分量 >= keep_comp_cells 不删
+    std::vector<uint8_t> outside_wall((size_t)NV * NH, 0);
+    for (int v = 0; v < NV; ++v)
+      for (int h = 0; h < NH; ++h) {
+        bool inside = (v - rv0 > -1) && (rv1 - v > -1) && (h - rh0 > -1) && (rh1 - h > -1);
+        if (!inside && wall2d[(long)v * NH + h]) outside_wall[(long)v * NH + h] = 1;
+      }
+    std::vector<int> comp;
+    int ncomp = label8_2d(outside_wall, NV, NH, comp);
+    std::vector<long> csz(ncomp + 1, 0);
+    for (long i = 0; i < (long)NV * NH; ++i) if (comp[i]) csz[comp[i]]++;
+    // fill 与 cut(fill 先, argwhere 行主序)
+    auto prior_at = [&](int v, int h) {
+      long din = std::min(std::min((long)(v - rv0), (long)(rv1 - v)),
+                          std::min((long)(h - rh0), (long)(rh1 - h))) + 1;
+      if (din > 0) return std::min((double)din * k_, cap_);
+      long dout = std::max(std::max((long)(rv0 - v), (long)(v - rv1)),
+                           std::max((long)(rh0 - h), (long)(h - rh1)));
+      return -std::min((double)dout * k_, cap_);
+    };
+    auto emit = [&](int v, int h, bool is_fill) {
+      int x, y, z;
+      if (axis_x) { x = c0; y = v; z = h; } else { x = h; y = v; z = c0; }
+      long id3 = m.id(x, y, z);
+      if (emitted.count(id3)) return;
+      emitted.insert(id3);
+      VoxelDelta d;
+      d.idx[0] = x; d.idx[1] = y; d.idx[2] = z;
+      d.op = is_fill ? DeltaOp::ADD : DeltaOp::REMOVE;
+      d.sem = is_fill ? WALL : 0;
+      d.generator = "plane_regularize"; d.binding = default_binding;
+      out.push_back(d);
+    };
+    for (int v = 0; v < NV; ++v)
+      for (int h = 0; h < NH; ++h) {
+        long i2 = (long)v * NH + h;
+        bool inside = (v >= rv0 && v <= rv1 && h >= rh0 && h <= rh1);
+        if (!(inside && !wall2d[i2] && !F2(v, h))) continue;
+        double post = (double)L2(v, h) + prior_at(v, h);
+        if (post >= 0.85 && d2[i2] <= s2) emit(v, h, true);
+      }
+    for (int v = 0; v < NV; ++v)
+      for (int h = 0; h < NH; ++h) {
+        long i2 = (long)v * NH + h;
+        bool inside = (v >= rv0 && v <= rv1 && h >= rh0 && h <= rh1);
+        if (!(!inside && wall2d[i2])) continue;
+        double post = (double)L2(v, h) + prior_at(v, h);
+        if (post >= 0.85) continue;
+        if (comp[i2] && csz[comp[i2]] >= keep_comp_cells) continue;  // 大分量=真墙翼
+        emit(v, h, false);
+      }
+  };
+  for (int c0 : projection_peaks(xcount, min_wall_cells_)) regularize(true, c0);
+  for (int c0 : projection_peaks(zcount, min_wall_cells_)) regularize(false, c0);
+  return out;
+}
+
 // ===================== StairsFill =====================
 StairsFill::StairsFill(double max_depth_m) : max_depth_m_(max_depth_m) {
   id = "stairs_fill"; stage = 1; default_binding = "persistent";

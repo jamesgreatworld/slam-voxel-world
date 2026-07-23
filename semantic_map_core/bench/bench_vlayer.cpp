@@ -119,5 +119,19 @@ int main() {
   auto sd = st.run(tm, empty);
   std::printf("C++ synth stairs=%zu\n", sd.size());
   dumpv(O + "vlayer_stairs_cpp.bin", sd);
+
+  // ---- PlaneRegularize: 矩形外弱观测飘砖(删) + 矩形内深处未观测洞(补) ----
+  so[sid(12, 22, 30)] = 1; ss[sid(12, 22, 30)] = 19;
+  so[sid(12, 22, 31)] = 1; ss[sid(12, 22, 31)] = 19;   // 飘砖(弱 logodds)
+  so[sid(12, 12, 30)] = 0; ss[sid(12, 12, 30)] = 0;    // 深处未观测洞
+  so[sid(12, 12, 31)] = 0; ss[sid(12, 12, 31)] = 0;
+  std::vector<float> lov(so.size(), 0.0f);
+  for (size_t i = 0; i < so.size(); ++i) lov[i] = so[i] ? 3.5f : (sf[i] ? -2.0f : 0.0f);
+  lov[sid(12, 22, 30)] = 0.9f; lov[sid(12, 22, 31)] = 0.9f;
+  MapView rm{so.data(), ss.data(), sf.data(), SX, SY, SZ, 0.1f, lov.data()};
+  PlaneRegularize pr;
+  auto pd = pr.run(rm, empty);
+  std::printf("C++ synth regularize=%zu\n", pd.size());
+  dumpv(O + "vlayer_reg_cpp.bin", pd);
   return 0;
 }

@@ -73,6 +73,21 @@ class OpeningCarve : public Generator {
   int min_wall_cells_, min_height_, min_run_;
 };
 
+// stage-2: PlaneRegularize —— 形状先验(墙=矩形)× 观测 log-odds 的概率规整:
+// 矩形内深处未观测缺格补上, 矩形外孤立小碎块删掉; observed-free 永不覆盖。
+// 移植自 regularize.py::PlaneRegularize。需 MapView.logodds。
+class PlaneRegularize : public Generator {
+ public:
+  PlaneRegularize(double k_per_cell = 0.3, double prior_cap = 3.0, double trim_fill = 0.3,
+                  int min_wall_cells = 20, int min_height = 4, int min_run = 4,
+                  double support_m = 0.4, double keep_comp_m2 = 0.09);
+  std::vector<VoxelDelta> run(const MapView& m, const Overlay& acc) const override;
+
+ private:
+  double k_, cap_, trim_fill_, support_m_, keep_comp_m2_;
+  int min_wall_cells_, min_height_, min_run_;
+};
+
 // stage-1: 楼梯(label 15)向下实心化, 停在观测面/free/max_depth/地面下界(floor 最低 y)。
 // 移植自 stairs.py::StairsFill。
 class StairsFill : public Generator {

@@ -14,6 +14,7 @@ struct MapView {
   const uint8_t* free;  // observed_free_mask
   int nx, ny, nz;
   float voxel_size;
+  const float* logodds = nullptr;  // 可选(PlaneRegularize 需要)
   inline long id(int x, int y, int z) const { return ((long)x * ny + y) * nz + z; }
 };
 
