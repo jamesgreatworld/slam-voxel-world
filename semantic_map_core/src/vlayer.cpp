@@ -121,7 +121,7 @@ std::vector<const Generator*> toposort(const std::vector<const Generator*>& gens
 Overlay run_pipeline(const MapView& m, const std::vector<const Generator*>& gens) {
   Overlay ov;
   for (const Generator* g : toposort(gens)) {
-    auto ds = g->run(m);
+    auto ds = g->run(m, ov);  // 传入已累积 overlay
     ov.voxels.insert(ov.voxels.end(), ds.begin(), ds.end());
   }
   return ov;

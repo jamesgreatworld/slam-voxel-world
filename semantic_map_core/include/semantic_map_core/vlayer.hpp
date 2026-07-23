@@ -50,7 +50,9 @@ struct Generator {
   std::vector<std::string> depends_on;
   std::string default_binding = "persistent";
   virtual ~Generator() = default;
-  virtual std::vector<VoxelDelta> run(const MapView& m) const = 0;
+  // acc = 到此为止已累积的 overlay(前序 generator 的产出)。多数 generator 忽略它;
+  // OpeningCarve 需要读它拿 wall_fill 补墙格。复刻 Python 的 ctx.overlay。
+  virtual std::vector<VoxelDelta> run(const MapView& m, const Overlay& acc) const = 0;
 };
 
 std::vector<const Generator*> toposort(const std::vector<const Generator*>& gens);

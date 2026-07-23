@@ -32,14 +32,17 @@ int main() {
   SlabFill sceil(31, "ceiling", 0.6, 0.5, 2);
   WallFill wall(0.10, 20, 4, 4, 2);
   OcclusionFill occl(5, 19);
-  std::vector<const Generator*> gens{&sfloor, &sceil, &wall, &occl};
+  RoofCap roof(0.5, 2);
+  std::vector<const Generator*> gens{&sfloor, &sceil, &wall, &occl, &roof};
   Overlay ov = run_pipeline(m, gens);
+  Overlay empty;
 
   std::vector<uint8_t> cocc, csem;
   compose_structure(m, ov, cocc, csem);
 
-  std::printf("C++ per-gen: slab_floor=%zu slab_ceil=%zu wall=%zu occl=%zu  total=%zu  occ_after=%ld\n",
-              sfloor.run(m).size(), sceil.run(m).size(), wall.run(m).size(), occl.run(m).size(),
+  std::printf("C++ per-gen: slab_floor=%zu slab_ceil=%zu wall=%zu occl=%zu roof=%zu  total=%zu  occ_after=%ld\n",
+              sfloor.run(m, empty).size(), sceil.run(m, empty).size(), wall.run(m, empty).size(),
+              occl.run(m, empty).size(), roof.run(m, empty).size(),
               ov.voxels.size(), [&] { long c = 0; for (uint8_t v : cocc) c += v; return c; }());
 
   // dump deltas(x,y,z,op,sem) 排序集合无关 + compose 网格
@@ -65,11 +68,27 @@ int main() {
     for (int y = 3; y <= 20; ++y)
       for (int z = 3; z <= 35; ++z) sf[sid(x, y, z)] = 1;  // +x 侧房间
   MapView sm{so.data(), ss.data(), sf.data(), SX, SY, SZ, 0.1f};
-  auto wd = wall.run(sm);
-  std::printf("C++ synth wall deltas=%zu\n", wd.size());
-  FILE* g = std::fopen((O + "vlayer_synth_cpp.bin").c_str(), "wb");
-  int wn = (int)wd.size(); std::fwrite(&wn, 4, 1, g);
-  for (auto& d : wd) { int v[5] = {d.idx[0], d.idx[1], d.idx[2], (int)d.op, d.sem}; std::fwrite(v, 4, 5, g); }
-  std::fclose(g);
+  auto wd = wall.run(sm, empty);
+
+  // ---- 合成天花板(label 4)带观测洞 + free 开口, 覆盖 RoofCap ----
+  std::vector<uint8_t> co(so.size(), 0), cs(so.size(), 0), cf(so.size(), 0);
+  for (int x = 3; x <= 20; ++x)
+    for (int z = 3; z <= 35; ++z) { co[sid(x, 20, z)] = 1; cs[sid(x, 20, z)] = 4; }
+  for (int x = 10; x <= 12; ++x)
+    for (int z = 10; z <= 12; ++z) { co[sid(x, 20, z)] = 0; cs[sid(x, 20, z)] = 0; }  // 观测洞
+  for (int x = 15; x <= 16; ++x)
+    for (int z = 15; z <= 16; ++z) { co[sid(x, 20, z)] = 0; cs[sid(x, 20, z)] = 0; cf[sid(x, 20, z)] = 1; }  // free 开口
+  MapView cm{co.data(), cs.data(), cf.data(), SX, SY, SZ, 0.1f};
+  auto rdel = roof.run(cm, empty);
+  std::printf("C++ synth wall=%zu roof=%zu\n", wd.size(), rdel.size());
+
+  auto dumpv = [&](const std::string& path, const std::vector<VoxelDelta>& v) {
+    FILE* g = std::fopen(path.c_str(), "wb");
+    int n = (int)v.size(); std::fwrite(&n, 4, 1, g);
+    for (auto& d : v) { int a[5] = {d.idx[0], d.idx[1], d.idx[2], (int)d.op, d.sem}; std::fwrite(a, 4, 5, g); }
+    std::fclose(g);
+  };
+  dumpv(O + "vlayer_synth_cpp.bin", wd);
+  dumpv(O + "vlayer_roof_cpp.bin", rdel);
   return 0;
 }

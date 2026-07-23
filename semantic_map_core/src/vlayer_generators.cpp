@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 #include <vector>
 
 namespace smc {
@@ -32,6 +33,27 @@ static void closing2d(std::vector<uint8_t>& a, int NX, int NZ, int iters) {
   std::vector<uint8_t> t;
   for (int i = 0; i < iters; ++i) { dilate2d(a, NX, NZ, t); a.swap(t); }
   for (int i = 0; i < iters; ++i) { erode2d(a, NX, NZ, t); a.swap(t); }
+}
+
+// 2D binary_fill_holes(默认 4-conn): 洞 = 背景中从边界不可达的连通域。
+static void fill_holes2d(const std::vector<uint8_t>& fg, int NX, int NZ, std::vector<uint8_t>& out) {
+  std::vector<uint8_t> reach((size_t)NX * NZ, 0);
+  std::vector<long> q;
+  auto push = [&](int x, int z) {
+    long id = (long)x * NZ + z;
+    if (!fg[id] && !reach[id]) { reach[id] = 1; q.push_back(id); }
+  };
+  for (int x = 0; x < NX; ++x) { push(x, 0); push(x, NZ - 1); }
+  for (int z = 0; z < NZ; ++z) { push(0, z); push(NX - 1, z); }
+  for (size_t h = 0; h < q.size(); ++h) {
+    long id = q[h]; int x = id / NZ, z = id % NZ;
+    if (x > 0) push(x - 1, z);
+    if (x + 1 < NX) push(x + 1, z);
+    if (z > 0) push(x, z - 1);
+    if (z + 1 < NZ) push(x, z + 1);
+  }
+  out.assign((size_t)NX * NZ, 0);
+  for (long i = 0; i < (long)NX * NZ; ++i) out[i] = (fg[i] || !reach[i]) ? 1 : 0;
 }
 
 // _cluster_levels: 按 gap 把出现过的 y 分簇, 每簇取计数峰值 y(平局取最小 y)。
@@ -65,7 +87,7 @@ SlabFill::SlabFill(int label, const std::string& side, double thickness_m,
   default_binding = "persistent";
 }
 
-std::vector<VoxelDelta> SlabFill::run(const MapView& m) const {
+std::vector<VoxelDelta> SlabFill::run(const MapView& m, const Overlay& acc) const {
   const int nx = m.nx, ny = m.ny, nz = m.nz;
   const double vs = m.voxel_size;
   // surf = occ & (sem == label)
@@ -120,7 +142,7 @@ OcclusionFill::OcclusionFill(int min_neighbors, int fill_label)
     : min_neighbors_(min_neighbors), fill_label_(fill_label) {
   id = "occlusion_fill"; stage = 1; default_binding = "persistent";
 }
-std::vector<VoxelDelta> OcclusionFill::run(const MapView& m) const {
+std::vector<VoxelDelta> OcclusionFill::run(const MapView& m, const Overlay& acc) const {
   const int nx = m.nx, ny = m.ny, nz = m.nz;
   std::vector<VoxelDelta> out;
   bool anyocc = false;
@@ -175,7 +197,7 @@ WallFill::WallFill(double thickness_m, int min_wall_cells, int min_height, int m
   id = "wall_fill"; stage = 1; default_binding = "persistent";
 }
 
-std::vector<VoxelDelta> WallFill::run(const MapView& m) const {
+std::vector<VoxelDelta> WallFill::run(const MapView& m, const Overlay& acc) const {
   const int nx = m.nx, ny = m.ny, nz = m.nz;
   const double vs = m.voxel_size;
   const int WALL = 19;
@@ -247,6 +269,52 @@ std::vector<VoxelDelta> WallFill::run(const MapView& m) const {
   };
   for (int x0 : projection_peaks(xcount, min_wall_cells_)) fill_plane(true, x0);
   for (int z0 : projection_peaks(zcount, min_wall_cells_)) fill_plane(false, z0);
+  return out;
+}
+
+// ===================== RoofCap =====================
+RoofCap::RoofCap(double level_gap_m, int band_cells)
+    : level_gap_m_(level_gap_m), band_cells_(band_cells) {
+  id = "roof_cap"; stage = 2; depends_on = {"slab_fill_ceiling"};
+  default_binding = "persistent";
+}
+std::vector<VoxelDelta> RoofCap::run(const MapView& m, const Overlay&) const {
+  const int nx = m.nx, ny = m.ny, nz = m.nz;
+  const int CEIL = 4;
+  std::vector<uint8_t> ceil_((size_t)nx * ny * nz, 0);
+  std::vector<int> ys;
+  bool any = false;
+  for (long i = 0; i < (long)nx * ny * nz; ++i)
+    if (m.occ[i] && m.sem[i] == CEIL) { ceil_[i] = 1; any = true; ys.push_back((int)((i / nz) % ny)); }
+  std::vector<VoxelDelta> out;
+  if (!any) return out;
+  int gap = std::max(1, (int)std::lround(level_gap_m_ / m.voxel_size));
+  std::set<long> emitted;
+  for (int Y : cluster_levels(ys, gap, ny)) {
+    int ylo = std::max(0, Y - band_cells_), yhi = std::min(ny, Y + band_cells_ + 1);
+    std::vector<uint8_t> foot((size_t)nx * nz, 0), filled;
+    for (int x = 0; x < nx; ++x)
+      for (int z = 0; z < nz; ++z) {
+        bool f = false;
+        for (int y = ylo; y < yhi && !f; ++y) if (ceil_[m.id(x, y, z)]) f = true;
+        foot[(long)x * nz + z] = f ? 1 : 0;
+      }
+    fill_holes2d(foot, nx, nz, filled);
+    for (int x = 0; x < nx; ++x)
+      for (int z = 0; z < nz; ++z) {
+        long f2 = (long)x * nz + z;
+        if (!(filled[f2] && !foot[f2])) continue;   // holes = filled & ~foot
+        long id = m.id(x, Y, z);
+        if (emitted.count(id)) continue;
+        if (m.free[id] || m.occ[id]) continue;
+        emitted.insert(id);
+        VoxelDelta d;
+        d.idx[0] = x; d.idx[1] = Y; d.idx[2] = z;
+        d.op = DeltaOp::ADD; d.sem = CEIL;
+        d.generator = "roof_cap"; d.binding = default_binding;
+        out.push_back(d);
+      }
+  }
   return out;
 }
 

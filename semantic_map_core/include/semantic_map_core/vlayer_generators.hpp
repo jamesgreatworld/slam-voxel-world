@@ -12,7 +12,7 @@ class SlabFill : public Generator {
   // side: "floor" | "ceiling"
   SlabFill(int label, const std::string& side, double thickness_m = 0.6,
            double level_gap_m = 0.5, int close_radius = 2);
-  std::vector<VoxelDelta> run(const MapView& m) const override;
+  std::vector<VoxelDelta> run(const MapView& m, const Overlay& acc) const override;
 
  private:
   int label_;
@@ -25,7 +25,7 @@ class SlabFill : public Generator {
 class OcclusionFill : public Generator {
  public:
   OcclusionFill(int min_neighbors = 5, int fill_label = 19);
-  std::vector<VoxelDelta> run(const MapView& m) const override;
+  std::vector<VoxelDelta> run(const MapView& m, const Overlay& acc) const override;
 
  private:
   int min_neighbors_, fill_label_;
@@ -37,7 +37,7 @@ class WallFill : public Generator {
  public:
   WallFill(double thickness_m = 0.10, int min_wall_cells = 20, int min_height = 4,
            int min_run = 4, int close_radius = 2);
-  std::vector<VoxelDelta> run(const MapView& m) const override;
+  std::vector<VoxelDelta> run(const MapView& m, const Overlay& acc) const override;
 
  private:
   double thickness_m_;
@@ -46,5 +46,17 @@ class WallFill : public Generator {
 
 // 墙平面检测(WallFill / OpeningCarve 共用): 投影计数的局部峰(>=min_cells, 紧邻合并取最大)。
 std::vector<int> projection_peaks(const std::vector<long>& count, int min_cells);
+
+// stage-2: RoofCap —— 天花板(label=4)层的观测缺口 binary_fill_holes 补洞(不填 free 开口)。
+// 移植自 roof.py::RoofCap。depends_on slab_fill_ceiling。
+class RoofCap : public Generator {
+ public:
+  RoofCap(double level_gap_m = 0.5, int band_cells = 2);
+  std::vector<VoxelDelta> run(const MapView& m, const Overlay& acc) const override;
+
+ private:
+  double level_gap_m_;
+  int band_cells_;
+};
 
 }  // namespace smc
