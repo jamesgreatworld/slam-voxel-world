@@ -343,6 +343,50 @@ std::vector<VoxelDelta> RoofCap::run(const MapView& m, const Overlay&) const {
   return out;
 }
 
+// ===================== StairsFill =====================
+StairsFill::StairsFill(double max_depth_m) : max_depth_m_(max_depth_m) {
+  id = "stairs_fill"; stage = 1; default_binding = "persistent";
+}
+std::vector<VoxelDelta> StairsFill::run(const MapView& m, const Overlay&) const {
+  const int nx = m.nx, ny = m.ny, nz = m.nz;
+  const int STAIRS = 15, FLOOR = 3;
+  std::vector<VoxelDelta> out;
+  bool any = false, any_floor = false;
+  int ground_y = 0;
+  for (long i = 0; i < (long)nx * ny * nz; ++i) {
+    if (!m.occ[i]) continue;
+    if (m.sem[i] == STAIRS) any = true;
+    else if (m.sem[i] == FLOOR) {
+      int y = (int)((i / nz) % ny);
+      if (!any_floor || y < ground_y) ground_y = y;
+      any_floor = true;
+    }
+  }
+  if (!any) return out;
+  if (!any_floor) ground_y = 0;
+  int depth = std::max(1, (int)std::lround(max_depth_m_ / m.voxel_size));
+  for (int x = 0; x < nx; ++x)      // argwhere(stairs.any(axis=1)) = (x,z) 升序
+    for (int z = 0; z < nz; ++z) {
+      int top = -1;
+      for (int y = ny - 1; y >= 0; --y) {
+        long id = m.id(x, y, z);
+        if (m.occ[id] && m.sem[id] == STAIRS) { top = y; break; }
+      }
+      if (top < 0) continue;
+      int lo = std::max(ground_y, top - depth);
+      for (int y = top - 1; y >= lo; --y) {
+        long id = m.id(x, y, z);
+        if (m.occ[id] || m.free[id]) break;
+        VoxelDelta d;
+        d.idx[0] = x; d.idx[1] = y; d.idx[2] = z;
+        d.op = DeltaOp::ADD; d.sem = STAIRS;
+        d.generator = "stairs_fill"; d.binding = default_binding;
+        out.push_back(d);
+      }
+    }
+  return out;
+}
+
 // ===================== OpeningCarve =====================
 OpeningCarve::OpeningCarve(double min_area_m2, double max_area_m2, double max_extent_m,
                            double enclosure_min, double thickness_m, int min_wall_cells,

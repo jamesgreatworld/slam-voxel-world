@@ -73,4 +73,15 @@ class OpeningCarve : public Generator {
   int min_wall_cells_, min_height_, min_run_;
 };
 
+// stage-1: 楼梯(label 15)向下实心化, 停在观测面/free/max_depth/地面下界(floor 最低 y)。
+// 移植自 stairs.py::StairsFill。
+class StairsFill : public Generator {
+ public:
+  explicit StairsFill(double max_depth_m = 1.5);
+  std::vector<VoxelDelta> run(const MapView& m, const Overlay& acc) const override;
+
+ private:
+  double max_depth_m_;
+};
+
 }  // namespace smc

@@ -107,5 +107,17 @@ int main() {
   auto od = oc.run(sm, acc2);
   std::printf("C++ synth opening=%zu (acc wall adds=%zu)\n", od.size(), acc2.voxels.size());
   dumpv(O + "vlayer_open_cpp.bin", od);
+
+  // ---- 合成阶梯: 3 级台阶(15)+ 地面(3), 向下实心化 ----
+  std::vector<uint8_t> to(so.size(), 0), ts(so.size(), 0), tf(so.size(), 0);
+  for (int x = 3; x <= 9; ++x)
+    for (int z = 3; z <= 9; ++z) { to[sid(x, 2, z)] = 1; ts[sid(x, 2, z)] = 3; }
+  for (int k = 0; k < 3; ++k)
+    for (int z = 4; z <= 8; ++z) { to[sid(5 + k, 5 + 2 * k, z)] = 1; ts[sid(5 + k, 5 + 2 * k, z)] = 15; }
+  MapView tm{to.data(), ts.data(), tf.data(), SX, SY, SZ, 0.1f};
+  StairsFill st(1.5);
+  auto sd = st.run(tm, empty);
+  std::printf("C++ synth stairs=%zu\n", sd.size());
+  dumpv(O + "vlayer_stairs_cpp.bin", sd);
   return 0;
 }
