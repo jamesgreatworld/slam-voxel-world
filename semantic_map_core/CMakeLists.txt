@@ -23,6 +23,8 @@ add_library(semantic_map_core STATIC
   src/scene_graph.cpp
   src/surface.cpp
   src/features.cpp
+  src/vlayer.cpp
+  src/vlayer_generators.cpp
 )
 target_include_directories(semantic_map_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -67,6 +69,9 @@ target_link_libraries(bench_fullpipe semantic_map_core)
 
 add_executable(bench_transforms bench/bench_transforms.cpp)
 target_link_libraries(bench_transforms semantic_map_core)
+
+add_executable(bench_vlayer bench/bench_vlayer.cpp)
+target_link_libraries(bench_vlayer semantic_map_core)
 
 # ---- rclcpp 在线驱动节点(需 source ROS 后 -DBUILD_ROS_NODE=ON)----
 option(BUILD_ROS_NODE "build rclcpp live node" OFF)
