@@ -3,6 +3,7 @@
 #include "semantic_map_core/coarsen.hpp"
 #include "semantic_map_core/vlayer.hpp"
 #include "semantic_map_core/vlayer_generators.hpp"
+#include "semantic_map_core/vlayer_objects.hpp"
 
 // 统计各 generator 单独产出(诊断: 看哪些在 House 上非空)
 
@@ -190,6 +191,33 @@ int main() {
     for (uint8_t v : co2) n3 += v;
     std::printf("C++ coarsen: down=%ld prune=%ld clean=%ld dims=%dx%dx%d\n",
                 n1, n2, n3, dc[0], dc[1], dc[2]);
+  }
+
+  // ---- vlayer objects: House 实体化 + 摆放解算 ----
+  {
+    std::set<int> labs;
+    std::set<int> structure;
+    { FILE* f3 = std::fopen((O + "house_struct.bin").c_str(), "rb");
+      int m2 = 0;
+      if (f3) {
+        if (std::fread(&m2, 4, 1, f3) == 1)
+          for (int i = 0; i < m2; ++i) { int v; if (std::fread(&v, 4, 1, f3) == 1) structure.insert(v); }
+        std::fclose(f3);
+      } }
+    for (long i = 0; i < N; ++i)
+      if (occ[i] && sem[i] != 0 && !structure.count(sem[i])) labs.insert(sem[i]);
+    long vmn0[3] = {0, 0, 0};
+    auto ents = extract_object_models(occ.data(), sem.data(), nx, ny, nz, vmn0, 0.1,
+                                      {}, {}, 30, labs);
+    std::printf("C++ entities=%zu (labels=%zu)\n", ents.size(), labs.size());
+    FILE* f4 = std::fopen((O + "entities_cpp.txt").c_str(), "wb");
+    for (auto& e : ents)
+      std::fprintf(f4, "%s|%d|%s|%.9f,%.9f,%.9f|%.9f,%.9f,%.9f|%d|%s|%s|%s\n",
+                   e.id.c_str(), e.label, e.label_name.c_str(),
+                   e.position[0], e.position[1], e.position[2],
+                   e.bbox_dims[0], e.bbox_dims[1], e.bbox_dims[2],
+                   e.voxel_count, e.mount.c_str(), e.mc_item.c_str(), e.support_id.c_str());
+    std::fclose(f4);
   }
   return 0;
 }
