@@ -1,5 +1,6 @@
 // bench_vlayer.cpp — vlayer 对拍: House occ/sem/free 上跑 SlabFill(floor+ceiling) 流水线,
 // dump deltas + compose 后的 occ/sem 供 Python 逐格对拍。
+#include "semantic_map_core/coarsen.hpp"
 #include "semantic_map_core/vlayer.hpp"
 #include "semantic_map_core/vlayer_generators.hpp"
 
@@ -160,5 +161,35 @@ int main() {
   auto rpd = rp.run(pm, empty);
   std::printf("C++ synth ransac=%zu (trials=%zu)\n", rpd.size(), trials.size());
   dumpv(O + "ransac_cpp.bin", rpd);
+
+  // ---- coarsen: House 真数据 downsample(factor2, 非平凡 vmin 测 mod 对齐) -> prune -> clean ----
+  {
+    const long vmn[3] = {-13, 5, -7};
+    std::vector<uint8_t> oc, sc;
+    long vmc[3]; float vsc; int dc[3];
+    downsample_occupancy(occ.data(), sem.data(), nx, ny, nz, vmn, 0.1f, 2, 1, oc, sc, vmc, vsc, dc);
+    FILE* f2 = std::fopen((O + "coarsen_cpp.bin").c_str(), "wb");
+    int hdr[3] = {dc[0], dc[1], dc[2]};
+    long vm64[3] = {vmc[0], vmc[1], vmc[2]};
+    std::fwrite(hdr, 4, 3, f2);
+    std::fwrite(vm64, 8, 3, f2);
+    std::fwrite(oc.data(), 1, oc.size(), f2);
+    std::fwrite(sc.data(), 1, sc.size(), f2);
+    std::vector<uint8_t> po2 = oc, ps2 = sc;
+    prune_dangles(po2, ps2, dc[0], dc[1], dc[2], 2);
+    std::fwrite(po2.data(), 1, po2.size(), f2);
+    std::fwrite(ps2.data(), 1, ps2.size(), f2);
+    std::vector<uint8_t> co2 = oc, cs2 = sc;
+    clean_coarse(co2, cs2, dc[0], dc[1], dc[2], 2, 1, false);
+    std::fwrite(co2.data(), 1, co2.size(), f2);
+    std::fwrite(cs2.data(), 1, cs2.size(), f2);
+    std::fclose(f2);
+    long n1 = 0, n2 = 0, n3 = 0;
+    for (uint8_t v : oc) n1 += v;
+    for (uint8_t v : po2) n2 += v;
+    for (uint8_t v : co2) n3 += v;
+    std::printf("C++ coarsen: down=%ld prune=%ld clean=%ld dims=%dx%dx%d\n",
+                n1, n2, n3, dc[0], dc[1], dc[2]);
+  }
   return 0;
 }

@@ -25,6 +25,7 @@ add_library(semantic_map_core STATIC
   src/features.cpp
   src/vlayer.cpp
   src/vlayer_generators.cpp
+  src/coarsen.cpp
 )
 target_include_directories(semantic_map_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
