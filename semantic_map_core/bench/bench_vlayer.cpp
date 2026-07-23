@@ -5,6 +5,7 @@
 
 // 统计各 generator 单独产出(诊断: 看哪些在 House 上非空)
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <set>
@@ -133,5 +134,31 @@ int main() {
   auto pd = pr.run(rm, empty);
   std::printf("C++ synth regularize=%zu\n", pd.size());
   dumpv(O + "vlayer_reg_cpp.bin", pd);
+
+  // ---- RansacPlaneFill: 斜面带洞, trials 由 gen_ransac.py 注入 ----
+  std::vector<uint8_t> po(so.size(), 0), ps(so.size(), 0), pf(so.size(), 0);
+  for (int x = 2; x < 22; ++x)
+    for (int z = 2; z < 30; ++z) {
+      int y = (int)std::nearbyint(0.3 * x + 0.2 * z) + 2;
+      if (x >= 8 && x <= 12 && z >= 10 && z <= 16) continue;
+      if (y >= 0 && y < SY) { po[sid(x, y, z)] = 1; ps[sid(x, y, z)] = 4; }
+    }
+  std::vector<std::array<int, 3>> trials;
+  { FILE* tf2 = std::fopen((O + "ransac_trials.bin").c_str(), "rb");
+    if (tf2) {
+      int tn = 0;
+      if (std::fread(&tn, 4, 1, tf2) == 1)
+        for (int i = 0; i < tn; ++i) {
+          int v[3];
+          if (std::fread(v, 4, 3, tf2) == 3) trials.push_back({v[0], v[1], v[2]});
+        }
+      std::fclose(tf2);
+    } }
+  MapView pm{po.data(), ps.data(), pf.data(), SX, SY, SZ, 0.1f};
+  RansacPlaneFill rp;
+  rp.trials = &trials;
+  auto rpd = rp.run(pm, empty);
+  std::printf("C++ synth ransac=%zu (trials=%zu)\n", rpd.size(), trials.size());
+  dumpv(O + "ransac_cpp.bin", rpd);
   return 0;
 }

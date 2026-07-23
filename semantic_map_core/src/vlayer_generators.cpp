@@ -501,6 +501,113 @@ std::vector<VoxelDelta> PlaneRegularize::run(const MapView& m, const Overlay&) c
   return out;
 }
 
+// ===================== RansacPlaneFill =====================
+RansacPlaneFill::RansacPlaneFill(std::vector<int> labels, double dist_thresh, int min_inliers,
+                                 int max_planes, int iters, uint64_t seed)
+    : labels_(std::move(labels)), dist_thresh_(dist_thresh), min_inliers_(min_inliers),
+      max_planes_(max_planes), iters_(iters), seed_(seed) {
+  id = "ransac_plane"; stage = 1; default_binding = "persistent";
+}
+
+std::vector<VoxelDelta> RansacPlaneFill::run(const MapView& m, const Overlay&) const {
+  const int nx = m.nx, ny = m.ny, nz = m.nz;
+  std::vector<VoxelDelta> out;
+  std::set<int> labset(labels_.begin(), labels_.end());
+  std::vector<std::array<double, 3>> pts;
+  for (int x = 0; x < nx; ++x)          // argwhere 行主序
+    for (int y = 0; y < ny; ++y)
+      for (int z = 0; z < nz; ++z) {
+        long id = m.id(x, y, z);
+        if (m.occ[id] && labset.count(m.sem[id]))
+          pts.push_back({(double)x, (double)y, (double)z});
+      }
+  if ((int)pts.size() < min_inliers_) return out;
+  int fill_label = labels_[0];
+  std::vector<int> remaining(pts.size());
+  for (size_t i = 0; i < remaining.size(); ++i) remaining[i] = (int)i;
+  uint64_t rng = seed_ * 0x9E3779B97F4A7C15ull + 0xBF58476D1CE4E5B9ull;  // splitmix64 态
+  auto rnd = [&]() {
+    rng += 0x9E3779B97F4A7C15ull;
+    uint64_t z = rng;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+  };
+  size_t trial_i = 0;
+  for (int p = 0; p < max_planes_; ++p) {
+    if ((int)remaining.size() < min_inliers_) break;
+    double bn[3] = {0, 0, 0}, bd = 0;
+    int bcnt = 0;
+    bool have = false;
+    for (int it = 0; it < iters_; ++it) {
+      int i0, i1, i2;
+      if (trials) {
+        if (trial_i >= trials->size()) break;
+        auto& t = (*trials)[trial_i++];
+        i0 = t[0]; i1 = t[1]; i2 = t[2];
+      } else {   // 无放回抽 3(内置 rng, 生产路径)
+        int n = (int)remaining.size();
+        i0 = (int)(rnd() % n);
+        do { i1 = (int)(rnd() % n); } while (i1 == i0);
+        do { i2 = (int)(rnd() % n); } while (i2 == i0 || i2 == i1);
+      }
+      const auto& A = pts[remaining[i0]];
+      const auto& B = pts[remaining[i1]];
+      const auto& C = pts[remaining[i2]];
+      double u[3] = {B[0] - A[0], B[1] - A[1], B[2] - A[2]};
+      double v[3] = {C[0] - A[0], C[1] - A[1], C[2] - A[2]};
+      double n3[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2],
+                      u[0] * v[1] - u[1] * v[0]};
+      double nn = std::sqrt(n3[0] * n3[0] + n3[1] * n3[1] + n3[2] * n3[2]);
+      if (nn < 1e-6) continue;
+      for (double& c : n3) c /= nn;
+      double d = n3[0] * A[0] + n3[1] * A[1] + n3[2] * A[2];
+      int cnt = 0;
+      for (int ri : remaining) {
+        double dist = std::fabs(pts[ri][0] * n3[0] + pts[ri][1] * n3[1] + pts[ri][2] * n3[2] - d);
+        if (dist < dist_thresh_) ++cnt;
+      }
+      if (cnt > bcnt) { bcnt = cnt; bd = d; bn[0] = n3[0]; bn[1] = n3[1]; bn[2] = n3[2]; have = true; }
+    }
+    if (!have || bcnt < min_inliers_) break;
+    // inliers + 栅格化
+    std::vector<int> inl, rest;
+    for (int ri : remaining) {
+      double dist = std::fabs(pts[ri][0] * bn[0] + pts[ri][1] * bn[1] + pts[ri][2] * bn[2] - bd);
+      (dist < dist_thresh_ ? inl : rest).push_back(ri);
+    }
+    int ax = 0;
+    { double aa = std::fabs(bn[0]);   // argmax(|n|) 首个最大
+      if (std::fabs(bn[1]) > aa) { aa = std::fabs(bn[1]); ax = 1; }
+      if (std::fabs(bn[2]) > aa) ax = 2; }
+    int o0 = -1, o1 = -1;
+    for (int a = 0; a < 3; ++a) { if (a == ax) continue; if (o0 < 0) o0 = a; else o1 = a; }
+    long lo[3] = {1 << 30, 1 << 30, 1 << 30}, hi[3] = {-(1 << 30), -(1 << 30), -(1 << 30)};
+    for (int ri : inl)
+      for (int a = 0; a < 3; ++a) {
+        long c = (long)pts[ri][a];
+        lo[a] = std::min(lo[a], c); hi[a] = std::max(hi[a], c);
+      }
+    for (long u2 = lo[o0]; u2 <= hi[o0]; ++u2)
+      for (long v2 = lo[o1]; v2 <= hi[o1]; ++v2) {
+        double w = (bd - bn[o0] * (double)u2 - bn[o1] * (double)v2) / bn[ax];
+        long c[3]; c[o0] = u2; c[o1] = v2;
+        c[ax] = (long)std::nearbyint(w);   // Python round = 半偶
+        int x = (int)c[0], y = (int)c[1], z = (int)c[2];
+        if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) continue;
+        long id = m.id(x, y, z);
+        if (m.occ[id] || m.free[id]) continue;
+        VoxelDelta dd;
+        dd.idx[0] = x; dd.idx[1] = y; dd.idx[2] = z;
+        dd.op = DeltaOp::ADD; dd.sem = fill_label;
+        dd.generator = "ransac_plane"; dd.binding = default_binding;
+        out.push_back(dd);
+      }
+    remaining.swap(rest);
+  }
+  return out;
+}
+
 // ===================== StairsFill =====================
 StairsFill::StairsFill(double max_depth_m) : max_depth_m_(max_depth_m) {
   id = "stairs_fill"; stage = 1; default_binding = "persistent";

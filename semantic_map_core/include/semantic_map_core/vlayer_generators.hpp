@@ -1,5 +1,7 @@
 // vlayer_generators.hpp — 结构先验 generator(移植自 m3_adapter/vlayer/generators/*)。
 #pragma once
+#include <array>
+#include <cstdint>
 #include <string>
 
 #include "semantic_map_core/vlayer.hpp"
@@ -86,6 +88,24 @@ class PlaneRegularize : public Generator {
  private:
   double k_, cap_, trim_fill_, support_m_, keep_comp_m2_;
   int min_wall_cells_, min_height_, min_run_;
+};
+
+// stage-1: RANSAC 拟合任意朝向平面并沿真平面栅格化补洞。移植自 plane.py::RansacPlaneFill。
+// 对拍: numpy PCG64 不可移植 -> trials 注入(每次迭代抽的 3 个 remaining 下标);
+// 生产路径 trials=nullptr 时用内置 splitmix64(语义等价, 不与 numpy 逐位一致)。
+class RansacPlaneFill : public Generator {
+ public:
+  RansacPlaneFill(std::vector<int> labels = {4}, double dist_thresh = 1.5,
+                  int min_inliers = 80, int max_planes = 4, int iters = 200,
+                  uint64_t seed = 0);
+  std::vector<VoxelDelta> run(const MapView& m, const Overlay& acc) const override;
+  const std::vector<std::array<int, 3>>* trials = nullptr;  // 对拍注入
+
+ private:
+  std::vector<int> labels_;
+  double dist_thresh_;
+  int min_inliers_, max_planes_, iters_;
+  uint64_t seed_;
 };
 
 // stage-1: 楼梯(label 15)向下实心化, 停在观测面/free/max_depth/地面下界(floor 最低 y)。
