@@ -59,4 +59,18 @@ class RoofCap : public Generator {
   int band_cells_;
 };
 
+// stage-2: OpeningCarve —— 门/窗开口(墙平面上的 free 连通域)拟合成矩形/拱形并挖穿(remove)。
+// 读 acc 拿 wall_fill 补墙格一并挖。移植自 opening.py::OpeningCarve。
+class OpeningCarve : public Generator {
+ public:
+  OpeningCarve(double min_area_m2 = 0.35, double max_area_m2 = 4.0, double max_extent_m = 2.6,
+               double enclosure_min = 0.5, double thickness_m = 0.10, int min_wall_cells = 20,
+               int min_height = 4, int min_run = 4, double trim_fill = 0.3);
+  std::vector<VoxelDelta> run(const MapView& m, const Overlay& acc) const override;
+
+ private:
+  double min_area_m2_, max_area_m2_, max_extent_m_, enclosure_min_, thickness_m_, trim_fill_;
+  int min_wall_cells_, min_height_, min_run_;
+};
+
 }  // namespace smc

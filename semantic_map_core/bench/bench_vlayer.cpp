@@ -90,5 +90,22 @@ int main() {
   };
   dumpv(O + "vlayer_synth_cpp.bin", wd);
   dumpv(O + "vlayer_roof_cpp.bin", rdel);
+
+  // ---- 合成门洞: 墙平面 free 连通域 -> OpeningCarve 拟合并挖 remove ----
+  // 在合成墙(x=12)上开 9x6 门(54 格 >= min_cells=35), 带 1 格毛边
+  for (int y = 4; y <= 12; ++y)
+    for (int z = 19; z <= 24; ++z) {
+      so[sid(12, y, z)] = 0; ss[sid(12, y, z)] = 0; sf[sid(12, y, z)] = 1;
+    }
+  so[sid(12, 13, 21)] = 0; ss[sid(12, 13, 21)] = 0; sf[sid(12, 13, 21)] = 1;  // 毛边
+  // 门洞内 2 块噪声残砖(拟合矩形会覆盖它们 -> remove)
+  so[sid(12, 8, 21)] = 1; ss[sid(12, 8, 21)] = 19; sf[sid(12, 8, 21)] = 0;
+  so[sid(12, 10, 22)] = 1; ss[sid(12, 10, 22)] = 19; sf[sid(12, 10, 22)] = 0;
+  Overlay acc2;
+  acc2.voxels = wall.run(sm, empty);   // 补墙格(门洞后重算)
+  OpeningCarve oc;
+  auto od = oc.run(sm, acc2);
+  std::printf("C++ synth opening=%zu (acc wall adds=%zu)\n", od.size(), acc2.voxels.size());
+  dumpv(O + "vlayer_open_cpp.bin", od);
   return 0;
 }

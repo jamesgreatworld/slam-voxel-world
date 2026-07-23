@@ -272,6 +272,31 @@ std::vector<VoxelDelta> WallFill::run(const MapView& m, const Overlay& acc) cons
   return out;
 }
 
+// 2D 8-连通连通分量标号(光栅首遇序, 同 scipy.ndimage.label(struct=2,2))。返回分量数。
+static int label8_2d(const std::vector<uint8_t>& mask, int NV, int NH, std::vector<int>& lbl) {
+  lbl.assign((size_t)NV * NH, 0);
+  int next = 0;
+  std::vector<long> q;
+  for (int v = 0; v < NV; ++v)
+    for (int h = 0; h < NH; ++h) {
+      long id = (long)v * NH + h;
+      if (!mask[id] || lbl[id]) continue;
+      ++next; lbl[id] = next; q.clear(); q.push_back(id);
+      for (size_t t = 0; t < q.size(); ++t) {
+        int cv = q[t] / NH, ch = q[t] % NH;
+        for (int dv = -1; dv <= 1; ++dv)
+          for (int dh = -1; dh <= 1; ++dh) {
+            if (!dv && !dh) continue;
+            int nv = cv + dv, nh = ch + dh;
+            if (nv < 0 || nv >= NV || nh < 0 || nh >= NH) continue;
+            long nid = (long)nv * NH + nh;
+            if (mask[nid] && !lbl[nid]) { lbl[nid] = next; q.push_back(nid); }
+          }
+      }
+    }
+  return next;
+}
+
 // ===================== RoofCap =====================
 RoofCap::RoofCap(double level_gap_m, int band_cells)
     : level_gap_m_(level_gap_m), band_cells_(band_cells) {
@@ -315,6 +340,172 @@ std::vector<VoxelDelta> RoofCap::run(const MapView& m, const Overlay&) const {
         out.push_back(d);
       }
   }
+  return out;
+}
+
+// ===================== OpeningCarve =====================
+OpeningCarve::OpeningCarve(double min_area_m2, double max_area_m2, double max_extent_m,
+                           double enclosure_min, double thickness_m, int min_wall_cells,
+                           int min_height, int min_run, double trim_fill)
+    : min_area_m2_(min_area_m2), max_area_m2_(max_area_m2), max_extent_m_(max_extent_m),
+      enclosure_min_(enclosure_min), thickness_m_(thickness_m), trim_fill_(trim_fill),
+      min_wall_cells_(min_wall_cells), min_height_(min_height), min_run_(min_run) {
+  id = "opening_carve"; stage = 2; depends_on = {"wall_fill", "plane_regularize"};
+  default_binding = "persistent";
+}
+
+// _robust_rect: 迭代剔除填充率 < trim_fill 的边缘行/列。comp 为 NVxNH bool, 传入其 bbox。
+static void robust_rect(const std::vector<uint8_t>& comp, int NH, double trim,
+                        int& v0, int& v1, int& h0, int& h1) {
+  auto C = [&](int v, int h) { return comp[(long)v * NH + h]; };
+  bool changed = true;
+  while (changed && v1 > v0 && h1 > h0) {
+    changed = false;
+    int w = h1 - h0 + 1, hgt = v1 - v0 + 1;
+    long s;
+    s = 0; for (int h = h0; h <= h1; ++h) s += C(v0, h);
+    if (s < trim * w) { v0++; changed = true; continue; }
+    s = 0; for (int h = h0; h <= h1; ++h) s += C(v1, h);
+    if (s < trim * w) { v1--; changed = true; continue; }
+    s = 0; for (int v = v0; v <= v1; ++v) s += C(v, h0);
+    if (s < trim * hgt) { h0++; changed = true; continue; }
+    s = 0; for (int v = v0; v <= v1; ++v) s += C(v, h1);
+    if (s < trim * hgt) { h1--; changed = true; }
+  }
+}
+
+// _fit_template: 矩形 vs 拱形(矩形+半圆顶), IoU 高者胜。local 为 HxW(裁剪后)。
+static std::vector<uint8_t> fit_template(const std::vector<uint8_t>& local, int H, int W) {
+  long ones = 0; for (uint8_t v : local) ones += v;
+  double iou_rect = (double)ones / (double)(H * W);
+  double r = W / 2.0;
+  std::vector<uint8_t> rect((size_t)H * W, 1);
+  if (H <= r) return rect;
+  double cv = H - r, ch = (W - 1) / 2.0;
+  std::vector<uint8_t> arch((size_t)H * W, 0);
+  long inter = 0, uni = 0;
+  for (int v = 0; v < H; ++v)
+    for (int h = 0; h < W; ++h) {
+      bool a = (v < cv) || ((h - ch) * (h - ch) + (v - cv) * (v - cv) <= r * r);
+      arch[(long)v * W + h] = a ? 1 : 0;
+      bool l = local[(long)v * W + h];
+      if (l && a) ++inter;
+      if (l || a) ++uni;
+    }
+  double iou_arch = uni ? (double)inter / (double)uni : 0.0;
+  return iou_arch > iou_rect ? arch : rect;
+}
+
+std::vector<VoxelDelta> OpeningCarve::run(const MapView& m, const Overlay& acc) const {
+  const int nx = m.nx, ny = m.ny, nz = m.nz;
+  const double vs = m.voxel_size;
+  const int WALL = 19;
+  std::vector<uint8_t> wall((size_t)nx * ny * nz, 0);
+  bool any = false;
+  for (long i = 0; i < (long)nx * ny * nz; ++i)
+    if (m.occ[i] && m.sem[i] == WALL) { wall[i] = 1; any = true; }
+  std::vector<VoxelDelta> out;
+  if (!any) return out;
+  int min_cells = std::max(4, (int)std::lround(min_area_m2_ / (vs * vs)));
+  int max_cells = (int)std::lround(max_area_m2_ / (vs * vs));
+  int max_ext = (int)std::lround(max_extent_m_ / vs);
+  int T = std::max(1, (int)std::ceil(thickness_m_ / vs - 1e-9));
+  std::set<long> added;                        // 前序补墙(wall 质 add)
+  for (const VoxelDelta& d : acc.voxels)
+    if (d.op == DeltaOp::ADD && d.sem == WALL) added.insert(m.id(d.idx[0], d.idx[1], d.idx[2]));
+
+  std::vector<long> xcount(nx, 0), zcount(nz, 0);
+  for (int x = 0; x < nx; ++x)
+    for (int y = 0; y < ny; ++y)
+      for (int z = 0; z < nz; ++z)
+        if (wall[m.id(x, y, z)]) { xcount[x]++; zcount[z]++; }
+  std::set<long> emitted;
+
+  auto carve = [&](bool axis_x, int c0) {
+    const int NV = ny, NH = axis_x ? nz : nx;
+    auto W3 = [&](int v, int h) { return axis_x ? wall[m.id(c0, v, h)] : wall[m.id(h, v, c0)]; };
+    auto F = [&](int v, int h) { return axis_x ? m.free[m.id(c0, v, h)] : m.free[m.id(h, v, c0)]; };
+    auto Occ = [&](int v, int h) { return axis_x ? m.occ[m.id(c0, v, h)] : m.occ[m.id(h, v, c0)]; };
+    auto ID3 = [&](int x, int y, int z) { return m.id(x, y, z); };
+    auto to_xyz = [&](int V, int H, int dc, int& x, int& y, int& z) {
+      if (axis_x) { x = c0 + dc; y = V; z = H; } else { x = H; y = V; z = c0 + dc; }
+    };
+    // wall2d sum + bbox
+    long wsum = 0; int v0 = NV, v1 = -1, h0 = NH, h1 = -1;
+    for (int v = 0; v < NV; ++v)
+      for (int h = 0; h < NH; ++h)
+        if (W3(v, h)) { wsum++; v0 = std::min(v0, v); v1 = std::max(v1, v); h0 = std::min(h0, h); h1 = std::max(h1, h); }
+    if (wsum < min_wall_cells_) return;
+    if ((v1 - v0 + 1) < min_height_ || (h1 - h0 + 1) < min_run_) return;
+    // solid2d = occ | added; inside = bbox
+    std::vector<uint8_t> solid2d((size_t)NV * NH, 0), region((size_t)NV * NH, 0);
+    for (int v = 0; v < NV; ++v)
+      for (int h = 0; h < NH; ++h) {
+        int x, y, z; to_xyz(v, h, 0, x, y, z);
+        bool sol = Occ(v, h) || added.count(ID3(x, y, z));
+        solid2d[(long)v * NH + h] = sol ? 1 : 0;
+        bool ins = (v >= v0 && v <= v1 && h >= h0 && h <= h1);
+        region[(long)v * NH + h] = (ins && F(v, h)) ? 1 : 0;   // free & inside
+      }
+    std::vector<int> lbl;
+    int n = label8_2d(region, NV, NH, lbl);
+    for (int cid = 1; cid <= n; ++cid) {
+      std::vector<uint8_t> comp((size_t)NV * NH, 0);
+      long csize = 0;
+      for (long i = 0; i < (long)NV * NH; ++i) if (lbl[i] == cid) { comp[i] = 1; ++csize; }
+      if (csize < min_cells || csize > max_cells) continue;
+      // bbox of comp
+      int cv0 = NV, cv1 = -1, ch0 = NH, ch1 = -1;
+      for (int v = 0; v < NV; ++v)
+        for (int h = 0; h < NH; ++h)
+          if (comp[(long)v * NH + h]) { cv0 = std::min(cv0, v); cv1 = std::max(cv1, v); ch0 = std::min(ch0, h); ch1 = std::max(ch1, h); }
+      int rv0 = cv0, rv1 = cv1, rh0 = ch0, rh1 = ch1;
+      robust_rect(comp, NH, trim_fill_, rv0, rv1, rh0, rh1);
+      if ((rv1 - rv0 + 1) > max_ext || (rh1 - rh0 + 1) > max_ext) continue;
+      // border = dilate8(comp) & ~comp; enclosure
+      long nb = 0, nsolid = 0;
+      for (int v = 0; v < NV; ++v)
+        for (int h = 0; h < NH; ++h) {
+          if (comp[(long)v * NH + h]) continue;
+          bool border = false;
+          for (int dv = -1; dv <= 1 && !border; ++dv)
+            for (int dh = -1; dh <= 1 && !border; ++dh) {
+              int nvv = v + dv, nhh = h + dh;
+              if (nvv < 0 || nvv >= NV || nhh < 0 || nhh >= NH) continue;
+              if (comp[(long)nvv * NH + nhh]) border = true;
+            }
+          if (border) { ++nb; if (solid2d[(long)v * NH + h]) ++nsolid; }
+        }
+      if (nb == 0 || (double)nsolid / (double)nb < enclosure_min_) continue;
+      // local + template
+      int LH = rv1 - rv0 + 1, LW = rh1 - rh0 + 1;
+      std::vector<uint8_t> local((size_t)LH * LW, 0);
+      for (int v = 0; v < LH; ++v)
+        for (int h = 0; h < LW; ++h) local[(long)v * LW + h] = comp[(long)(rv0 + v) * NH + (rh0 + h)];
+      std::vector<uint8_t> tmpl = fit_template(local, LH, LW);
+      for (int lv = 0; lv < LH; ++lv)
+        for (int lh = 0; lh < LW; ++lh) {
+          if (!tmpl[(long)lv * LW + lh]) continue;
+          int V = rv0 + lv, H = rh0 + lh;
+          for (int dc = -T; dc <= T; ++dc) {
+            int x, y, z; to_xyz(V, H, dc, x, y, z);
+            if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) continue;
+            long id3 = ID3(x, y, z);
+            if (emitted.count(id3)) continue;
+            if (wall[id3] || added.count(id3)) {
+              emitted.insert(id3);
+              VoxelDelta d;
+              d.idx[0] = x; d.idx[1] = y; d.idx[2] = z;
+              d.op = DeltaOp::REMOVE; d.sem = 0;
+              d.generator = "opening_carve"; d.binding = default_binding;
+              out.push_back(d);
+            }
+          }
+        }
+    }
+  };
+  for (int c0 : projection_peaks(xcount, min_wall_cells_)) carve(true, c0);
+  for (int c0 : projection_peaks(zcount, min_wall_cells_)) carve(false, c0);
   return out;
 }
 
